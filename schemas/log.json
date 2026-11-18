@@ -1,33 +1,348 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "memoctl/log",
+  "$id": "memoctl/log.json",
   "title": "memoctl log.jsonl record",
+  "description": "One record per add, delete, prune (one for the run, with counts) and refusal. Never contains a body, a label value or any note text. A field that does not apply is null (always present). context, list, show, search and validate write no record.",
   "type": "object",
   "properties": {
     "ts": {
-      "type": "string",
-      "format": "date-time"
+      "$ref": "defs.json#/$defs/timestamp_ms"
     },
-    "level": {
+    "tool": {
+      "$ref": "defs.json#/$defs/tool"
+    },
+    "version": {
       "type": "string",
-      "enum": [
-        "debug",
-        "info",
-        "warn",
-        "error"
-      ]
+      "maxLength": 64
     },
     "event": {
-      "type": "string"
+      "enum": [
+        "add",
+        "delete",
+        "prune",
+        "refused"
+      ]
     },
-    "message": {
-      "type": "string"
+    "outcome": {
+      "enum": [
+        "created",
+        "existing",
+        "deleted",
+        "pruned",
+        "refused"
+      ]
+    },
+    "exit": {
+      "enum": [
+        0,
+        20
+      ],
+      "description": "Only successful changes and refusals are logged."
+    },
+    "code": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/error_code"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reason": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/refusal_reason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "note_id": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/note_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "repo": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "topic": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/topic"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "kind": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/kind_name"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "size": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "body_sha256": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/sha256_16"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "created": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "add: whether a note was created (false for outcome existing); null otherwise."
+    },
+    "counts": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "expired": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "superseded": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "future": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reinstated": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "remaining": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "expired",
+            "superseded",
+            "future",
+            "reinstated",
+            "remaining"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "actor": {
+      "$ref": "defs.json#/$defs/actor"
+    },
+    "actor_source": {
+      "$ref": "defs.json#/$defs/actor_source"
     }
   },
   "required": [
     "ts",
-    "level",
-    "event"
+    "tool",
+    "version",
+    "event",
+    "outcome",
+    "exit",
+    "code",
+    "reason",
+    "note_id",
+    "repo",
+    "topic",
+    "kind",
+    "size",
+    "body_sha256",
+    "created",
+    "counts",
+    "actor",
+    "actor_source"
   ],
-  "additionalProperties": true
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "add"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "created",
+              "existing"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "delete"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "deleted"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "prune"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "pruned"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "refused"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "refused"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "refused"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "exit": {
+            "const": 20
+          },
+          "code": {
+            "const": "refused"
+          },
+          "reason": {
+            "$ref": "defs.json#/$defs/refusal_reason"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "exit": {
+            "const": 0
+          },
+          "code": {
+            "type": "null"
+          },
+          "reason": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "prune"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "properties": {
+          "counts": {
+            "type": "object"
+          },
+          "note_id": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "counts": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
 }

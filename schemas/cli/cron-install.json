@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "memoctl/cli/cron-install.json",
+  "title": "cron install output",
+  "description": "Printed with --json on exit 0. outcome: installed (no block before), replaced (a block was rewritten), unchanged (identical block), dry_run (nothing written). block is the block that is or would be installed.",
+  "type": "object",
+  "properties": {
+    "outcome": {
+      "enum": [
+        "installed",
+        "replaced",
+        "unchanged",
+        "dry_run"
+      ]
+    },
+    "block": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 4096
+      },
+      "minItems": 1,
+      "description": "The managed block as lines: `# memoctl managed`, PATH=..., the entry, `# memoctl managed end`."
+    }
+  },
+  "required": [
+    "outcome",
+    "block"
+  ],
+  "additionalProperties": false
+}

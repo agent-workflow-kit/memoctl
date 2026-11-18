@@ -1,3 +1,37 @@
-# Example config for memoctl. Location: ~/.config/memoctl/config.yaml (drop-ins: config.d/*.yaml).
-# Keys are defined in docs/interface.md once designed.
-hooks: {}
+# Example config for memoctl.
+# Location: .config/memoctl/config.yaml under your home directory (from the password database;
+# HOME and XDG_* are not read, and there is no --config). Drop-ins: config.d/*.yaml beside it.
+# Every key is documented in docs/interface.md (Config). Values shown are the defaults.
+
+# Name of the environment variable that holds the claimed author kind of a note.
+kind_env: CSESSION_KIND
+
+# Names of environment variables whose current values `add` refuses to store (at most 32).
+mask_env: []
+
+retention:
+  max_age: 30d            # default lifetime of a note and the cap on --expires
+  superseded_grace: 7d    # how long a superseded note stays before prune deletes it
+
+limits:
+  max_body_bytes: 8192    # 256 to 65536
+  max_labels: 8
+  live_per_repo: 200
+  total: 5000
+  adds_per_window: 20
+  window: 10m
+
+context:
+  # Allow list: only notes whose claimed author kind is listed reach `context`.
+  # `unknown` and user-defined kinds are excluded until you add them.
+  author_kinds: [implement, draft-ticket, audit, improve]
+  max_chars: 8000         # UTF-16 code units, whole notes only
+  max_bytes: 15000
+  max_notes: 20
+  max_per_topic: 2
+  max_kind_share: 0.5
+  note_max_chars: 2000
+  deadline: 2s
+
+# Per-repo overrides of retention, limits and context, keyed by repo id (host/path).
+repos: {}

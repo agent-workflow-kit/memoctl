@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "memoctl/cli/list.json",
+  "title": "list output",
+  "description": "Printed with --json on exit 0. Newest first by id, no body. total is the number of matching notes before --limit (assumption, see GAPS); shown is the length of notes.",
+  "type": "object",
+  "properties": {
+    "notes": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "../defs.json#/$defs/note_id"
+          },
+          "repo": {
+            "$ref": "../defs.json#/$defs/repo_id"
+          },
+          "topic": {
+            "$ref": "../defs.json#/$defs/topic",
+            "x-untrusted": true
+          },
+          "kind": {
+            "$ref": "../defs.json#/$defs/kind_name"
+          },
+          "labels": {
+            "$ref": "../defs.json#/$defs/labels",
+            "x-untrusted": true
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65536
+          },
+          "created": {
+            "$ref": "../defs.json#/$defs/timestamp"
+          },
+          "expires": {
+            "$ref": "../defs.json#/$defs/timestamp"
+          },
+          "status": {
+            "$ref": "../defs.json#/$defs/status"
+          },
+          "superseded_by": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/note_id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "repo",
+          "topic",
+          "kind",
+          "labels",
+          "size",
+          "created",
+          "expires",
+          "status",
+          "superseded_by"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "shown": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 500
+    }
+  },
+  "required": [
+    "notes",
+    "total",
+    "shown"
+  ],
+  "additionalProperties": false
+}

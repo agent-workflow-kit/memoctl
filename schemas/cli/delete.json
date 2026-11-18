@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "memoctl/cli/delete.json",
+  "title": "delete output",
+  "description": "Printed with --json on exit 0. Exit 13 (needs a human) and 10 (unknown id) print the error envelope.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "../defs.json#/$defs/note_id"
+    },
+    "deleted": {
+      "const": true
+    },
+    "reinstated": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/note_id"
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "id",
+    "deleted",
+    "reinstated"
+  ],
+  "additionalProperties": false
+}

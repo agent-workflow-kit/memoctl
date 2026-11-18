@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "memoctl/cli/add.json",
+  "title": "add output",
+  "description": "Printed with --json on exit 0 (created, existing or dry run). id is null in a dry run; created is false when an identical live note already existed (the output is that note). Errors print the error envelope.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/note_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "created": {
+      "type": "boolean"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "topic": {
+      "$ref": "../defs.json#/$defs/topic",
+      "x-untrusted": true
+    },
+    "kind": {
+      "$ref": "../defs.json#/$defs/kind_name"
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels",
+      "x-untrusted": true
+    },
+    "expires": {
+      "$ref": "../defs.json#/$defs/timestamp"
+    },
+    "supersedes": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/note_id"
+      },
+      "uniqueItems": true
+    },
+    "size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65536
+    },
+    "body_sha256": {
+      "$ref": "../defs.json#/$defs/sha256_64"
+    },
+    "warnings": {
+      "$ref": "../defs.json#/$defs/warnings"
+    }
+  },
+  "required": [
+    "id",
+    "created",
+    "repo",
+    "topic",
+    "kind",
+    "labels",
+    "expires",
+    "supersedes",
+    "size",
+    "body_sha256",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

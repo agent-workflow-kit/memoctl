@@ -31,10 +31,13 @@ fully standalone (no harness, bus, shared library or shared contracts package).
 
 ## Workflow
 
-1. Start with a design session that resolves the open topics in `docs/design.md` and records
-   the decisions there.
-2. Write `docs/interface.md` and `schemas/`.
-3. Implement test-first.
+1. The design is done: `docs/interface.md` is the single normative source, `docs/design.md`
+   records the decisions and the open live checks, and `docs/plan.md` is the staged plan. Read
+   them before changing anything; a change to a rule starts in `docs/interface.md` and
+   `schemas/`.
+2. Implement the plan's stages test-first, one GitHub issue at a time (each issue links the
+   interface headings it implements).
+3. Keep `config.example.yaml`, the schemas and the golden files in step with the interface.
 
 ## Repository workflow
 

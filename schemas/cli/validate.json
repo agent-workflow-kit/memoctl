@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "memoctl/cli/validate.json",
+  "title": "validate output",
+  "description": "Printed with --json. Checks run in order config, state_dir, database, schema, limits; a failed check ends the run and later checks are omitted. Exit 0 when ok, else the exit code of the first failing check (config 2; others 12; unsafe_state 20).",
+  "type": "object",
+  "properties": {
+    "ok": {
+      "type": "boolean"
+    },
+    "checks": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "enum": [
+              "config",
+              "state_dir",
+              "database",
+              "schema",
+              "limits"
+            ]
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "A fixed string of the tool."
+          }
+        },
+        "required": [
+          "name",
+          "ok",
+          "message"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "unsafe_filesystem"
+        ]
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "ok",
+    "checks",
+    "warnings"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "then": {
+        "properties": {
+          "checks": {
+            "items": {
+              "properties": {
+                "ok": {
+                  "const": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

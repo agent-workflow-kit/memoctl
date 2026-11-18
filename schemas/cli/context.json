@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "memoctl/cli/context.json",
+  "title": "context output",
+  "description": "Printed with --json on exit 0 instead of the block. text is exactly what the plain form prints. On exit 10 (nothing to show) the error envelope is printed (assumption, see GAPS).",
+  "type": "object",
+  "properties": {
+    "text": {
+      "$ref": "../defs.json#/$defs/untrusted_text",
+      "maxLength": 65536
+    },
+    "note_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/note_id"
+      },
+      "uniqueItems": true,
+      "maxItems": 100
+    },
+    "shown": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "eligible": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "omitted": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "chars": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9000,
+      "description": "UTF-16 code units of text."
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65536,
+      "description": "UTF-8 bytes of text."
+    },
+    "fenced": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "text",
+    "note_ids",
+    "shown",
+    "eligible",
+    "omitted",
+    "chars",
+    "bytes",
+    "fenced"
+  ],
+  "additionalProperties": false
+}
