@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/cli/add.json",
   "title": "add output",
-  "description": "Printed with --json on exit 0 (created, existing or dry run). id is null only when dry_run is true and no note exists to return. created is false when a retry already landed (the output is the stored note). Errors print the error envelope.",
+  "description": "Printed with --json on exit 0 (created, existing or dry run). id is null exactly when dry_run is true: a dry run runs only the checks that need no state (dedupe, the supersede checks and the limits are not run), so created is true, supersedes is the requested target unchecked and expires is the call's own lifetime (never expires_extended). created is false when a retry already landed (the output is the stored live note; this call's --expires is not applied). Errors print the error envelope.",
   "type": "object",
   "properties": {
     "id": {
@@ -22,14 +22,16 @@
       "type": "boolean"
     },
     "repo": {
-      "$ref": "../defs.json#/$defs/repo_id"
+      "$ref": "../defs.json#/$defs/repo_id",
+      "x-untrusted": true
     },
     "topic": {
       "$ref": "../defs.json#/$defs/topic",
       "x-untrusted": true
     },
     "kind": {
-      "$ref": "../defs.json#/$defs/kind_name"
+      "$ref": "../defs.json#/$defs/kind_name",
+      "x-untrusted": true
     },
     "labels": {
       "$ref": "../defs.json#/$defs/labels",
@@ -94,6 +96,36 @@
           },
           "created": {
             "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dry_run": {
+            "const": true
+          }
+        },
+        "required": [
+          "dry_run"
+        ]
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "null"
+          },
+          "created": {
+            "const": true
+          },
+          "warnings": {
+            "items": {
+              "enum": [
+                "expires_capped",
+                "kind_not_shown"
+              ]
+            }
           }
         }
       }

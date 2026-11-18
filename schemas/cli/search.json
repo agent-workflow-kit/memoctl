@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/cli/search.json",
   "title": "search output",
-  "description": "Printed with --json on exit 0. Newest first by id, no body. total is the number of matching notes after the status filter and before --limit; shown is the length of notes; hidden is the number of superseded or expired notes left out (0 with --all).",
+  "description": "Printed with --json on exit 0. Newest first by id, no body. total is the number of matching notes after the status filter and before --limit; shown is the length of notes; hidden is the number of notes that match every other filter (repo, topic, kind, label; for search also the text) and are superseded or expired, 0 with --all, so total + hidden is total with --all.",
   "type": "object",
   "properties": {
     "notes": {

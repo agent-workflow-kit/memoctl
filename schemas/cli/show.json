@@ -9,14 +9,16 @@
       "$ref": "../defs.json#/$defs/note_id"
     },
     "repo": {
-      "$ref": "../defs.json#/$defs/repo_id"
+      "$ref": "../defs.json#/$defs/repo_id",
+      "x-untrusted": true
     },
     "topic": {
       "$ref": "../defs.json#/$defs/topic",
       "x-untrusted": true
     },
     "kind": {
-      "$ref": "../defs.json#/$defs/kind_name"
+      "$ref": "../defs.json#/$defs/kind_name",
+      "x-untrusted": true
     },
     "labels": {
       "$ref": "../defs.json#/$defs/labels",

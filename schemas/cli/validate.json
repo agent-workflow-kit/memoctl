@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/cli/validate.json",
   "title": "validate output",
-  "description": "Printed with --json, on success and failure (the only stdout). Checks run in order config, state_dir, database, schema; a failed check ends the run and later checks are omitted. Exit 0 when ok, else 2 (config_invalid), 20 (unsafe_state) or 12 (the others).",
+  "description": "Printed with --json, on success and failure (the only stdout). Checks run in order config, state_dir, database, schema; a failed check ends the run and later checks are omitted. Exit 0 when ok, else 2 (config_invalid), 20 (unsafe_state) or 12 (the others). A deadline (exit 12 timeout) and argv usage errors print the error envelope instead.",
   "type": "object",
   "properties": {
     "ok": {

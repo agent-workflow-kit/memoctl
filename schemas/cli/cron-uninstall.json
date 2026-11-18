@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/cli/cron-uninstall.json",
   "title": "cron uninstall output",
-  "description": "Printed with --json on exit 0. outcome is what the real run does or did (removed, unchanged); dry_run is true when nothing was written. block is the three lines removed; empty for unchanged.",
+  "description": "Printed with --json on exit 0. outcome is what the real run does or did (removed, unchanged); dry_run is true when nothing was written. block is the block removed, as found (its middle line may be hand-edited); [] for unchanged.",
   "type": "object",
   "properties": {
     "outcome": {
@@ -26,7 +26,7 @@
             },
             {
               "type": "string",
-              "pattern": "^17 3 \\* \\* \\* PATH=/[A-Za-z0-9._/@+-]*/\\.local/bin:/usr/local/bin:/usr/bin:/bin memoctl prune --quiet --actor auto:memoctl-cron(?![\\s\\S])"
+              "maxLength": 4096
             },
             {
               "const": "# memoctl managed end"

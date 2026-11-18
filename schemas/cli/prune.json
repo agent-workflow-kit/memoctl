@@ -2,20 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/cli/prune.json",
   "title": "prune output",
-  "description": "Printed with --json on exit 0: counts (also for --dry-run, which changes nothing; remaining is the number of notes after the run), or {outcome: already_running} when another prune holds the write lock.",
+  "description": "Printed with --json on exit 0: counts (expired is the number of notes deleted; remaining is the number of notes after the run; also for --dry-run, which changes nothing), or {outcome: busy} when the write lock was not obtained within the busy timeout (any writer may hold it; never with --dry-run).",
   "oneOf": [
     {
       "type": "object",
       "properties": {
         "expired": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "future": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "reinstated": {
           "type": "integer",
           "minimum": 0
         },
@@ -29,8 +21,6 @@
       },
       "required": [
         "expired",
-        "future",
-        "reinstated",
         "remaining",
         "dry_run"
       ],
@@ -40,7 +30,7 @@
       "type": "object",
       "properties": {
         "outcome": {
-          "const": "already_running"
+          "const": "busy"
         }
       },
       "required": [

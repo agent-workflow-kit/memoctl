@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/cli/delete.json",
   "title": "delete output",
-  "description": "Printed with --json on exit 0. Exit 13 (needs a human) and 10 (unknown id) print the error envelope.",
+  "description": "Printed with --json on exit 0. Exit 13 (needs a human) and 10 (unknown id, with details.id the smallest unknown id) print the error envelope. Both arrays are ascending by id (not expressible in JSON Schema).",
   "type": "object",
   "properties": {
     "deleted": {
@@ -19,7 +19,8 @@
       "items": {
         "$ref": "../defs.json#/$defs/note_id"
       },
-      "uniqueItems": true
+      "uniqueItems": true,
+      "description": "Notes whose superseded_by was cleared, ascending by id; one may already be expired (show gives its status)."
     }
   },
   "required": [

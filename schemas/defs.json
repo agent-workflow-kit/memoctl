@@ -24,9 +24,9 @@
       "items": {
         "$ref": "#/$defs/label"
       },
-      "maxItems": 32,
+      "maxItems": 8,
       "uniqueItems": true,
-      "description": "A set, sorted by key then value in output. At most 8 per note by default (config limits.max_labels, up to 32)."
+      "description": "A set, sorted by key then value in output. At most 8 per note (config limits.max_labels, 0 to 8)."
     },
     "kind_name": {
       "type": "string",
@@ -53,8 +53,8 @@
     },
     "duration": {
       "type": "string",
-      "pattern": "^[0-9]+(\\.[0-9]+)?(s|m|h|d)?(?![\\s\\S])",
-      "description": "No unit means seconds."
+      "pattern": "^[0-9]{1,10}(\\.[0-9]{1,9})?(s|m|h|d)?(?![\\s\\S])",
+      "description": "No unit means seconds. At most 10 integer digits and 9 fraction digits; converted with integer arithmetic and rounded up to whole seconds."
     },
     "timestamp": {
       "type": "string",
@@ -166,12 +166,10 @@
       "enum": [
         "encoding",
         "control",
-        "separator",
-        "format",
+        "invisible",
         "private_use",
         "unassigned",
-        "surrogate",
-        "default_ignorable"
+        "combining"
       ],
       "description": "Classes of refused text (exit 2)."
     },
@@ -181,7 +179,11 @@
         "field": {
           "type": "string",
           "maxLength": 4096,
-          "description": "usage: a field name matching [a-z_]{1,32} (`argv` for a parse error with no single field, `text` for search text); secret_detected: topic, label, kind or body; config_invalid: a dotted key, `home` or a file path."
+          "description": "usage: a field name matching [a-z_]{1,32} (`argv` for a parse error with no single field, `text` for search text); secret_detected: repo, topic, label, kind or body; config_invalid: a dotted key, `home` or a file path."
+        },
+        "id": {
+          "$ref": "#/$defs/note_id",
+          "description": "not_found: the unknown note id (for delete, the smallest)."
         },
         "line": {
           "type": "integer",
@@ -234,14 +236,16 @@
           "$ref": "#/$defs/note_id"
         },
         "repo": {
-          "$ref": "#/$defs/repo_id"
+          "$ref": "#/$defs/repo_id",
+          "x-untrusted": true
         },
         "topic": {
           "$ref": "#/$defs/topic",
           "x-untrusted": true
         },
         "kind": {
-          "$ref": "#/$defs/kind_name"
+          "$ref": "#/$defs/kind_name",
+          "x-untrusted": true
         },
         "labels": {
           "$ref": "#/$defs/labels",
@@ -441,7 +445,6 @@
               "code": {
                 "enum": [
                   "internal",
-                  "not_found",
                   "needs_human"
                 ]
               }
@@ -454,6 +457,30 @@
             "properties": {
               "details": {
                 "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "not_found"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "id"
+                ]
               }
             }
           }
@@ -540,6 +567,7 @@
                   },
                   "field": {
                     "enum": [
+                      "repo",
                       "topic",
                       "label",
                       "kind",
