@@ -20,7 +20,7 @@ fully standalone (no harness, bus, shared library or shared contracts package).
 - Never import sibling repos. Read their docs and schemas by path only; copying a sibling's
   schema files into `tests/` pinned to a version is allowed.
 - No upward awareness: this tool never knows about, or behaves differently for, the tools that
-  call it.
+  call it. Defaults such as `kind_env: CSESSION_KIND` and the default allow list are configuration, not behavior.
 - Interface first: write `docs/interface.md` and `schemas/` before implementation.
 - Semver. A breaking interface change is, before 1.0, a `feat` commit whose title names the break (never `!` before 1.0), and from 1.0 on a `!` commit; the title becomes the changelog line (details go in the PR body). Either way, update `awkit-docs/interface-registry.md`. Never hand-edit CHANGELOG.md or the version.
 - Run `make verify` before every commit.

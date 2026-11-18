@@ -5,11 +5,14 @@
   "description": "Printed with --json on exit 0. Exit 13 (needs a human) and 10 (unknown id) print the error envelope.",
   "type": "object",
   "properties": {
-    "id": {
-      "$ref": "../defs.json#/$defs/note_id"
-    },
     "deleted": {
-      "const": true
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/note_id"
+      },
+      "uniqueItems": true,
+      "minItems": 1,
+      "maxItems": 500
     },
     "reinstated": {
       "type": "array",
@@ -20,7 +23,6 @@
     }
   },
   "required": [
-    "id",
     "deleted",
     "reinstated"
   ],

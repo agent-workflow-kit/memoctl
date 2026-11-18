@@ -2,16 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/cli/prune.json",
   "title": "prune output",
-  "description": "Printed with --json on exit 0: counts (also for --dry-run, which changes nothing), or {outcome: already_running} when another prune holds the write lock.",
+  "description": "Printed with --json on exit 0: counts (also for --dry-run, which changes nothing; remaining is the number of notes after the run), or {outcome: already_running} when another prune holds the write lock.",
   "oneOf": [
     {
       "type": "object",
       "properties": {
         "expired": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "superseded": {
           "type": "integer",
           "minimum": 0
         },
@@ -26,14 +22,17 @@
         "remaining": {
           "type": "integer",
           "minimum": 0
+        },
+        "dry_run": {
+          "type": "boolean"
         }
       },
       "required": [
         "expired",
-        "superseded",
         "future",
         "reinstated",
-        "remaining"
+        "remaining",
+        "dry_run"
       ],
       "additionalProperties": false
     },

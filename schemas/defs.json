@@ -6,9 +6,8 @@
   "$defs": {
     "repo_id": {
       "type": "string",
-      "maxLength": 255,
-      "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[1-9][0-9]{0,4})?(/(?!\\.\\.?(/|(?![\\s\\S])))[A-Za-z0-9._-]+)+(?![\\s\\S])",
-      "description": "Lowercase host, optional port, one or more path segments (none `.` or `..`). Port 1 to 65535 is checked by the tool (the pattern allows 1 to 99999 digits-wise)."
+      "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?(/(?!\\.\\.?(/|(?![\\s\\S])))[A-Za-z0-9._-]+)+(?![\\s\\S])",
+      "description": "Lowercase host, optional port (1 to 5 digits), one or more path segments (none `.` or `..`). `add` also refuses a repo id longer than 255 characters; that cap is checked by the tool, not by this schema."
     },
     "topic": {
       "type": "string",
@@ -38,7 +37,7 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 999999999999999999,
-      "description": "AUTOINCREMENT id; the grammar is [1-9][0-9]{0,17}."
+      "description": "AUTOINCREMENT id; the grammar is [1-9][0-9]{0,17}. Ids above 2^53 are unreachable in practice."
     },
     "actor": {
       "type": "string",
@@ -54,7 +53,7 @@
     },
     "duration": {
       "type": "string",
-      "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h|d)?(?![\\s\\S])",
+      "pattern": "^[0-9]+(\\.[0-9]+)?(s|m|h|d)?(?![\\s\\S])",
       "description": "No unit means seconds."
     },
     "timestamp": {
@@ -94,29 +93,18 @@
       "minLength": 1,
       "maxLength": 65536,
       "x-untrusted": true,
-      "description": "Untrusted. 1 to 8192 UTF-8 bytes by default (hard ceiling 65536 bytes)."
+      "description": "Untrusted. 1 byte to limits.max_body_bytes (default 8192, at most 65536) UTF-8 bytes."
     },
     "tool": {
       "const": "memoctl"
-    },
-    "exit_code": {
-      "enum": [
-        0,
-        1,
-        2,
-        10,
-        12,
-        13,
-        20
-      ],
-      "description": "11, 21 and 22 are never used."
     },
     "warnings": {
       "type": "array",
       "items": {
         "enum": [
           "expires_capped",
-          "kind_unknown"
+          "expires_extended",
+          "kind_not_shown"
         ]
       },
       "uniqueItems": true,
@@ -166,8 +154,26 @@
         "aws_key_id",
         "npm_token",
         "anthropic_key",
+        "google_api_key",
+        "stripe_key",
+        "openai_key",
+        "jwt",
+        "slack_webhook",
         "mask_env"
       ]
+    },
+    "text_class": {
+      "enum": [
+        "encoding",
+        "control",
+        "separator",
+        "format",
+        "private_use",
+        "unassigned",
+        "surrogate",
+        "default_ignorable"
+      ],
+      "description": "Classes of refused text (exit 2)."
     },
     "error_details": {
       "type": "object",
@@ -175,28 +181,109 @@
         "field": {
           "type": "string",
           "maxLength": 4096,
-          "description": "A field name (usage: [a-z_-]{1,32}); for config_invalid a key, `home` or a path."
+          "description": "usage: a field name matching [a-z_]{1,32} (`argv` for a parse error with no single field, `text` for search text); secret_detected: topic, label, kind or body; config_invalid: a dotted key, `home` or a file path."
         },
         "line": {
           "type": "integer",
           "minimum": 1,
-          "description": "Line of refused text."
+          "description": "1-based line (counted by LF) of refused text."
         },
         "class": {
-          "type": "string",
-          "pattern": "^[a-z0-9_]{1,32}(?![\\s\\S])",
-          "description": "Class of refused text, or the secret class on secret_detected."
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text_class"
+            },
+            {
+              "$ref": "#/$defs/secret_class"
+            }
+          ],
+          "description": "Class of refused text (usage), or the secret class (secret_detected)."
         },
         "limit": {
           "type": "integer",
           "minimum": 0,
-          "description": "The limit that was hit (repo_full, store_full)."
+          "description": "The limit that was hit (body over limit, label count, repo_full, store_full, rate_limited)."
         },
         "retry_after_s": {
-          "type": "number",
-          "minimum": 0
+          "type": "integer",
+          "minimum": 1
+        },
+        "scope": {
+          "enum": [
+            "repo",
+            "store"
+          ]
+        },
+        "found": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "schema_newer: the version found."
+        },
+        "supported": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "schema_newer: the version this tool supports."
         }
       },
+      "additionalProperties": false
+    },
+    "note_summary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/note_id"
+        },
+        "repo": {
+          "$ref": "#/$defs/repo_id"
+        },
+        "topic": {
+          "$ref": "#/$defs/topic",
+          "x-untrusted": true
+        },
+        "kind": {
+          "$ref": "#/$defs/kind_name"
+        },
+        "labels": {
+          "$ref": "#/$defs/labels",
+          "x-untrusted": true
+        },
+        "created": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "expires": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "superseded_by": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/note_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        }
+      },
+      "required": [
+        "id",
+        "repo",
+        "topic",
+        "kind",
+        "labels",
+        "created",
+        "expires",
+        "status",
+        "superseded_by",
+        "size"
+      ],
       "additionalProperties": false
     },
     "error": {
@@ -238,16 +325,16 @@
           ]
         },
         "retryable": {
-          "type": [
-            "boolean",
-            "null"
-          ],
-          "description": "True when the same call may succeed later (db_locked, timeout); false otherwise; null when it does not apply."
+          "type": "boolean",
+          "description": "True for db_locked, timeout and rate_limited; false for every other code and reason."
         }
       },
       "required": [
         "code",
-        "message"
+        "message",
+        "reason",
+        "details",
+        "retryable"
       ],
       "additionalProperties": false,
       "allOf": [
@@ -265,9 +352,6 @@
             ]
           },
           "then": {
-            "required": [
-              "reason"
-            ],
             "properties": {
               "reason": {
                 "$ref": "#/$defs/refusal_reason"
@@ -289,9 +373,6 @@
             ]
           },
           "then": {
-            "required": [
-              "reason"
-            ],
             "properties": {
               "reason": {
                 "$ref": "#/$defs/failure_reason"
@@ -330,7 +411,8 @@
               "reason": {
                 "enum": [
                   "db_locked",
-                  "timeout"
+                  "timeout",
+                  "rate_limited"
                 ]
               }
             },
@@ -344,44 +426,63 @@
                 "const": true
               }
             }
+          },
+          "else": {
+            "properties": {
+              "retryable": {
+                "const": false
+              }
+            }
           }
         },
         {
           "if": {
-            "allOf": [
-              {
-                "properties": {
-                  "code": {
-                    "enum": [
-                      "failed"
-                    ]
-                  }
-                },
-                "required": [
-                  "code"
+            "properties": {
+              "code": {
+                "enum": [
+                  "internal",
+                  "not_found",
+                  "needs_human"
                 ]
-              },
-              {
-                "not": {
-                  "properties": {
-                    "reason": {
-                      "enum": [
-                        "db_locked",
-                        "timeout"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "reason"
-                  ]
-                }
               }
+            },
+            "required": [
+              "code"
             ]
           },
           "then": {
             "properties": {
-              "retryable": {
-                "const": false
+              "details": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "db_unreadable",
+                  "db_locked",
+                  "db_corrupt",
+                  "timeout",
+                  "crontab_failed",
+                  "supersede_mismatch",
+                  "already_superseded",
+                  "unsafe_state",
+                  "cron_block_malformed"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "null"
               }
             }
           }
@@ -400,20 +501,14 @@
             ]
           },
           "then": {
-            "required": [
-              "details"
-            ],
             "properties": {
               "details": {
                 "type": "object",
                 "required": [
-                  "retry_after_s"
-                ],
-                "properties": {
-                  "retry_after_s": {
-                    "type": "number"
-                  }
-                }
+                  "retry_after_s",
+                  "limit",
+                  "scope"
+                ]
               }
             }
           }
@@ -432,18 +527,24 @@
             ]
           },
           "then": {
-            "required": [
-              "details"
-            ],
             "properties": {
               "details": {
                 "type": "object",
                 "required": [
-                  "class"
+                  "class",
+                  "field"
                 ],
                 "properties": {
                   "class": {
                     "$ref": "#/$defs/secret_class"
+                  },
+                  "field": {
+                    "enum": [
+                      "topic",
+                      "label",
+                      "kind",
+                      "body"
+                    ]
                   }
                 }
               }
@@ -465,20 +566,37 @@
             ]
           },
           "then": {
-            "required": [
-              "details"
-            ],
             "properties": {
               "details": {
                 "type": "object",
                 "required": [
                   "limit"
-                ],
-                "properties": {
-                  "limit": {
-                    "type": "integer"
-                  }
-                }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "schema_newer"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "found",
+                  "supported"
+                ]
               }
             }
           }
@@ -497,9 +615,6 @@
             ]
           },
           "then": {
-            "required": [
-              "details"
-            ],
             "properties": {
               "details": {
                 "type": "object",
@@ -508,7 +623,7 @@
                 ],
                 "properties": {
                   "field": {
-                    "pattern": "^[a-z_-]{1,32}(?![\\s\\S])"
+                    "pattern": "^[a-z_]{1,32}(?![\\s\\S])"
                   }
                 }
               }
@@ -529,9 +644,6 @@
             ]
           },
           "then": {
-            "required": [
-              "details"
-            ],
             "properties": {
               "details": {
                 "type": "object",

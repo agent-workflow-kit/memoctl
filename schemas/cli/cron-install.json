@@ -2,29 +2,41 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/cli/cron-install.json",
   "title": "cron install output",
-  "description": "Printed with --json on exit 0. outcome: installed (no block before), replaced (a block was rewritten), unchanged (identical block), dry_run (nothing written). block is the block that is or would be installed.",
+  "description": "Printed with --json on exit 0. outcome is what the real run does or did (installed, replaced, unchanged); dry_run is true when nothing was written. block is the three lines installed, replaced or kept.",
   "type": "object",
   "properties": {
     "outcome": {
       "enum": [
         "installed",
         "replaced",
-        "unchanged",
-        "dry_run"
+        "unchanged"
       ]
+    },
+    "dry_run": {
+      "type": "boolean"
     },
     "block": {
       "type": "array",
-      "items": {
-        "type": "string",
-        "maxLength": 4096
-      },
-      "minItems": 1,
-      "description": "The managed block as lines: `# memoctl managed`, PATH=..., the entry, `# memoctl managed end`."
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        {
+          "const": "# memoctl managed"
+        },
+        {
+          "type": "string",
+          "pattern": "^17 3 \\* \\* \\* PATH=/[A-Za-z0-9._/@+-]*/\\.local/bin:/usr/local/bin:/usr/bin:/bin memoctl prune --quiet --actor auto:memoctl-cron(?![\\s\\S])"
+        },
+        {
+          "const": "# memoctl managed end"
+        }
+      ],
+      "items": false
     }
   },
   "required": [
     "outcome",
+    "dry_run",
     "block"
   ],
   "additionalProperties": false

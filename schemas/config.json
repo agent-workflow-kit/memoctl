@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/config.json",
   "title": "memoctl config",
-  "description": "Merged config after config.yaml and config.d/*.yaml. Self-contained (no external $ref). There are no environment overrides. Every key is optional: a missing key takes its default. Range checks of duration strings and cross-key checks (live_per_repo at most total) are made by the tool.",
+  "description": "Merged config after config.yaml and config.d/*.yaml. Self-contained (no external $ref). There are no environment overrides. Every key is optional: a missing key takes its default. Range checks of duration strings and cross-key checks (live_per_repo at most total, adds_per_window at most adds_per_window_total, for the global config and each repo's effective config) are made by the tool.",
   "type": "object",
   "properties": {
     "kind_env": {
@@ -35,13 +35,12 @@
       "default": {},
       "propertyNames": {
         "type": "string",
-        "maxLength": 255,
-        "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[1-9][0-9]{0,4})?(/(?!\\.\\.?(/|(?![\\s\\S])))[A-Za-z0-9._-]+)+(?![\\s\\S])"
+        "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?(/(?!\\.\\.?(/|(?![\\s\\S])))[A-Za-z0-9._-]+)+(?![\\s\\S])"
       },
       "additionalProperties": {
         "$ref": "#/$defs/repo_override"
       },
-      "description": "Per-repo overrides keyed by repo id."
+      "description": "Per-repo overrides keyed by exact repo id (no patterns)."
     }
   },
   "additionalProperties": false,
@@ -58,26 +57,11 @@
             },
             {
               "type": "string",
-              "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h|d)?(?![\\s\\S])"
+              "pattern": "^[0-9]+(\\.[0-9]+)?(s|m|h|d)?(?![\\s\\S])"
             }
           ],
           "default": "30d",
           "description": "Default lifetime of a note and the cap on --expires; 1 hour to 365 days. A number of seconds or a duration string; the range of a string is checked by the tool."
-        },
-        "superseded_grace": {
-          "anyOf": [
-            {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 31536000
-            },
-            {
-              "type": "string",
-              "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h|d)?(?![\\s\\S])"
-            }
-          ],
-          "default": "7d",
-          "description": "How long a superseded note stays before prune deletes it; 0 to 365 days. A number of seconds or a duration string; the range of a string is checked by the tool."
         }
       },
       "additionalProperties": false
@@ -90,7 +74,7 @@
           "minimum": 256,
           "maximum": 65536,
           "default": 8192,
-          "description": "Body limit in bytes."
+          "description": "Body limit in bytes (also after NFKC)."
         },
         "max_labels": {
           "type": "integer",
@@ -120,6 +104,13 @@
           "default": 20,
           "description": "Adds per repo per window."
         },
+        "adds_per_window_total": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000,
+          "default": 60,
+          "description": "Adds in the whole store per window; at least adds_per_window."
+        },
         "window": {
           "anyOf": [
             {
@@ -129,7 +120,7 @@
             },
             {
               "type": "string",
-              "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h|d)?(?![\\s\\S])"
+              "pattern": "^[0-9]+(\\.[0-9]+)?(s|m|h|d)?(?![\\s\\S])"
             }
           ],
           "default": "10m",
@@ -147,13 +138,15 @@
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(?![\\s\\S])"
           },
+          "uniqueItems": true,
+          "maxItems": 64,
           "default": [
             "implement",
             "draft-ticket",
             "audit",
             "improve"
           ],
-          "description": "Allow list of author kinds whose notes context may show."
+          "description": "Allow list of author kinds whose notes context may show. Listing `unknown` admits notes with no valid claimed kind; an empty list shows nothing."
         },
         "max_chars": {
           "type": "integer",
@@ -188,7 +181,7 @@
           "minimum": 0.1,
           "maximum": 1,
           "default": 0.5,
-          "description": "Share of max_chars one kind may take in the first pass."
+          "description": "Share of max_chars and of max_notes one kind may take in the first pass."
         },
         "note_max_chars": {
           "type": "integer",
@@ -206,27 +199,146 @@
             },
             {
               "type": "string",
-              "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h|d)?(?![\\s\\S])"
+              "pattern": "^[0-9]+(\\.[0-9]+)?(s|m|h|d)?(?![\\s\\S])"
             }
           ],
           "default": "2s",
-          "description": "The context deadline; 1s to 10s. A number of seconds or a duration string; the range of a string is checked by the tool."
+          "description": "The context deadline; 1s to 10s. Global only. A number of seconds or a duration string; the range of a string is checked by the tool."
         }
       },
       "additionalProperties": false
     },
     "repo_override": {
       "type": "object",
-      "description": "Per-repo overrides: only retention, limits and context.",
+      "description": "Per-repo overrides: only retention.max_age; limits.max_body_bytes, max_labels, live_per_repo, adds_per_window; context.author_kinds, max_chars, max_bytes, max_notes, max_per_topic, max_kind_share, note_max_chars.",
       "properties": {
         "retention": {
-          "$ref": "#/$defs/retention"
+          "$ref": "#/$defs/override_retention"
         },
         "limits": {
-          "$ref": "#/$defs/limits"
+          "$ref": "#/$defs/override_limits"
         },
         "context": {
-          "$ref": "#/$defs/context"
+          "$ref": "#/$defs/override_context"
+        }
+      },
+      "additionalProperties": false
+    },
+    "override_retention": {
+      "type": "object",
+      "properties": {
+        "max_age": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 3600,
+              "maximum": 31536000
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?(s|m|h|d)?(?![\\s\\S])"
+            }
+          ],
+          "default": "30d",
+          "description": "Default lifetime of a note and the cap on --expires; 1 hour to 365 days. A number of seconds or a duration string; the range of a string is checked by the tool."
+        }
+      },
+      "additionalProperties": false
+    },
+    "override_limits": {
+      "type": "object",
+      "properties": {
+        "max_body_bytes": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 65536,
+          "default": 8192,
+          "description": "Body limit in bytes (also after NFKC)."
+        },
+        "max_labels": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32,
+          "default": 8,
+          "description": "Labels per note."
+        },
+        "live_per_repo": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000,
+          "default": 200,
+          "description": "Live notes per repo."
+        },
+        "adds_per_window": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "default": 20,
+          "description": "Adds per repo per window."
+        }
+      },
+      "additionalProperties": false
+    },
+    "override_context": {
+      "type": "object",
+      "properties": {
+        "author_kinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(?![\\s\\S])"
+          },
+          "uniqueItems": true,
+          "maxItems": 64,
+          "default": [
+            "implement",
+            "draft-ticket",
+            "audit",
+            "improve"
+          ],
+          "description": "Allow list of author kinds whose notes context may show. Listing `unknown` admits notes with no valid claimed kind; an empty list shows nothing."
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 500,
+          "maximum": 9000,
+          "default": 8000,
+          "description": "Budget in UTF-16 code units."
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 500,
+          "maximum": 65536,
+          "default": 15000,
+          "description": "Budget in UTF-8 bytes."
+        },
+        "max_notes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 20,
+          "description": "Notes per block."
+        },
+        "max_per_topic": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 2,
+          "description": "Notes per topic in a block."
+        },
+        "max_kind_share": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 1,
+          "default": 0.5,
+          "description": "Share of max_chars and of max_notes one kind may take in the first pass."
+        },
+        "note_max_chars": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 8192,
+          "default": 2000,
+          "description": "Characters of one note shown."
         }
       },
       "additionalProperties": false

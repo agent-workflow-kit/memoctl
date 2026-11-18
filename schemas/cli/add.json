@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/cli/add.json",
   "title": "add output",
-  "description": "Printed with --json on exit 0 (created, existing or dry run). id is null in a dry run; created is false when an identical live note already existed (the output is that note). Errors print the error envelope.",
+  "description": "Printed with --json on exit 0 (created, existing or dry run). id is null only when dry_run is true and no note exists to return. created is false when a retry already landed (the output is the stored note). Errors print the error envelope.",
   "type": "object",
   "properties": {
     "id": {
@@ -16,6 +16,9 @@
       ]
     },
     "created": {
+      "type": "boolean"
+    },
+    "dry_run": {
       "type": "boolean"
     },
     "repo": {
@@ -36,11 +39,14 @@
       "$ref": "../defs.json#/$defs/timestamp"
     },
     "supersedes": {
-      "type": "array",
-      "items": {
-        "$ref": "../defs.json#/$defs/note_id"
-      },
-      "uniqueItems": true
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/note_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "size": {
       "type": "integer",
@@ -57,6 +63,7 @@
   "required": [
     "id",
     "created",
+    "dry_run",
     "repo",
     "topic",
     "kind",
@@ -67,5 +74,29 @@
     "body_sha256",
     "warnings"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "id": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "then": {
+        "properties": {
+          "dry_run": {
+            "const": true
+          },
+          "created": {
+            "const": true
+          }
+        }
+      }
+    }
+  ]
 }

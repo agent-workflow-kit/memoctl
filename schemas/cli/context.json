@@ -2,12 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/cli/context.json",
   "title": "context output",
-  "description": "Printed with --json on exit 0 instead of the block. text is exactly what the plain form prints. On exit 10 (nothing to show) the error envelope is printed (assumption, see GAPS).",
+  "description": "Printed with --json on exit 0 and on exit 10 (a result, not an error). text is exactly what the plain form prints (the fenced form with --fence); text is empty and note_ids is [] on exit 10; eligible is 0 when there was no repo, state or database; omitted = eligible - shown. Every other non-zero exit prints the error envelope.",
   "type": "object",
   "properties": {
     "text": {
       "$ref": "../defs.json#/$defs/untrusted_text",
-      "maxLength": 65536
+      "minLength": 0,
+      "maxLength": 9156
     },
     "note_ids": {
       "type": "array",
@@ -29,21 +30,6 @@
     "omitted": {
       "type": "integer",
       "minimum": 0
-    },
-    "chars": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 9000,
-      "description": "UTF-16 code units of text."
-    },
-    "bytes": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 65536,
-      "description": "UTF-8 bytes of text."
-    },
-    "fenced": {
-      "type": "boolean"
     }
   },
   "required": [
@@ -51,10 +37,28 @@
     "note_ids",
     "shown",
     "eligible",
-    "omitted",
-    "chars",
-    "bytes",
-    "fenced"
+    "omitted"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "shown": {
+            "minimum": 1
+          }
+        },
+        "required": [
+          "shown"
+        ]
+      },
+      "then": {
+        "properties": {
+          "text": {
+            "minLength": 1
+          }
+        }
+      }
+    }
+  ]
 }

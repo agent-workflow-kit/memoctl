@@ -2,28 +2,77 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/cli/cron-uninstall.json",
   "title": "cron uninstall output",
-  "description": "Printed with --json on exit 0. outcome: removed, unchanged (no block present), dry_run (nothing written). block is the block that was or would be removed; absent for unchanged.",
+  "description": "Printed with --json on exit 0. outcome is what the real run does or did (removed, unchanged); dry_run is true when nothing was written. block is the three lines removed; empty for unchanged.",
   "type": "object",
   "properties": {
     "outcome": {
       "enum": [
         "removed",
-        "unchanged",
-        "dry_run"
+        "unchanged"
       ]
     },
+    "dry_run": {
+      "type": "boolean"
+    },
     "block": {
-      "type": "array",
-      "items": {
-        "type": "string",
-        "maxLength": 4096
-      },
-      "minItems": 1,
-      "description": "The managed block as lines: `# memoctl managed`, PATH=..., the entry, `# memoctl managed end`."
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {
+              "const": "# memoctl managed"
+            },
+            {
+              "type": "string",
+              "pattern": "^17 3 \\* \\* \\* PATH=/[A-Za-z0-9._/@+-]*/\\.local/bin:/usr/local/bin:/usr/bin:/bin memoctl prune --quiet --actor auto:memoctl-cron(?![\\s\\S])"
+            },
+            {
+              "const": "# memoctl managed end"
+            }
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "maxItems": 0
+        }
+      ]
     }
   },
   "required": [
-    "outcome"
+    "outcome",
+    "dry_run",
+    "block"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "unchanged"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "block": {
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "block": {
+            "minItems": 3
+          }
+        }
+      }
+    }
+  ]
 }
