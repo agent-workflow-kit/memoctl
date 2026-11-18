@@ -37,7 +37,7 @@ memoctl delete 1
 | `memoctl show <id>` | Show one note in full. |
 | `memoctl search (<text> \| --text-file <path>\|-) [--repo <id>] [--all] [--limit <n>]` | Substring search over topics and bodies. |
 | `memoctl context --repo=<id> [--label=k=v]… [--fence]` | Print the notes block for a session start; exit 10 when there is nothing to show. |
-| `memoctl delete <id>… [--yes]` | Delete a note after a confirmation on your terminal; deleting a live replacement makes the note it replaced live again. |
+| `memoctl delete <id>… [--yes]` | Delete a note after a confirmation on your terminal; deleting the only replacement of a note makes it live again (after a stack of replacements, one `delete` names every member). |
 | `memoctl prune [--dry-run]` | Delete expired notes. |
 | `memoctl validate` | Offline checks of the config and the state; never prompts. |
 | `memoctl cron install\|uninstall [--dry-run]` | Install or remove the daily `prune` in your crontab. |
@@ -52,6 +52,7 @@ Any tool can call `memoctl context --repo=<id> [--label=<key>=<value>]…` and i
 
 - The author kind is a claim: any process in a session can set it, so the allow list reduces risk and does not prove who wrote a note ([Author kind](docs/interface.md#author-kind), [Residual risks](docs/interface.md#residual-risks)).
 - `context` only reads: it takes no write lock, creates no directory or database and has a deadline, so a broken store never blocks a session start.
+- A permission rule on the command prefix, such as `Bash(memoctl delete:*)`, matches every form of that subcommand memoctl itself accepts (no flag comes before it); name `memoctl add`, `memoctl delete` and `memoctl cron` (install and uninstall) in such rules. It does not cover another way of running the program (an absolute path, `env`, `command`, `python -m memoctl`, `sh -c`), so a deny that must hold is a deny on writing the state directory in the sandbox profile.
 - Config and state are read only from your home directory in the password database, so an environment variable cannot redirect them; a process that can write your files can still edit them ([Config](docs/interface.md#config)).
 
 ## Exit codes
@@ -61,13 +62,14 @@ Any tool can call `memoctl context --repo=<id> [--label=<key>=<value>]…` and i
 ## Config and environment
 
 - Config: `.config/memoctl/config.yaml` under your home directory plus `config.d/*.yaml` beside it; every key is documented in [config.example.yaml](config.example.yaml) and [Config](docs/interface.md#config).
-- State: `.local/state/memoctl/` (`state.db` and `log.jsonl`, which records changes and never any note text).
+- State: `.local/state/memoctl/` (`state.db` and `log.jsonl`, which records each change that completed with its append and never any note text).
 - Environment: the variable named by `kind_env` (default `CSESSION_KIND`), for the claimed kind, the variables named in `mask_env`, and `PATH` (to find `crontab`); there are no `MEMOCTL_*` overrides ([Environment variables](docs/interface.md#environment-variables)).
 - Hooks: none.
 
 ## Limits
 
 - A secret in a form the [secret check](docs/interface.md#secret-check) does not recognize is stored and shown to later sessions in the repo.
+- A clock that jumps ahead makes `prune` delete unexpired notes permanently once the wrong time passes their `expires`; run `prune --dry-run` first when in doubt.
 - A session that claims an allowed kind can fill the notes a session sees with about 20 notes (one rate window), whatever kind the real notes have; `delete` (several ids at once) removes them.
 - WAL is not reliable on network or Windows-backed mounts; `validate` warns.
 

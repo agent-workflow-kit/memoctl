@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "memoctl/cli/cron-install.json",
   "title": "cron install output",
-  "description": "Printed with --json on exit 0. outcome is what the real run does or did (installed, replaced, unchanged); dry_run is true when nothing was written. block is the block now in the crontab (installed, replaced or unchanged).",
+  "description": "Printed with --json on exit 0. outcome is what the real run does or did (installed, replaced, unchanged); dry_run is true when nothing was written. block is the block that is, or under dry_run would be, in the crontab (installed, replaced or unchanged).",
   "type": "object",
   "properties": {
     "outcome": {
