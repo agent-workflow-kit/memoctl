@@ -20,7 +20,7 @@ fully standalone (no harness, bus, shared library or shared contracts package).
 - Never import sibling repos. Read their docs and schemas by path only; copying a sibling's
   schema files into `tests/` pinned to a version is allowed.
 - No upward awareness: this tool never knows about, or behaves differently for, the tools that
-  call it.
+  call it. Defaults such as `kind_env: CSESSION_KIND` and the default allow list are configuration, not behavior.
 - Interface first: write `docs/interface.md` and `schemas/` before implementation.
 - Semver. A breaking interface change is, before 1.0, a `feat` commit whose title names the break (never `!` before 1.0), and from 1.0 on a `!` commit; the title becomes the changelog line (details go in the PR body). Either way, update `awkit-docs/interface-registry.md`. Never hand-edit CHANGELOG.md or the version.
 - Run `make verify` before every commit.
@@ -31,10 +31,13 @@ fully standalone (no harness, bus, shared library or shared contracts package).
 
 ## Workflow
 
-1. Start with a design session that resolves the open topics in `docs/design.md` and records
-   the decisions there.
-2. Write `docs/interface.md` and `schemas/`.
-3. Implement test-first.
+1. The design is done: `docs/interface.md` is the single normative source, `docs/design.md`
+   records the decisions and the open live checks, and `docs/plan.md` is the staged plan. Read
+   them before changing anything; a change to a rule starts in `docs/interface.md` and
+   `schemas/`.
+2. Implement the plan's stages test-first, one GitHub issue at a time (each issue links the
+   interface headings it implements).
+3. Keep `config.example.yaml`, the schemas and the golden files in step with the interface.
 
 ## Repository workflow
 
