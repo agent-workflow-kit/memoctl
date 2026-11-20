@@ -162,9 +162,70 @@ def test_fifo_without_a_writer_is_refused_without_blocking(tmp_path: Path) -> No
     assert _reason(e) == "not_regular"
 
 
-def test_fifo_with_an_endless_writer_is_refused(tmp_path: Path) -> None:
+def _lstat_reports_regular_once(
+    monkeypatch: pytest.MonkeyPatch, target: Path, regular: Path
+) -> None:
+    """Make the first ``lstat`` of ``target`` report a regular file (the pre-check), so the
+    open and the ``fstat`` after it are what decide. Later calls see the real file."""
+    real_lstat = os.lstat
+    lied = False
+
+    def fake(path: str | os.PathLike[str], *args: object, **kwargs: object) -> os.stat_result:
+        nonlocal lied
+        if not lied and os.fspath(path) == os.fspath(target):
+            lied = True
+            return real_lstat(regular)
+        return real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(gateway_module.os, "lstat", fake)
+
+
+def _regular_file(tmp_path: Path) -> Path:
+    regular = tmp_path / "regular"
+    regular.write_bytes(b"data")
+    return regular
+
+
+def test_fifo_that_passes_the_lstat_precheck_is_refused_by_the_fstat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fifo = tmp_path / "f"
     os.mkfifo(fifo)
+    _lstat_reports_regular_once(monkeypatch, fifo, _regular_file(tmp_path))
+    with pytest.raises(BodyError) as e:
+        read_body(RealGateway(), fifo, LIMIT)
+    assert _reason(e) == "not_regular"
+
+
+def test_directory_that_passes_the_lstat_precheck_is_refused_by_the_fstat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = tmp_path / "d"
+    d.mkdir()
+    _lstat_reports_regular_once(monkeypatch, d, _regular_file(tmp_path))
+    with pytest.raises(BodyError) as e:
+        read_body(RealGateway(), d, LIMIT)
+    assert _reason(e) == "not_regular"
+
+
+def test_symlink_that_passes_the_lstat_precheck_is_refused_by_o_nofollow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _regular_file(tmp_path)
+    link = tmp_path / "l"
+    link.symlink_to(target)
+    _lstat_reports_regular_once(monkeypatch, link, target)
+    with pytest.raises(BodyError) as e:
+        read_body(RealGateway(), link, LIMIT)
+    assert _reason(e) == "symlink"
+
+
+def test_fifo_with_an_endless_writer_is_refused_after_the_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fifo = tmp_path / "f"
+    os.mkfifo(fifo)
+    _lstat_reports_regular_once(monkeypatch, fifo, _regular_file(tmp_path))
     stop = threading.Event()
 
     def writer() -> None:
