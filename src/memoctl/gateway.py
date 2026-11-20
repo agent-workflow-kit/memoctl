@@ -10,6 +10,8 @@ Commands are always run as argv lists, never through a shell, and untrusted text
 stdin or files, never in argv or the environment. Process output is decoded as UTF-8 with
 ``surrogateescape`` so no byte sequence raises or is lost.
 
+Body sources (``read_file_bounded``, ``read_stdin_bounded``) return raw bytes, never text.
+
 A command reads the clock once with ``now()`` and hands the value down as a parameter.
 todo(#16): enforce one clock read per command.
 
