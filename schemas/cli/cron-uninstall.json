@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "memoctl/cli/cron-uninstall.json",
+  "title": "cron uninstall output",
+  "description": "Printed with --json on exit 0. outcome is what the real run does or did (removed, unchanged); dry_run is true when nothing was written. block is the block removed, or under dry_run the block that would be removed, as found (its middle line may be hand-edited); [] for unchanged.",
+  "type": "object",
+  "properties": {
+    "outcome": {
+      "enum": [
+        "removed",
+        "unchanged"
+      ]
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "block": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {
+              "const": "# memoctl managed"
+            },
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "const": "# memoctl managed end"
+            }
+          ],
+          "items": false
+        },
+        {
+          "type": "array",
+          "maxItems": 0
+        }
+      ]
+    }
+  },
+  "required": [
+    "outcome",
+    "dry_run",
+    "block"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "unchanged"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "block": {
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "block": {
+            "minItems": 3
+          }
+        }
+      }
+    }
+  ]
+}

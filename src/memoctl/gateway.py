@@ -49,6 +49,10 @@ class Gateway(Protocol):
         """The user's home from the password database (never the ``HOME`` variable)."""
         ...
 
+    def login_name(self) -> str | None:
+        """The login name from the password database, or ``None`` when the lookup fails."""
+        ...
+
     def stdin_read(self) -> str: ...
     def write_out(self, text: str) -> None: ...
     def write_err(self, text: str) -> None: ...
@@ -116,6 +120,17 @@ def _run(
     )
 
 
+def _write_fd(fd: int, text: str) -> None:
+    """Write ``text`` to a standard descriptor as UTF-8 with errors replaced, never through the
+    locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says."""
+    view = memoryview(text.encode(ENCODING, "replace"))
+    try:
+        while view:
+            view = view[os.write(fd, view) :]
+    except OSError:
+        pass
+
+
 class RealGateway:
     """The production gateway."""
 
@@ -127,18 +142,25 @@ class RealGateway:
         return datetime.fromtimestamp(time.time(), UTC)
 
     def home(self) -> Path:
-        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+        try:
+            return Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except KeyError as exc:
+            raise GatewayError("the user is not in the password database") from exc
+
+    def login_name(self) -> str | None:
+        try:
+            return pwd.getpwuid(os.getuid()).pw_name
+        except KeyError:
+            return None
 
     def stdin_read(self) -> str:
         return sys.stdin.read()
 
     def write_out(self, text: str) -> None:
-        sys.stdout.write(text)
-        sys.stdout.flush()
+        _write_fd(1, text)
 
     def write_err(self, text: str) -> None:
-        sys.stderr.write(text)
-        sys.stderr.flush()
+        _write_fd(2, text)
 
     def isatty(self, fd: int) -> bool:
         try:
@@ -176,7 +198,7 @@ class RealGateway:
         result = self._crontab(["-l"], None)
         if result.returncode == 0:
             return result.stdout
-        if result.returncode == 1 and result.stderr.strip().startswith(b"no crontab for "):
+        if result.returncode == 1 and result.stderr.startswith(b"no crontab for"):
             return None
         raise self._failure("-l", result)
 

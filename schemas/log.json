@@ -1,33 +1,203 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "memoctl/log",
+  "$id": "memoctl/log.json",
   "title": "memoctl log.jsonl record",
+  "description": "One record per note created by add, per note removed by delete and per note removed by prune. Never contains a body, a label value or any note text. supersedes is the target id of an add --supersedes; reinstated is the id of a note a delete made live again (its superseded_by was cleared; carried by the record of the deleted note it pointed to), null for add and prune records. repo, topic, kind, size and body_sha256 are the note's; for delete and prune they are null for each field of a row that failed its row check. supersedes and reinstated are null when they do not apply. Refusals, dedupe hits, dry runs and failures are not logged; context, list, show, search, validate and cron write no record.",
   "type": "object",
   "properties": {
     "ts": {
-      "type": "string",
-      "format": "date-time"
+      "$ref": "defs.json#/$defs/timestamp_ms"
     },
-    "level": {
+    "tool": {
+      "$ref": "defs.json#/$defs/tool"
+    },
+    "version": {
       "type": "string",
-      "enum": [
-        "debug",
-        "info",
-        "warn",
-        "error"
-      ]
+      "maxLength": 64
     },
     "event": {
-      "type": "string"
+      "enum": [
+        "add",
+        "delete",
+        "prune"
+      ]
     },
-    "message": {
-      "type": "string"
+    "note_id": {
+      "$ref": "defs.json#/$defs/note_id"
+    },
+    "repo": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/repo_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "topic": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/topic"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "kind": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/kind_name"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "size": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "body_sha256": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/sha256_16"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "supersedes": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/note_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reinstated": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/note_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "actor": {
+      "$ref": "defs.json#/$defs/actor"
+    },
+    "actor_source": {
+      "$ref": "defs.json#/$defs/actor_source"
     }
   },
   "required": [
     "ts",
-    "level",
-    "event"
+    "tool",
+    "version",
+    "event",
+    "note_id",
+    "repo",
+    "topic",
+    "kind",
+    "size",
+    "body_sha256",
+    "supersedes",
+    "reinstated",
+    "actor",
+    "actor_source"
   ],
-  "additionalProperties": true
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "add"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "properties": {
+          "repo": {
+            "$ref": "defs.json#/$defs/repo_id"
+          },
+          "topic": {
+            "$ref": "defs.json#/$defs/topic"
+          },
+          "kind": {
+            "$ref": "defs.json#/$defs/kind_name"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65536
+          },
+          "body_sha256": {
+            "$ref": "defs.json#/$defs/sha256_16"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "enum": [
+              "add",
+              "prune"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reinstated": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "enum": [
+              "delete",
+              "prune"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "properties": {
+          "supersedes": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
 }

@@ -66,7 +66,7 @@ BANNED_REFS = {
             "urandom getuid get_terminal_size environ environb getenv getenvb putenv fdopen "
             "getlogin getcwd getcwdb listdir remove unlink rename replace mkdir makedirs rmdir "
             "stat lstat open scandir walk chmod chdir read write isatty kill killpg popen "
-            "fork system"
+            "fork system fstat dup dup2 close pipe geteuid getgid getegid umask fsync"
         ).split()
     },
     *{
@@ -383,6 +383,12 @@ def test_scanner_accepts_harmless_code(source: str) -> None:
         "import os\nos.mkdir('d')",
         "import os\nos.stat('f')",
         "import os\nos.open('f', 0)",
+        "import os\nos.fstat(0)",
+        "import os\nos.dup2(3, 1)",
+        "import os\nos.dup(1)",
+        "import os\nos.close(1)",
+        "import os\nos.pipe()",
+        "import os\nos.geteuid()",
         "from os import execv",
         # path-style methods, on any receiver
         "from pathlib import Path\nPath('f').read_text()",

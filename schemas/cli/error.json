@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "memoctl/cli/error.json",
+  "title": "Error envelope (any command with --json)",
+  "description": "Printed on stdout for a non-zero exit with --json (except context exit 10, which prints the context document, and validate, which prints its own document); one status line also goes to stderr. Exit 128+N prints no envelope.",
+  "type": "object",
+  "properties": {
+    "error": {
+      "$ref": "../defs.json#/$defs/error"
+    }
+  },
+  "required": [
+    "error"
+  ],
+  "additionalProperties": false
+}
