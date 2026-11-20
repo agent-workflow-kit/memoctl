@@ -204,6 +204,12 @@ def oracle_duration(s: str) -> int | None:
 def duration_corpus() -> list[str]:
     rng = random.Random(0x64757261)
     out = ["", "0", "59.5s", "12345678901", "5\n", "٥", "1.٥s", "1e3", ".5", "5."]
+    out += [
+        whole + frac + unit
+        for whole in ("9999999999", "0", "1")
+        for frac in ("", ".000000001", ".999999999", ".5")
+        for unit in ("", "s", "m", "h", "d")
+    ]
     for _ in range(40000):
         whole = "".join(rng.choice(DIGITS + "٣１") for _ in range(rng.choice([0, 1, 2, 9, 10, 11])))
         frac = ""
@@ -228,3 +234,18 @@ def test_duration_agrees_with_the_exact_fraction_oracle() -> None:
             assert grammar.parse_duration(s) == expected, s
     assert seen_ok > 1000
     assert seen_bad > 1000
+
+
+def test_duration_grid_is_valid_and_matches_the_oracle_exactly() -> None:
+    grid = [
+        whole + frac + unit
+        for whole in ("9999999999", "0", "1")
+        for frac in ("", ".000000001", ".999999999", ".5")
+        for unit in ("", "s", "m", "h", "d")
+    ]
+    assert len(grid) == 60
+    for s in grid:
+        expected = oracle_duration(s)
+        assert expected is not None
+        assert grammar.parse_duration(s) == expected, s
+    assert grammar.parse_duration("9999999999.999999999d") == 9999999999 * 86400 + 86400

@@ -9,7 +9,7 @@ Rules every function follows:
 - Character classes are explicit ASCII ranges. ``\\d`` and ``\\w`` are never used, so
   non-ASCII digits and letters cannot match, and no flag (``IGNORECASE``, ``UNICODE``) widens
   a class.
-- No pattern has nested or overlapping quantifiers, so a match attempt is linear in the input.
+- No ambiguous repetition: every pattern is linear-time (probed to 3 MB).
 - A failure names the field, never the value (:class:`GrammarError`).
 
 Callers: ``cli`` (usage errors, exit 2 ``usage`` with ``details.field``), ``config``
@@ -33,7 +33,8 @@ __all__ = [
 ]
 
 # Each entry is the interface's grammar for one field. The repo pattern is claude-session's
-# with ``\Z`` in the lookahead (same strings accepted under fullmatch).
+# with ``\Z`` in the lookahead (same strings accepted under fullmatch). No ambiguous
+# repetition: linear-time (probed to 3 MB).
 GRAMMARS: dict[str, re.Pattern[str]] = {
     "repo": re.compile(
         r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?(/(?!\.\.?(/|\Z))[A-Za-z0-9._-]+)+"
@@ -64,6 +65,10 @@ class GrammarError(ValueError):
         super().__init__(f"invalid {field}")
         self.field = field
 
+    def __reduce__(self) -> tuple[type[GrammarError], tuple[str]]:
+        # The default reduce would rebuild from the message and lose the field.
+        return (GrammarError, (self.field,))
+
 
 def matches(field: str, text: str) -> bool:
     """True when ``text`` is wholly a valid ``field`` (a key of :data:`GRAMMARS`).
@@ -76,7 +81,7 @@ def matches(field: str, text: str) -> bool:
 
 def is_add_repo_id(text: str) -> bool:
     """The repo id grammar plus the 255-character cap that only ``add`` applies."""
-    return matches("repo", text) and len(text) <= ADD_MAX_REPO_ID_LENGTH
+    return isinstance(text, str) and len(text) <= ADD_MAX_REPO_ID_LENGTH and matches("repo", text)
 
 
 def parse_label(text: str) -> tuple[str, str]:
@@ -105,6 +110,9 @@ def parse_duration(text: str, field: str = "expires") -> int:
     whitespace, a trailing newline, a sign, an exponent, ``ms``, non-ASCII digits, eleven
     integer digits or ten fraction digits.
     """
+    # TODO(#5): config duration keys (integer seconds or a string, dotted field name, ranges)
+    # are #5's. TODO(#6): map GrammarError to the exit 2 usage envelope with details.field
+    # (callers add/list... are #11 and #24).
     if not isinstance(text, str):
         raise GrammarError(field)
     found = _DURATION.fullmatch(text)

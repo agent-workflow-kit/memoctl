@@ -1,5 +1,5 @@
 {
-  "_comment": "Test data, not code. Copied by hand from claude-session; memoctl never imports it. Each pattern is applied with re.fullmatch (the source's own ^/$ anchors are kept verbatim where it has them). A changed upstream contract needs a NEW pinned file (name the new version in the file name), a new PINNED_FILE constant in tests/test_grammar_pinned.py, and a reviewed change to that test.",
+  "_comment": "Test data, not code. Copied by hand from claude-session; memoctl never imports it. Each pattern is applied with re.fullmatch (the source's own ^/$ anchors are kept verbatim where it has them). A changed upstream contract needs a NEW pinned file (claude_session_grammars_<version>.json, never an edit of this one), a new PINNED_FILE constant in tests/test_grammar_pinned.py, and a reviewed change to that test.",
   "source": "claude-session",
   "version": "0.38.4",
   "tag": "v0.38.4",

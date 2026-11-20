@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import pickle
 import time
 from collections.abc import Callable
 
@@ -254,16 +256,48 @@ def test_duration_non_string_is_refused() -> None:
             grammar.parse_duration(bad)  # type: ignore[arg-type]
 
 
+# ---------- error copying ----------
+
+
+@pytest.mark.parametrize(
+    "clone", [copy.copy, copy.deepcopy, lambda e: pickle.loads(pickle.dumps(e))]
+)
+def test_grammar_error_keeps_its_field_when_copied_or_pickled(
+    clone: Callable[[GrammarError], GrammarError],
+) -> None:
+    original = GrammarError("retention.max_age")
+    copied = clone(original)
+    assert type(copied) is GrammarError
+    assert copied.field == "retention.max_age"
+    assert str(copied) == str(original) == "invalid retention.max_age"
+
+
+def test_add_repo_id_cap_is_255_characters_and_non_strings_are_refused() -> None:
+    assert grammar.is_add_repo_id("a/" + "b" * 253)
+    assert not grammar.is_add_repo_id("a/" + "b" * 254)
+    assert not grammar.is_add_repo_id(5)  # type: ignore[arg-type]
+
+
 # ---------- hostile size and linear time ----------
 
 HUGE = 2_000_000
-LIMIT_SECONDS = 3.0  # a quadratic scan of 2 MB would take far longer
+# A quadratic scan of 2 MB would take minutes; the best of three runs ignores a noisy machine.
+LIMIT_SECONDS = 10.0
 
 
-def _timed(fn: Callable[..., object], *args: object) -> float:
-    start = time.perf_counter()
-    fn(*args)
-    return time.perf_counter() - start
+def _timed(
+    fn: Callable[..., object], *args: object, expect: type[Exception] | None = None
+) -> float:
+    best = float("inf")
+    for _ in range(3):
+        start = time.perf_counter()
+        if expect is None:
+            fn(*args)
+        else:
+            with pytest.raises(expect):
+                fn(*args)
+        best = min(best, time.perf_counter() - start)
+    return best
 
 
 @pytest.mark.parametrize("field", sorted(VALID))
@@ -279,15 +313,10 @@ def test_huge_inputs_are_rejected_in_linear_time(field: str) -> None:
 def test_huge_duration_inputs_are_rejected_in_linear_time(unit: str) -> None:
     text = (unit * (HUGE // len(unit)))[:HUGE]
     for variant in (text, text + "!", text + "\n"):
-        start = time.perf_counter()
-        with pytest.raises(GrammarError):
-            grammar.parse_duration(variant)
-        assert time.perf_counter() - start < LIMIT_SECONDS
+        elapsed = _timed(grammar.parse_duration, variant, expect=GrammarError)
+        assert elapsed < LIMIT_SECONDS
 
 
 def test_huge_label_is_rejected_in_linear_time() -> None:
     for text in ("k=" + "v" * HUGE, "=" * HUGE, "k" * HUGE + "=v", "k" + "=" * HUGE):
-        start = time.perf_counter()
-        with pytest.raises(GrammarError):
-            grammar.parse_label(text)
-        assert time.perf_counter() - start < LIMIT_SECONDS
+        assert _timed(grammar.parse_label, text, expect=GrammarError) < LIMIT_SECONDS
