@@ -125,6 +125,8 @@ Applied by `context` only, to every text that came from a note, in this order, s
 2. Every character refused by [Body rules](#body-rules) item 3 is removed (a stored note cannot hold one, so this only matters for a database written by something else); every other control character is removed except LF; tab becomes four spaces.
 3. Last, every `<` becomes `&lt;`. So no `</untrusted` look-alike can exist in the output, whatever else was in the text, and no later step assembles one.
 
+Two rules apply only to text a stored note cannot hold (a database written by something else), so the output stays unchanged by claude-session's sanitizer and the cost stays linear. Steps 1 and 2 repeat until the text stops changing, because removing a character can expose a composition (`e`, a zero-width space, a combining acute); the `<` escape runs once, after the last repeat. Before each NFKC, a code point that would make a run of more than 30 combining marks (counted as in [Body rules](#body-rules) item 4) is dropped. For a text a note can hold, the output is its NFKC form with tab as four spaces and `<` escaped.
+
 Topic, kind, labels and the repo id cannot contain a character this changes (their grammars exclude it); they come from checked rows ([Database](#database)), so the sanitizer has nothing to change in them.
 
 ### Terminal rendering
