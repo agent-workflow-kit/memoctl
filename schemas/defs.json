@@ -1,0 +1,688 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "memoctl/defs.json",
+  "title": "memoctl shared definitions",
+  "description": "Not an output on its own. Shared definitions referenced by the log and CLI schemas. config.json is self-contained and embeds its own copies.",
+  "$defs": {
+    "repo_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?(/(?!\\.\\.?(/|(?![\\s\\S])))[A-Za-z0-9._-]+)+(?![\\s\\S])",
+      "description": "Lowercase host, optional port (1 to 5 digits), one or more path segments (none `.` or `..`). `add` also refuses a repo id longer than 255 characters; that cap is checked by the tool, not by this schema."
+    },
+    "topic": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}(?![\\s\\S])"
+    },
+    "label": {
+      "type": "string",
+      "maxLength": 321,
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}(?![\\s\\S])",
+      "description": "key=value, split at the first `=`."
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/label"
+      },
+      "maxItems": 8,
+      "uniqueItems": true,
+      "description": "A set, sorted by key then value in output. At most 8 per note (config limits.max_labels, 0 to 8)."
+    },
+    "kind_name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}(?![\\s\\S])",
+      "description": "An author kind or `unknown`."
+    },
+    "note_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 999999999999999999,
+      "description": "AUTOINCREMENT id; the grammar is [1-9][0-9]{0,17}. Ids above 2^53 are unreachable in practice."
+    },
+    "actor": {
+      "type": "string",
+      "pattern": "^(human|auto):[A-Za-z0-9._@/-]{1,64}(?![\\s\\S])",
+      "description": "human:<user> or auto:<name>. Advisory."
+    },
+    "actor_source": {
+      "enum": [
+        "flag",
+        "tty",
+        "default"
+      ]
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]{1,10}(\\.[0-9]{1,9})?(s|m|h|d)?(?![\\s\\S])",
+      "description": "No unit means seconds. At most 10 integer digits and 9 fraction digits; converted with integer arithmetic and rounded up to whole seconds."
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z(?![\\s\\S])",
+      "description": "UTC, YYYY-MM-DDTHH:MM:SSZ."
+    },
+    "timestamp_ms": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z(?![\\s\\S])",
+      "description": "UTC, YYYY-MM-DDTHH:MM:SS.mmmZ (log only)."
+    },
+    "sha256_64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])",
+      "description": "SHA-256 of the body's UTF-8 bytes."
+    },
+    "sha256_16": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}(?![\\s\\S])",
+      "description": "First 16 hex characters of a SHA-256."
+    },
+    "status": {
+      "enum": [
+        "live",
+        "superseded",
+        "expired"
+      ]
+    },
+    "untrusted_text": {
+      "type": "string",
+      "x-untrusted": true,
+      "description": "Text that came from a note. A consumer treats it as untrusted data."
+    },
+    "body": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "x-untrusted": true,
+      "description": "Untrusted. 1 byte to limits.max_body_bytes (default 8192, at most 65536) UTF-8 bytes."
+    },
+    "tool": {
+      "const": "memoctl"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "expires_capped",
+          "expires_extended",
+          "kind_not_shown"
+        ]
+      },
+      "uniqueItems": true,
+      "description": "Fixed strings; [] when none."
+    },
+    "refusal_reason": {
+      "enum": [
+        "repo_full",
+        "store_full",
+        "rate_limited",
+        "supersede_mismatch",
+        "already_superseded",
+        "secret_detected",
+        "unsafe_state",
+        "cron_block_malformed"
+      ],
+      "description": "Reasons of exit 20."
+    },
+    "failure_reason": {
+      "enum": [
+        "db_unreadable",
+        "db_locked",
+        "db_corrupt",
+        "schema_newer",
+        "timeout",
+        "crontab_failed"
+      ],
+      "description": "Reasons of exit 12 (code failed)."
+    },
+    "error_code": {
+      "enum": [
+        "usage",
+        "config_invalid",
+        "internal",
+        "not_found",
+        "failed",
+        "needs_human",
+        "refused"
+      ]
+    },
+    "secret_class": {
+      "enum": [
+        "private_key",
+        "github_token",
+        "gitlab_token",
+        "slack_token",
+        "aws_key_id",
+        "npm_token",
+        "anthropic_key",
+        "google_api_key",
+        "stripe_key",
+        "openai_key",
+        "jwt",
+        "slack_webhook",
+        "mask_env"
+      ]
+    },
+    "text_class": {
+      "enum": [
+        "encoding",
+        "control",
+        "invisible",
+        "private_use",
+        "unassigned",
+        "combining"
+      ],
+      "description": "Classes of refused text (exit 2)."
+    },
+    "error_details": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "usage: a field name matching [a-z_]{1,32} (`argv` for a parse error with no single field, `text` for search text); secret_detected: repo, topic, label, kind or body; config_invalid: a dotted key, `home` or a file path."
+        },
+        "id": {
+          "$ref": "#/$defs/note_id",
+          "description": "not_found: the unknown note id (for delete, the smallest)."
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based line (counted by LF) of refused text."
+        },
+        "class": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text_class"
+            },
+            {
+              "$ref": "#/$defs/secret_class"
+            }
+          ],
+          "description": "Class of refused text (usage), or the secret class (secret_detected)."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The limit that was hit (body over limit, label count, repo_full, store_full, rate_limited)."
+        },
+        "retry_after_s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "scope": {
+          "enum": [
+            "repo",
+            "store"
+          ]
+        },
+        "found": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "schema_newer: the version found."
+        },
+        "supported": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "schema_newer: the version this tool supports."
+        }
+      },
+      "additionalProperties": false
+    },
+    "note_summary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/note_id"
+        },
+        "repo": {
+          "$ref": "#/$defs/repo_id",
+          "x-untrusted": true
+        },
+        "topic": {
+          "$ref": "#/$defs/topic",
+          "x-untrusted": true
+        },
+        "kind": {
+          "$ref": "#/$defs/kind_name",
+          "x-untrusted": true
+        },
+        "labels": {
+          "$ref": "#/$defs/labels",
+          "x-untrusted": true
+        },
+        "created": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "expires": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "superseded_by": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/note_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        }
+      },
+      "required": [
+        "id",
+        "repo",
+        "topic",
+        "kind",
+        "labels",
+        "created",
+        "expires",
+        "status",
+        "superseded_by",
+        "size"
+      ],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/error_code"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 2048,
+          "description": "A fixed string of the tool; never a note text, exception text or input value."
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/refusal_reason"
+                },
+                {
+                  "$ref": "#/$defs/failure_reason"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "details": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/error_details"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retryable": {
+          "type": "boolean",
+          "description": "True for db_locked, timeout and rate_limited; false for every other code and reason."
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "reason",
+        "details",
+        "retryable"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "refused"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/refusal_reason"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "failed"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/failure_reason"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "usage",
+                  "config_invalid",
+                  "internal",
+                  "not_found",
+                  "needs_human"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "db_locked",
+                  "timeout",
+                  "rate_limited"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "retryable": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "internal",
+                  "needs_human"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "not_found"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "id"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "db_unreadable",
+                  "db_locked",
+                  "db_corrupt",
+                  "timeout",
+                  "crontab_failed",
+                  "supersede_mismatch",
+                  "already_superseded",
+                  "unsafe_state",
+                  "cron_block_malformed"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "rate_limited"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "retry_after_s",
+                  "limit",
+                  "scope"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "secret_detected"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "class",
+                  "field"
+                ],
+                "properties": {
+                  "class": {
+                    "$ref": "#/$defs/secret_class"
+                  },
+                  "field": {
+                    "enum": [
+                      "repo",
+                      "topic",
+                      "label",
+                      "kind",
+                      "body"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "repo_full",
+                  "store_full"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "limit"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "schema_newer"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "found",
+                  "supported"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "usage"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "field"
+                ],
+                "properties": {
+                  "field": {
+                    "pattern": "^[a-z_]{1,32}(?![\\s\\S])"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "config_invalid"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "field"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

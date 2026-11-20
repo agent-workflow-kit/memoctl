@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "memoctl/cli/context.json",
+  "title": "context output",
+  "description": "Printed with --json on exit 0 and on exit 10 (a result, not an error). text is exactly what the plain form prints (the fenced form with --fence); text is empty and note_ids is [] on exit 10; eligible is 0 when there was no repo, state or database; omitted = eligible - shown. Every other non-zero exit prints the error envelope.",
+  "type": "object",
+  "properties": {
+    "text": {
+      "$ref": "../defs.json#/$defs/untrusted_text",
+      "minLength": 0,
+      "maxLength": 9156
+    },
+    "note_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/note_id"
+      },
+      "uniqueItems": true,
+      "maxItems": 100
+    },
+    "shown": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "eligible": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "omitted": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "text",
+    "note_ids",
+    "shown",
+    "eligible",
+    "omitted"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "shown": {
+            "minimum": 1
+          }
+        },
+        "required": [
+          "shown"
+        ]
+      },
+      "then": {
+        "properties": {
+          "text": {
+            "minLength": 1
+          }
+        }
+      }
+    }
+  ]
+}
