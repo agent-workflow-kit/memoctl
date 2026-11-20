@@ -16,6 +16,7 @@ Uncommitted shared knowledge that agents leave for each other. Layer: L1 (primit
 
 - `pyyaml`: the config is YAML (design guide section 3). Used with `safe_load` through a duplicate-key-rejecting loader ([Config](interface.md#config)).
 - `pydantic`: validates the config and the `--json` output models (guide section 3). Importing it costs about 100 ms on a cold start, well inside the `context` deadline; a design-time measurement put `context` on a 10 000-note store at 30 to 40 ms without it.
+- `jsonschema` and `types-pyyaml` are dev-only: the first checks `config.example.yaml` and the loader against `schemas/config.json` in tests, the second supplies PyYAML type stubs. Neither is a runtime dependency.
 - Everything else is the standard library: `sqlite3` (WAL), `argparse`, `unicodedata`, `hashlib`, `secrets`, `signal`, `fcntl`.
 
 ## Decisions

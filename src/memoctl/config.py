@@ -75,7 +75,8 @@ _NULL = re.compile(r"(?:null|~|)\Z")
 
 
 class _StrictLoader(yaml.SafeLoader):
-    """``safe_load`` with duplicate keys, anchors, aliases, merge keys and unusual scalars refused.
+    """``safe_load`` with duplicate keys, anchors, aliases, explicit tags, merge keys and unusual
+    scalars refused.
 
     Scalars: ``true`` and ``false`` are booleans, ``0`` or a decimal without leading zeros
     (with an optional fraction) is a number, ``null``, ``~`` and the empty scalar are null, and
@@ -87,6 +88,8 @@ class _StrictLoader(yaml.SafeLoader):
         event = self.peek_event()
         if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None) is not None:
             raise yaml.YAMLError("anchor or alias")
+        if getattr(event, "tag", None) is not None:  # an explicit tag; implicit ones are resolved
+            raise yaml.YAMLError("explicit tag")
         return super().compose_node(parent, index)
 
     def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
@@ -300,18 +303,28 @@ class OverrideRetention(BaseModel):
         return _check_duration(value, "retention.max_age", 3600, 365 * 86400)
 
 
+def _no_null(value: Any) -> Any:
+    """An override key is either absent or a real value: an explicit null is a type error."""
+    if value is None:
+        raise PydanticCustomError("type", "null is not a value")
+    return value
+
+
 class OverrideLimits(BaseModel):
     model_config = _STRICT
     max_body_bytes: Annotated[int, Field(ge=256, le=65536)] | None = None
     live_per_repo: Annotated[int, Field(ge=1, le=100000)] | None = None
     adds_per_window: Annotated[int, Field(ge=1, le=10000)] | None = None
 
+    _not_null = field_validator("*", mode="before")(_no_null)
+
 
 class OverrideContext(BaseModel):
     model_config = _STRICT
     author_kinds: Annotated[list[str], Field(max_length=64)] | None = None
 
-    _kinds = field_validator("author_kinds")(lambda v: v if v is None else _kind_names(v))
+    _not_null = field_validator("author_kinds", mode="before")(_no_null)
+    _kinds = field_validator("author_kinds")(_kind_names)
 
 
 class RepoOverride(BaseModel):
@@ -379,7 +392,9 @@ class Config(BaseModel):
 def _apply(base: Any, override: BaseModel) -> Any:
     """``base`` with every value the override set (a field it did not set stays as it was)."""
     changes = override.model_dump(exclude_unset=True)
-    return base.model_copy(update=changes)
+    # re-validated, not model_copy(update=): an update is never checked, so a bad value could
+    # reach the effective config
+    return type(base).model_validate({**dict(base), **changes})
 
 
 def _cross_checks(config: Config, prefix: str) -> None:

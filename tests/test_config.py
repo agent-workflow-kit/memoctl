@@ -359,12 +359,27 @@ def test_yaml_scalar_rules(gw: FakeGateway) -> None:
         assert bad(gw) == "limits.total", literal
 
 
-def test_explicit_tags_cannot_bypass_the_scalar_rules(gw: FakeGateway) -> None:
-    for text in ("limits: {total: !!int 0x10}\n", "limits: {total: !!bool yes}\n"):
+def test_explicit_tags_are_refused(gw: FakeGateway) -> None:
+    for text in (
+        "limits: {total: !!int 0x10}\n",
+        "limits: {total: !!bool yes}\n",
+        "context: {max_kind_share: !!float '0.5'}\n",
+        "!!str limits: {total: 5}\n",
+        "kind_env: !!str A\n",
+        "limits: !!map {}\n",
+        "mask_env: !!seq [A]\n",
+        "kind_env: !SECRETVALUE A\n",
+    ):
         put(gw, "config.yaml", text)
-        assert bad(gw).endswith("config.yaml")
-    put(gw, "config.yaml", "kind_env: !!str A\n")
-    assert load_config(gw).kind_env == "A"
+        field = bad(gw)
+        assert field.endswith("config.yaml"), text
+        assert "SECRETVALUE" not in field
+
+
+def test_quoted_strings_still_work(gw: FakeGateway) -> None:
+    put(gw, "config.yaml", "kind_env: 'A'\nmask_env: [\"YES\", 'B']\n")
+    c = load_config(gw)
+    assert (c.kind_env, c.mask_env) == ("A", ["YES", "B"])
 
 
 def test_true_and_false_are_booleans_so_fail_int_keys(gw: FakeGateway) -> None:
@@ -596,7 +611,7 @@ def test_unknown_key_with_hostile_name_is_not_echoed(gw: FakeGateway) -> None:
     assert bad(gw) == "limits"
 
 
-def test_unknown_key_is_refused_before_its_value_is_examined(gw: FakeGateway) -> None:
+def test_unknown_key_is_refused_and_its_value_is_never_echoed(gw: FakeGateway) -> None:
     put(gw, "config.yaml", "bogus: {a: [1, 2, {b: c}]}\n")
     assert bad(gw) == "bogus"
 
@@ -707,6 +722,39 @@ def test_override_values_are_range_checked(gw: FakeGateway) -> None:
         assert bad(gw) == f"repos.{REPO}.{field}", body
 
 
+NULL_OVERRIDES = (
+    "limits.max_body_bytes",
+    "limits.live_per_repo",
+    "limits.adds_per_window",
+    "context.author_kinds",
+)
+
+
+def _null_override_text(key: str) -> str:
+    section, name = key.split(".")
+    return f"repos:\n  {REPO}:\n    {section}:\n      {name}: null\n"
+
+
+@pytest.mark.parametrize("key", NULL_OVERRIDES)
+def test_null_override_is_a_config_error_naming_the_key(gw: FakeGateway, key: str) -> None:
+    put(gw, "config.yaml", _null_override_text(key))
+    assert bad(gw) == f"repos.{REPO}.{key}"
+
+
+def test_null_retention_override_is_a_config_error(gw: FakeGateway) -> None:
+    put(gw, "config.yaml", f"repos:\n  {REPO}:\n    retention:\n      max_age: null\n")
+    assert bad(gw) == f"repos.{REPO}.retention.max_age"
+
+
+def test_override_live_per_repo_equal_to_total_passes(gw: FakeGateway) -> None:
+    put(
+        gw,
+        "config.yaml",
+        f"limits: {{total: 100, live_per_repo: 10}}\nrepos:\n  {REPO}:\n    limits: {{live_per_repo: 100}}\n",  # noqa: E501
+    )
+    assert load_config(gw).for_repo(REPO).limits.live_per_repo == 100
+
+
 def test_override_cross_key_checks_use_the_effective_config(gw: FakeGateway) -> None:
     put(
         gw,
@@ -783,3 +831,42 @@ def test_example_validates_against_the_schema() -> None:
     jsonschema.Draft202012Validator.check_schema(schema)
     doc: Any = yaml.safe_load((root / "config.example.yaml").read_text())
     jsonschema.validate(doc, schema)
+
+
+def _schema_verdict(doc: Any) -> bool:
+    import json
+
+    import jsonschema
+
+    root = Path(__file__).parent.parent
+    schema = json.loads((root / "schemas" / "config.json").read_text())
+    return jsonschema.Draft202012Validator(schema).is_valid(doc)
+
+
+PARITY_DOCS = [
+    *(_null_override_text(k) for k in NULL_OVERRIDES),
+    f"repos:\n  {REPO}:\n    retention:\n      max_age: null\n",
+    f"repos:\n  {REPO}:\n    limits: {{max_body_bytes: 4000, adds_per_window: 5}}\n",
+    f"repos:\n  {REPO}:\n    context: {{author_kinds: [a, b]}}\n",
+    f"repos:\n  {REPO}:\n    limits: {{total: 5}}\n",
+    "limits: {total: 5000, max_labels: 3}\n",
+    "limits: {max_labels: 9}\n",
+    "limits: {total: null}\n",
+    "bogus: 1\n",
+    "context: {max_kind_share: 0.05}\n",
+    "kind_env: lower\n",
+]
+
+
+@pytest.mark.parametrize("text", PARITY_DOCS)
+def test_schema_and_loader_agree(gw: FakeGateway, text: str) -> None:
+    import yaml
+
+    doc: Any = yaml.safe_load(text)
+    put(gw, "config.yaml", text)
+    try:
+        load_config(gw)
+        loader_ok = True
+    except ConfigError:
+        loader_ok = False
+    assert _schema_verdict(doc) == loader_ok, text
