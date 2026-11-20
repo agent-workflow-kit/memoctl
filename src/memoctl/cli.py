@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import sys
 
 from memoctl import __version__
+from memoctl.gateway import Gateway, RealGateway
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -19,10 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, gateway: Gateway | None = None) -> int:
+    gateway = gateway or RealGateway()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
-        parser.print_help(sys.stderr)
+        gateway.write_err(parser.format_help())
         return 2
     return 0

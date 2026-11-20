@@ -1,0 +1,45 @@
+#!/bin/sh
+# Fake crontab for process tests. Never touches the real crontab.
+#
+# FAKE_CRONTAB_DIR   directory holding the fake state (required; exit 99 without it)
+# FAKE_CRONTAB_EXIT  exit status to force for every call (default 0); a forced failure
+#                    records the call but does not store the new table
+#
+# Files in FAKE_CRONTAB_DIR:
+#   crontab      the stored table (written by `crontab -`, shown by `crontab -l`)
+#   calls.log    one line per call: "<n> <args> exit=<status>"
+#   input.<n>    the exact bytes call <n> read from standard input
+dir=${FAKE_CRONTAB_DIR:-}
+if [ -z "$dir" ]; then
+    echo "fake crontab: FAKE_CRONTAB_DIR is not set" >&2
+    exit 99
+fi
+forced=${FAKE_CRONTAB_EXIT:-0}
+touch "$dir/calls.log"
+n=$(($(wc -l <"$dir/calls.log") + 1))
+status=0
+case "$1" in
+-l)
+    if [ "$forced" != 0 ]; then
+        status=$forced
+    elif [ -f "$dir/crontab" ]; then
+        cat "$dir/crontab"
+    else
+        echo "no crontab for fake" >&2
+        status=1
+    fi
+    ;;
+-)
+    cat >"$dir/input.$n"
+    status=$forced
+    if [ "$status" = 0 ]; then
+        cat "$dir/input.$n" >"$dir/crontab"
+    fi
+    ;;
+*)
+    echo "fake crontab: unsupported arguments: $*" >&2
+    status=64
+    ;;
+esac
+echo "$n $* exit=$status" >>"$dir/calls.log"
+exit "$status"
