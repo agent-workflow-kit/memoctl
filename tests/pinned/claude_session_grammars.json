@@ -1,0 +1,17 @@
+{
+  "_comment": "Test data, not code. Copied by hand from claude-session; memoctl never imports it. Each pattern is applied with re.fullmatch (the source's own ^/$ anchors are kept verbatim where it has them). A changed upstream contract needs a NEW pinned file (name the new version in the file name), a new PINNED_FILE constant in tests/test_grammar_pinned.py, and a reviewed change to that test.",
+  "source": "claude-session",
+  "version": "0.38.4",
+  "tag": "v0.38.4",
+  "commit": "50b4b25",
+  "sources": [
+    "src/claude_session/ids.py (KIND_NAME, LABEL_KEY, LABEL_VALUE, REPO_ID)",
+    "docs/interface.md section Identifiers (kind names, labels, repo id)"
+  ],
+  "patterns": {
+    "kind": "[a-z0-9][a-z0-9_-]{0,63}",
+    "label_key": "[a-z0-9][a-z0-9_.-]{0,63}",
+    "label_value": "[A-Za-z0-9._:/#@+=,-]{0,256}",
+    "repo": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?(/(?!\\.\\.?(/|$))[A-Za-z0-9._-]+)+$"
+  }
+}
