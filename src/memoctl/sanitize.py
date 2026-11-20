@@ -4,11 +4,14 @@
 gateway. ``context`` applies it to every text that came from a note, and nothing else does
 (``list``, ``show`` and ``search`` show the stored text).
 
-The contract, for the differential test against claude-session's sanitizer (TODO(#29)): for a
-text a note can hold (no character that body rules item 3 refuses, no run of more than 30
-combining marks) the output is the NFKC form of the text with tab turned into four spaces and
-every ``<`` written as ``&lt;``. For any other text (only possible in a database written by
-something else) the output is the same after removing the refused characters.
+The contract, for the differential test against claude-session's sanitizer (todo(#29): that
+test belongs to its own issue): for a text a note can hold (no character that body rules
+item 3 refuses, no run of more than 30 combining marks) the output is the NFKC form of the text
+with tab turned into four spaces and every ``<`` written as ``&lt;``. For any other text
+(only possible in a database written by something else) the output is the same after removing
+the refused characters.
+
+todo(#26): context applies sanitize to every note text.
 
 Two properties go beyond the three documented steps, because the interface promises that the
 output is unchanged by a later sanitizer and that its cost is linear:
@@ -121,17 +124,34 @@ def _mark_info(c: str) -> _MarkInfo:
     return info
 
 
-def _limit_mark_runs(text: str) -> str:
-    """Drop each code point that would make a mark run longer than ``MAX_MARK_RUN``."""
-    # Below U+0300 no code point is a mark, and one whose NFKD ends in a mark begins with a
-    # base, so a long run needs a code point at or above U+0300.
-    if text.isascii() or max(text) < "̀":
-        return text
+class _MarkTable(dict[int, str]):
+    """A ``str.translate`` table that weighs each code point for the mark-run check.
+
+    A code point maps to one ``"M"`` per combining mark it can add to a run (leading plus
+    trailing marks of its NFKD form) and to a space when it can neither extend nor start a run.
+    Like ``_Table`` it decides each distinct code point once, only when first seen (nothing is
+    built at import), and stops growing at ``_CACHE_LIMIT`` entries.
+    """
+
+    def __missing__(self, key: int) -> str:
+        lead, _all_marks, trail = _mark_info(chr(key))
+        value = "M" * (lead + trail) if lead + trail else " "
+        if len(self) < _CACHE_LIMIT:
+            self[key] = value
+        return value
+
+
+_MARKS = _MarkTable()
+_RUN_PROBE = "M" * (MAX_MARK_RUN + 1)
+
+
+def _drop_mark_runs(text: str) -> str:
+    """The per-code-point loop: drop each code point that would extend a run past the limit."""
     run = 0
     out: list[str] = []
     changed = False
     for c in text:
-        if c < "̀" and c.isascii():
+        if c < "\u0300" and c.isascii():
             run = 0
             out.append(c)
             continue
@@ -144,6 +164,22 @@ def _limit_mark_runs(text: str) -> str:
     return "".join(out) if changed else text
 
 
+def _limit_mark_runs(text: str) -> str:
+    """Drop each code point that would make a mark run longer than ``MAX_MARK_RUN``."""
+    if text.isascii():
+        return text
+    # Screen 1: a text with no distinct code point that can touch a run (CJK, Cyrillic, ...) is
+    # cleared by the set of its code points alone.
+    if not any(_MARKS[ord(c)] != " " for c in set(text)):
+        return text
+    # Screen 2 (str.translate, C speed): each code point becomes as many "M" as marks it can add
+    # to a run, or a space. A run of more than MAX_MARK_RUN marks needs more than that many "M"
+    # in a row, so without them nothing is dropped. The Python loop runs only when they are there.
+    if _RUN_PROBE not in text.translate(_MARKS):
+        return text
+    return _drop_mark_runs(text)
+
+
 def sanitize(text: str) -> str:
     """Return ``text`` made safe to print in a context block. Pure, idempotent, linear.
 
@@ -151,6 +187,8 @@ def sanitize(text: str) -> str:
     control character except LF, and unpaired surrogates), tab to four spaces, and last every
     ``<`` to ``&lt;``. See the module docstring for the repeat and the run limit.
     """
+    if type(text) is not str:
+        raise TypeError(f"sanitize needs a str, got {type(text).__name__}")
     cur = text
     while True:
         nxt = _strip(unicodedata.normalize("NFKC", _limit_mark_runs(cur)))

@@ -12,6 +12,7 @@ import unicodedata
 
 import pytest
 
+import memoctl.sanitize as san
 from memoctl.sanitize import MAX_MARK_RUN, refused_class, sanitize
 
 DEFAULT_IGNORABLE = (
@@ -385,3 +386,167 @@ def test_time_scales_linearly() -> None:
     small = min(timed(unit * 20_000) for _ in range(3))
     big = min(timed(unit * 200_000) for _ in range(3))
     assert big < small * 30 + 0.05
+
+
+# --- the vectorized mark-run guard (#24 review) ---------------------------------------------
+
+
+class _Spy(san._Table):
+    calls: list[int]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = []
+
+    def __missing__(self, key: int) -> str | None:
+        self.calls.append(key)
+        return super().__missing__(key)
+
+
+def test_strip_goes_through_the_translate_table_once_per_distinct_code_point(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    spy = _Spy()
+    monkeypatch.setattr(san, "_TABLE", spy)
+    text = "ab\t\u200b日本日本ab" * 50
+    sanitize(text)
+    assert sorted(spy.calls) == sorted({ord(c) for c in text} | {ord(c) for c in "    "})
+    n = len(spy.calls)
+    sanitize(text * 3)
+    assert len(spy.calls) == n  # cached: no Python call for a code point seen before
+
+
+def test_mark_table_decides_each_code_point_once(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    table = san._MarkTable()
+    seen: list[int] = []
+    orig = san._MarkTable.__missing__
+
+    def missing(self, key):  # type: ignore[no-untyped-def]
+        seen.append(key)
+        return orig(self, key)
+
+    monkeypatch.setattr(san._MarkTable, "__missing__", missing)
+    monkeypatch.setattr(san, "_MARKS", table)
+    text = "日本語Привет\u0301é" * 100
+    san._limit_mark_runs(text)
+    san._limit_mark_runs(text)
+    assert sorted(seen) == sorted({ord(c) for c in text})
+
+
+@pytest.mark.parametrize("name", ["_TABLE", "_MARKS"])
+def test_caches_stop_growing_at_the_limit(monkeypatch, name: str) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(san, "_CACHE_LIMIT", 50)
+    table = type(getattr(san, name))()
+    monkeypatch.setattr(san, name, table)
+    text = "".join(chr(0x4E00 + i) for i in range(500)) + "\u0301"
+    out = sanitize(text)
+    assert len(table) <= 50
+    assert out == oracle(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "日本語の文章です。" * 5000,
+        "Привет, мир! " * 5000,
+        "déjà vu café " * 5000,
+        "한국어 텍스트 " * 5000,
+    ],
+)
+def test_guard_does_not_enter_the_slow_loop_for_ordinary_text(monkeypatch, text: str) -> None:  # type: ignore[no-untyped-def]
+    def boom(_text: str) -> str:
+        raise AssertionError("slow mark-run loop entered")
+
+    monkeypatch.setattr(san, "_drop_mark_runs", boom)
+    assert san._limit_mark_runs(text) == text
+    sanitize(text)
+
+
+def test_guard_enters_the_slow_loop_for_a_long_candidate_run(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    called = []
+    orig = san._drop_mark_runs
+    monkeypatch.setattr(san, "_drop_mark_runs", lambda t: (called.append(1), orig(t))[1])
+    assert san._limit_mark_runs("a" + "\u0301" * 31) == "a" + "\u0301" * 30
+    assert called
+
+
+MARKY = ["\u0301", "\u0316", "\u0338", "\u0344", "\u0f73", "\u00a8", "\u1fed", "\u0385"]
+
+
+def mark_heavy(rng: random.Random) -> str:
+    pool = MARKY + ["a", "e", "é", "日", "я", "\u200b", "<", " "]
+    weights = [6] * len(MARKY) + [1] * 8
+    return "".join(rng.choices(pool, weights, k=rng.randint(0, 120)))
+
+
+def max_nfkd_run(text: str) -> int:
+    best = run = 0
+    for c in unicodedata.normalize("NFKD", text):
+        if unicodedata.combining(c) != 0 or unicodedata.category(c).startswith("M"):
+            run += 1
+            best = max(best, run)
+        else:
+            run = 0
+    return best
+
+
+def test_guard_matches_the_oracle_guard_on_mark_heavy_and_cjk_text() -> None:
+    rng = random.Random(1129)
+    for _ in range(4000):
+        x = mark_heavy(rng) if rng.random() < 0.8 else "日本語" * rng.randint(0, 40)
+        assert san._limit_mark_runs(x) == oracle_guard(x), repr(x)
+
+
+def test_output_never_holds_more_than_30_combining_marks_in_a_row() -> None:
+    # Measured directly on the output's NFKD form, independent of the guard's bookkeeping.
+    rng = random.Random(30)
+    for _ in range(3000):
+        x = mark_heavy(rng)
+        assert max_nfkd_run(sanitize(x)) <= MAX_MARK_RUN, repr(x)
+    for m in MARKY:
+        assert max_nfkd_run(sanitize("a" + m * 200)) <= MAX_MARK_RUN, repr(m)
+        assert max_nfkd_run(sanitize(("a" + m * 20 + "\u200b") * 5)) <= MAX_MARK_RUN
+
+
+def test_cjk_ten_million_characters_stay_near_the_vectorized_path() -> None:
+    cjk = "日本語の文章" * 1_666_667
+    start = time.perf_counter()
+    cjk.translate({0x65E5: "x"})  # one C-speed pass over the same text, as the yardstick
+    yardstick = time.perf_counter() - start
+    t_cjk = min(timed(cjk) for _ in range(2))
+    assert t_cjk < 2.0  # the per-character loop took 2.1 s
+    assert t_cjk < yardstick * 4 + 0.3
+
+
+@pytest.mark.parametrize("bad", [None, b"abc", 5, ["a"]])
+def test_sanitize_refuses_a_non_str(bad: object) -> None:
+    with pytest.raises(TypeError):
+        sanitize(bad)  # type: ignore[arg-type]
+
+
+def test_sanitize_refuses_a_str_subclass() -> None:
+    class S(str):
+        pass
+
+    with pytest.raises(TypeError):
+        sanitize(S("abc"))
+
+
+def test_fixed_point_needs_at_most_three_passes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    real = unicodedata.normalize
+    passes = []
+
+    def spy(form: str, s: str) -> str:
+        if form == "NFKC":
+            passes.append(1)
+        return real(form, s)  # type: ignore[arg-type]
+
+    inputs = [
+        "e\u200b\u0301",
+        "e\u200b\u200c\u0301\u200b\u0323",
+        "\u1100\u200b\u1161\u200b\u11a8",
+        "a" + "\u0316\u200b" * 40,
+    ]
+    monkeypatch.setattr(san.unicodedata, "normalize", spy)
+    for x in inputs:
+        passes.clear()
+        sanitize(x)
+        assert len(passes) <= 3, repr(x)
