@@ -90,21 +90,40 @@ BANNED_REFS = {
 # Families matched by prefix: os.exec*, os.spawn*, os.posix_spawn*.
 BANNED_PREFIXES = ("os.exec", "os.spawn", "os.posix_spawn")
 CLOCK_SUFFIXES = ("datetime.now", "datetime.utcnow", "datetime.today", "date.today")
-# Path-style methods, banned as attribute calls whatever the receiver. The two gateway
-# methods share names, so they are accepted on a receiver named like the gateway.
+# Path-style methods with names no other common type uses, banned as attribute calls on any
+# receiver. The two gateway methods share names, so they are accepted on a receiver named
+# like the gateway.
 PATH_METHODS = set(
     (
-        "read_text write_text read_bytes write_bytes open touch mkdir unlink rmdir iterdir glob "
-        "rglob exists is_file is_dir is_symlink stat lstat resolve absolute expanduser chmod "
-        "rename replace symlink_to readlink samefile"
+        "read_text write_text read_bytes write_bytes touch mkdir unlink rmdir iterdir "
+        "symlink_to readlink samefile"
     ).split()
 )
+# Names that str, re, dict-like or tree objects share (``'a'.replace``, ``node.resolve``): banned
+# only when the receiver is a pathlib object (a class call such as ``Path(x)``, or a chain
+# from one).
+AMBIGUOUS_PATH_METHODS = set(
+    (
+        "open glob rglob exists is_file is_dir is_symlink stat lstat resolve absolute "
+        "expanduser chmod rename replace match full_match walk owner group"
+    ).split()
+)
+PATH_CLASSES = {
+    f"pathlib.{name}"
+    for name in "Path PurePath PosixPath WindowsPath PurePosixPath PureWindowsPath".split()
+}
+# Segments after ``Path(x)`` that still yield a path (``Path(x).parent.exists()``).
+PATH_CHAIN = {
+    "parent", "with_name()", "with_suffix()", "with_stem()", "joinpath()", "absolute()",
+    "resolve()", "expanduser()", "relative_to()", "readlink()",
+}  # fmt: skip
 GATEWAY_METHODS = {"read_bytes", "write_bytes"}
 GATEWAY_RECEIVERS = {"gateway", "_gateway", "gw"}
 DYNAMIC_ATTR_CALLS = {"getattr", "setattr", "delattr"}
 BANNED_TAILS = (
     {name.rsplit(".", 1)[-1] for name in BANNED_REFS}
     | PATH_METHODS
+    | AMBIGUOUS_PATH_METHODS
     | BANNED_MODULES
     | {"now", "utcnow", "today", "home", "cwd"}
 )
@@ -155,6 +174,27 @@ def _aliases(tree: ast.AST) -> dict[str, str]:
     return aliases
 
 
+def _is_path_object(receiver: str) -> bool:
+    """True when the resolved receiver is a pathlib class instance or a path-valued chain."""
+    for cls in PATH_CLASSES:
+        if not receiver.startswith(cls):
+            continue
+        segments = _split(receiver[len(cls) :])
+        if not segments:
+            continue
+        first, *chain = segments
+        if first in ("()", "cwd()", "home()") and all(seg in PATH_CHAIN for seg in chain):
+            return True
+    return False
+
+
+def _split(rest: str) -> list[str]:
+    """Split ``().parent.with_name()`` or ``.cwd()`` into its call/attribute segments."""
+    if rest.startswith("()"):
+        return ["()", *[s for s in rest[2:].split(".") if s]]
+    return [s for s in rest.split(".") if s]
+
+
 def _is_banned_ref(name: str) -> bool:
     return name in BANNED_REFS or name.startswith(BANNED_PREFIXES) or name.endswith(CLOCK_SUFFIXES)
 
@@ -190,12 +230,15 @@ def violations(source: str, filename: str = "<module>") -> list[str]:
 def _call_violations(node: ast.Call, aliases: dict[str, str], where: str) -> list[str]:
     found: list[str] = []
     func = node.func
-    if isinstance(func, ast.Attribute) and func.attr in PATH_METHODS:
+    if isinstance(func, ast.Attribute) and (
+        func.attr in PATH_METHODS or func.attr in AMBIGUOUS_PATH_METHODS
+    ):
         receiver = _resolve(func.value, aliases) or ""
         gateway_call = (
             func.attr in GATEWAY_METHODS and receiver.rsplit(".", 1)[-1] in GATEWAY_RECEIVERS
         )
-        if not gateway_call:
+        banned = func.attr in PATH_METHODS or _is_path_object(receiver)
+        if banned and not gateway_call:
             found.append(f"{where}: call to .{func.attr}()")
     name = _resolve(func, aliases)
     if name == "globals":
@@ -346,13 +389,31 @@ def test_scanner_accepts_harmless_code(source: str) -> None:
         "from pathlib import Path\nPath('f').write_text('x')",
         "def f(p):\n    return p.read_bytes()",
         "def f(p):\n    p.write_bytes(b'')",
-        "def f(p):\n    p.open()",
         "def f(p):\n    p.touch()",
         "def f(p):\n    p.mkdir()",
         "def f(p):\n    p.unlink()",
         "def f(p):\n    p.rmdir()",
         "def f(p):\n    p.iterdir()",
-        "def f(p):\n    p.glob('*')",
+        "def f(p):\n    p.symlink_to('x')",
+        "def f(p):\n    p.readlink()",
+        "def f(p):\n    p.samefile(p)",
+        # ambiguous names, banned when the receiver is a pathlib object
+        "from pathlib import Path\nPath('a').replace('b')",
+        "from pathlib import Path\nPath('a').rename('b')",
+        "from pathlib import Path\nPath('a').open()",
+        "from pathlib import Path\nPath('a').stat()",
+        "from pathlib import Path\nPath('a').resolve()",
+        "from pathlib import Path\nPath('a').exists()",
+        "from pathlib import Path\nPath('a').glob('*')",
+        "from pathlib import Path as P\nP('a').open()",
+        "from pathlib import Path as P\nP('a').replace('b')",
+        "import pathlib\npathlib.Path('a').stat()",
+        "import pathlib as pl\npl.PurePath('a').resolve()",
+        "from pathlib import PurePosixPath\nPurePosixPath('a').match('b')",
+        "from pathlib import Path\nPath.cwd().exists()",
+        "from pathlib import Path\nPath('a').parent.stat()",
+        "from pathlib import Path\nPath('a').with_name('b').exists()",
+        "from pathlib import Path\nPath('a').expanduser()",
         # a bare reference to open, not only a call
         "f = open",
         "def f(opener=open):\n    pass",
@@ -396,6 +457,13 @@ def test_scanner_flags_aliases_and_new_bans(source: str) -> None:
         "from datetime import datetime as D, UTC\nD(2026, 1, 1, tzinfo=UTC)",
         "def f(args):\n    return getattr(args, 'json'), vars(args)",
         "import argparse\nargparse.ArgumentParser()",
+        # ambiguous method names on non-path receivers
+        "'a'.replace('a', 'b')",
+        "def f(p):\n    return p.name.replace('a', 'b')",
+        "def f(node):\n    return node.resolve()",
+        "def f(x):\n    return x.stat(), x.exists(), x.open(), x.rename('a')",
+        "import re\nre.compile('a').match('b')",
+        "from pathlib import Path\nPath('a').name.replace('a', 'b')",
     ],
 )
 def test_scanner_accepts_gateway_routed_and_harmless_code(source: str) -> None:

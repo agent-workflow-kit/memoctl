@@ -65,6 +65,11 @@ OS_BLOCKED = (
 )
 
 
+def _under(path: str, base: Path) -> bool:
+    """True for an explicit path (with a directory part) that resolves below ``base``."""
+    return os.sep in path and base in Path(path).resolve().parents
+
+
 def check_process(argv: list[str], executables: list[str], base: Path) -> None:
     """Refuse anything that could reach the real crontab.
 
@@ -75,6 +80,10 @@ def check_process(argv: list[str], executables: list[str], base: Path) -> None:
     if os.path.basename(program) in SHELLS and "-c" in argv[1:]:
         if any("crontab" in a for a in argv[1:]):
             raise CrontabGuardError(f"refusing shell command mentioning crontab: {argv!r}")
+    # A wrapper (env, nohup, timeout, xargs, ...) may run a crontab given later in argv.
+    for arg in argv[1:]:
+        if os.path.basename(arg) == "crontab" and not _under(arg, base):
+            raise CrontabGuardError(f"refusing {program!r} with a crontab argument: {argv!r}")
     names = [program, *executables]
     if not any(os.path.basename(n) == "crontab" for n in names):
         return

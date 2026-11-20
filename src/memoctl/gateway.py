@@ -99,7 +99,7 @@ def _exec(
         )
     except subprocess.TimeoutExpired as exc:
         raise GatewayError(f"{argv!r} timed out after {timeout}s") from exc
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise GatewayError(f"{argv!r} could not run: {exc}") from exc
 
 

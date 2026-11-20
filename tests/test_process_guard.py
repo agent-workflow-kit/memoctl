@@ -117,7 +117,29 @@ def test_subprocess_without_posix_spawn_restrictions_still_works() -> None:
 
 
 def test_tripwire_on_the_default_path_exits_97() -> None:
-    # `env` is not crontab, so the guard lets it through; it then resolves crontab on PATH.
-    result = subprocess.run(["/usr/bin/env", "crontab", "-l"], capture_output=True, check=False)
+    # `env crontab` is refused by the guard (see below); the tripwire is the second line of
+    # defence, run here by its explicit path, which the guard allows under its base.
+    tripwire = os.environ["PATH"].split(os.pathsep)[0] + "/crontab"
+    result = subprocess.run(["/usr/bin/env", tripwire, "-l"], capture_output=True, check=False)
     assert result.returncode == 97
     assert b"tripwire" in result.stderr
+
+
+@pytest.mark.parametrize("wrapper", [["env"], ["nohup"], ["timeout", "5"], ["xargs"]])
+def test_wrapper_running_a_crontab_by_path_is_refused(decoy: Path, wrapper: list[str]) -> None:
+    with pytest.raises(CrontabGuardError):
+        subprocess.run([*wrapper, str(decoy), "-l"], check=False)
+    assert not _ran(decoy)
+
+
+def test_wrapper_running_a_crontab_by_name_is_refused(decoy: Path) -> None:
+    with pytest.raises(CrontabGuardError):
+        subprocess.run(["env", "crontab", "-l"], check=False)
+
+
+def test_wrapper_running_a_fake_crontab_under_the_base_is_allowed(
+    fake_crontab: tuple[str, Path],
+) -> None:
+    script, _state = fake_crontab
+    result = subprocess.run(["env", script, "-l"], check=False, capture_output=True)
+    assert result.returncode in (0, 1)

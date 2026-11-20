@@ -176,3 +176,13 @@ def test_crontab_child_gets_c_locale_and_no_noheader(
     monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
     RealGateway(crontab_bin=script).crontab_read()
     assert (state / "env.1").read_text().splitlines() == ["LC_ALL=C", "CRONTAB_NOHEADER=<unset>"]
+
+
+def test_embedded_nul_in_argv_is_a_gateway_error() -> None:
+    with pytest.raises(GatewayError, match="could not run"):
+        gateway._run(["/bin/true", "a\x00b"])
+
+
+def test_embedded_nul_in_env_is_a_gateway_error() -> None:
+    with pytest.raises(GatewayError, match="could not run"):
+        gateway._exec(["/bin/true"], None, None, {"A": "b\x00c"})
