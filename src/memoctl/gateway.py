@@ -24,6 +24,7 @@ import errno
 import os
 import pwd
 import secrets
+import select
 import shutil
 import stat
 import subprocess
@@ -154,12 +155,26 @@ def _read_fd(fd: int, nbytes: int) -> bytes:
     chunks: list[bytes] = []
     remaining = nbytes
     while remaining > 0:
-        chunk = os.read(fd, min(READ_CHUNK, remaining))
+        try:
+            chunk = os.read(fd, min(READ_CHUNK, remaining))
+        except BlockingIOError:
+            # A non-blocking descriptor (the caller set O_NONBLOCK on the open file
+            # description) with no data yet: wait until it is readable, then retry.
+            # todo(#10): the deadline of the command interrupts this wait.
+            select.select([fd], [], [])
+            continue
         if not chunk:
             break
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def _is_symlink(path: Path) -> bool:
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode)
+    except (OSError, ValueError):
+        return False
 
 
 def _write_fd(fd: int, text: str) -> None:
@@ -198,21 +213,42 @@ class RealGateway:
     def read_file_bounded(self, path: Path, nbytes: int) -> bytes:
         """Open with ``O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | O_NOCTTY`` (a FIFO or device opens
         at once instead of blocking), require a regular file on ``fstat`` of the open
-        descriptor (so there is no check-then-open race) and read at most ``nbytes``."""
+        descriptor (so there is no check-then-open race) and read at most ``nbytes``.
+
+        An ``lstat`` runs first so that a socket, FIFO or device is classified without
+        opening it (opening some special files has side effects, and a socket cannot be
+        opened at all). It is not a security boundary: the ``fstat`` after the open is the
+        authority.
+        """
+        try:
+            before = os.lstat(path)
+        except (TimeoutError, InterruptedError):
+            raise
+        except (OSError, ValueError):  # missing, denied, a loop, an embedded NUL
+            raise BodySourceError("unreadable") from None
+        if stat.S_ISLNK(before.st_mode):
+            raise BodySourceError("symlink")
+        if not stat.S_ISREG(before.st_mode):
+            raise BodySourceError("not_regular")
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY
         try:
             fd = os.open(path, flags)
+        except (TimeoutError, InterruptedError):
+            raise
         except OSError as exc:
-            # ELOOP (Linux, macOS) or EMLINK (BSD): the last component is a symlink.
-            raise BodySourceError(
-                "symlink" if exc.errno in (errno.ELOOP, errno.EMLINK) else "unreadable"
-            ) from None
+            # ELOOP (Linux, macOS) or EMLINK (BSD) also come from a loop in a parent
+            # component: it is a symlink refusal only when the last component is one.
+            if exc.errno in (errno.ELOOP, errno.EMLINK) and _is_symlink(path):
+                raise BodySourceError("symlink") from None
+            raise BodySourceError("unreadable") from None
         except ValueError:  # an embedded NUL
             raise BodySourceError("unreadable") from None
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise BodySourceError("not_regular")
             return _read_fd(fd, nbytes)
+        except (TimeoutError, InterruptedError):
+            raise
         except OSError:
             raise BodySourceError("unreadable") from None
         finally:
@@ -232,6 +268,8 @@ class RealGateway:
             if stat.S_ISDIR(mode):
                 raise BodySourceError("not_regular")
             return _read_fd(0, nbytes)
+        except (TimeoutError, InterruptedError):
+            raise  # the deadline (todo(#10)) or a signal handler, not an unreadable source
         except OSError:
             raise BodySourceError("unreadable") from None
 

@@ -6,16 +6,20 @@ hang (a reader that blocks) is cut off by an interval timer so the suite fails i
 
 from __future__ import annotations
 
+import errno
 import os
 import pty
 import signal
+import socket
 import threading
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import FrameType
 
 import pytest
 
+import memoctl.gateway as gateway_module
 from memoctl.bodyread import BodyError, read_body
 from memoctl.gateway import BodySourceError, RealGateway
 from tests.fake_gateway import FakeGateway
@@ -43,9 +47,15 @@ def _no_hang() -> Iterator[None]:
 
 
 @pytest.fixture
-def stdin_fd() -> Iterator[object]:
-    """Replace descriptor 0 for the test; restore it afterwards."""
-    saved = os.dup(0)
+def stdin_fd() -> Iterator[Callable[[int], None]]:
+    """Replace descriptor 0 for the test; restore it afterwards (also when fd 0 started closed,
+    as under ``pytest -s`` with a closed stdin)."""
+    try:
+        saved: int | None = os.dup(0)
+    except OSError as exc:
+        if exc.errno != errno.EBADF:
+            raise
+        saved = None
 
     def install(fd: int) -> None:
         os.dup2(fd, 0)
@@ -53,8 +63,14 @@ def stdin_fd() -> Iterator[object]:
     try:
         yield install
     finally:
-        os.dup2(saved, 0)
-        os.close(saved)
+        if saved is not None:
+            os.dup2(saved, 0)
+            os.close(saved)
+        else:
+            try:
+                os.close(0)
+            except OSError:
+                pass
 
 
 def _reason(excinfo: pytest.ExceptionInfo[BodyError]) -> str:
@@ -152,12 +168,24 @@ def test_fifo_with_an_endless_writer_is_refused(tmp_path: Path) -> None:
     stop = threading.Event()
 
     def writer() -> None:
-        fd = os.open(fifo, os.O_WRONLY)  # blocks until the reader opens
+        # never blocks: retry a non-blocking open until a reader exists or the test stops us
+        fd = -1
+        while not stop.is_set():
+            try:
+                fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                break
+            except OSError:
+                time.sleep(0.01)
+        if fd < 0:
+            return
         try:
             while not stop.is_set():
-                os.write(fd, b"x" * 4096)
-        except OSError:
-            pass
+                try:
+                    os.write(fd, b"x" * 4096)
+                except BlockingIOError:
+                    time.sleep(0.01)
+                except OSError:
+                    return
         finally:
             os.close(fd)
 
@@ -169,13 +197,33 @@ def test_fifo_with_an_endless_writer_is_refused(tmp_path: Path) -> None:
         assert _reason(e) == "not_regular"
     finally:
         stop.set()
-        # unblock a writer still waiting in open(): open the read end ourselves
-        try:
-            fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
-            os.close(fd)
-        except OSError:
-            pass
         t.join(5)
+    assert not t.is_alive()
+
+
+def test_unix_socket_is_not_regular(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)  # a relative bind keeps the name under the sun_path limit
+    srv = socket.socket(socket.AF_UNIX)
+    try:
+        srv.bind("s")
+        with pytest.raises(BodyError) as e:
+            read_body(RealGateway(), tmp_path / "s", LIMIT)
+        assert _reason(e) == "not_regular"
+    finally:
+        srv.close()
+
+
+def test_a_symlink_loop_in_a_parent_component_is_unreadable_not_a_symlink(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "lp1").symlink_to(tmp_path / "lp2")
+    (tmp_path / "lp2").symlink_to(tmp_path / "lp1")
+    with pytest.raises(BodyError) as e:
+        read_body(RealGateway(), tmp_path / "lp1" / "x", LIMIT)
+    assert _reason(e) == "unreadable"
+    with pytest.raises(BodyError) as e2:
+        read_body(RealGateway(), tmp_path / "lp1", LIMIT)
+    assert _reason(e2) == "symlink"
 
 
 def test_directory_is_refused(tmp_path: Path) -> None:
@@ -227,7 +275,7 @@ def test_procfs_file_reporting_size_zero_is_read_up_to_the_bound() -> None:
     assert len(read_body(RealGateway(), Path("/proc/self/status"), 65536)) > 0
 
 
-def test_a_file_that_grows_is_still_bounded(tmp_path: Path) -> None:
+def test_a_larger_file_rewritten_between_reads_is_still_bounded(tmp_path: Path) -> None:
     f = tmp_path / "g"
     f.write_bytes(b"a" * 10)
     gw = RealGateway()
@@ -255,20 +303,20 @@ def test_gateway_error_for_a_source_failure_is_a_body_source_error(tmp_path: Pat
 # --- stdin, real gateway --------------------------------------------------------------------
 
 
-def _pipe_stdin(stdin_fd: object, data: bytes) -> None:
+def _pipe_stdin(stdin_fd: Callable[[int], None], data: bytes) -> None:
     r, w = os.pipe()
     os.write(w, data)
     os.close(w)
-    stdin_fd(r)  # type: ignore[operator]
+    stdin_fd(r)
     os.close(r)
 
 
-def test_stdin_pipe_at_the_limit_is_accepted(stdin_fd: object) -> None:
+def test_stdin_pipe_at_the_limit_is_accepted(stdin_fd: Callable[[int], None]) -> None:
     _pipe_stdin(stdin_fd, b"a" * 4096)
     assert read_body(RealGateway(), "-", 4096) == b"a" * 4096
 
 
-def test_stdin_pipe_one_byte_over_is_refused(stdin_fd: object) -> None:
+def test_stdin_pipe_one_byte_over_is_refused(stdin_fd: Callable[[int], None]) -> None:
     _pipe_stdin(stdin_fd, b"a" * 4097)
     with pytest.raises(BodyError) as e:
         read_body(RealGateway(), "-", 4096)
@@ -276,10 +324,10 @@ def test_stdin_pipe_one_byte_over_is_refused(stdin_fd: object) -> None:
 
 
 def test_stdin_larger_than_the_pipe_buffer_is_read_in_full_up_to_the_bound(
-    stdin_fd: object,
+    stdin_fd: Callable[[int], None],
 ) -> None:
     r, w = os.pipe()
-    stdin_fd(r)  # type: ignore[operator]
+    stdin_fd(r)
     os.close(r)
     payload = b"b" * 65536
 
@@ -295,10 +343,10 @@ def test_stdin_larger_than_the_pipe_buffer_is_read_in_full_up_to_the_bound(
     t.join(5)
 
 
-def test_endless_stdin_dev_zero_stops_at_the_bound(stdin_fd: object) -> None:
+def test_endless_stdin_dev_zero_stops_at_the_bound(stdin_fd: Callable[[int], None]) -> None:
     fd = os.open("/dev/zero", os.O_RDONLY)
     try:
-        stdin_fd(fd)  # type: ignore[operator]
+        stdin_fd(fd)
     finally:
         os.close(fd)
     with pytest.raises(BodyError) as e:
@@ -306,9 +354,9 @@ def test_endless_stdin_dev_zero_stops_at_the_bound(stdin_fd: object) -> None:
     assert _reason(e) == "too_long"
 
 
-def test_endless_stdin_pipe_stops_at_the_bound(stdin_fd: object) -> None:
+def test_endless_stdin_pipe_stops_at_the_bound(stdin_fd: Callable[[int], None]) -> None:
     r, w = os.pipe()
-    stdin_fd(r)  # type: ignore[operator]
+    stdin_fd(r)
     os.close(r)
 
     def feed() -> None:
@@ -335,10 +383,12 @@ def test_endless_stdin_pipe_stops_at_the_bound(stdin_fd: object) -> None:
     assert not t.is_alive()
 
 
-def test_stdin_that_is_a_terminal_is_refused_without_reading(stdin_fd: object) -> None:
+def test_stdin_that_is_a_terminal_is_refused_without_reading(
+    stdin_fd: Callable[[int], None],
+) -> None:
     master, slave = pty.openpty()
     try:
-        stdin_fd(slave)  # type: ignore[operator]
+        stdin_fd(slave)
         with pytest.raises(BodyError) as e:
             read_body(RealGateway(), "-", LIMIT)
         assert _reason(e) == "terminal"
@@ -347,19 +397,21 @@ def test_stdin_that_is_a_terminal_is_refused_without_reading(stdin_fd: object) -
         os.close(slave)
 
 
-def test_stdin_dev_null_is_an_empty_body(stdin_fd: object) -> None:
+def test_stdin_dev_null_is_an_empty_body(stdin_fd: Callable[[int], None]) -> None:
     fd = os.open("/dev/null", os.O_RDONLY)
     try:
-        stdin_fd(fd)  # type: ignore[operator]
+        stdin_fd(fd)
     finally:
         os.close(fd)
     assert read_body(RealGateway(), "-", LIMIT) == b""
 
 
-def test_stdin_that_is_a_directory_is_refused(stdin_fd: object, tmp_path: Path) -> None:
+def test_stdin_that_is_a_directory_is_refused(
+    stdin_fd: Callable[[int], None], tmp_path: Path
+) -> None:
     fd = os.open(tmp_path, os.O_RDONLY)
     try:
-        stdin_fd(fd)  # type: ignore[operator]
+        stdin_fd(fd)
     finally:
         os.close(fd)
     with pytest.raises(BodyError) as e:
@@ -367,36 +419,111 @@ def test_stdin_that_is_a_directory_is_refused(stdin_fd: object, tmp_path: Path) 
     assert _reason(e) == "not_regular"
 
 
-def test_stdin_redirected_from_a_regular_file_is_read(stdin_fd: object, tmp_path: Path) -> None:
+def test_stdin_redirected_from_a_regular_file_is_read(
+    stdin_fd: Callable[[int], None], tmp_path: Path
+) -> None:
     f = tmp_path / "in"
     f.write_bytes(b"from file")
     fd = os.open(f, os.O_RDONLY)
     try:
-        stdin_fd(fd)  # type: ignore[operator]
+        stdin_fd(fd)
     finally:
         os.close(fd)
     assert read_body(RealGateway(), "-", LIMIT) == b"from file"
 
 
-def test_closed_stdin_is_unreadable(stdin_fd: object) -> None:
-    saved = os.dup(0)
+def test_closed_stdin_is_unreadable(stdin_fd: Callable[[int], None]) -> None:
     try:
-        os.close(0)
-        with pytest.raises(BodyError) as e:
-            read_body(RealGateway(), "-", LIMIT)
-        assert _reason(e) == "unreadable"
+        os.close(0)  # the fixture restores descriptor 0
+    except OSError:
+        pass
+    with pytest.raises(BodyError) as e:
+        read_body(RealGateway(), "-", LIMIT)
+    assert _reason(e) == "unreadable"
+
+
+def test_nonblocking_stdin_pipe_waits_for_a_late_writer(
+    stdin_fd: Callable[[int], None],
+) -> None:
+    r, w = os.pipe()
+    os.set_blocking(r, False)  # the flag is on the open file description, so fd 0 has it too
+    stdin_fd(r)
+    os.close(r)
+
+    def feed() -> None:
+        try:
+            time.sleep(0.2)
+            os.write(w, b"late body")
+        finally:
+            os.close(w)
+
+    t = threading.Thread(target=feed, daemon=True)
+    t.start()
+    try:
+        assert read_body(RealGateway(), "-", LIMIT) == b"late body"
     finally:
-        os.dup2(saved, 0)
-        os.close(saved)
+        t.join(5)
+    assert not t.is_alive()
+
+
+def test_nonblocking_stdin_pipe_with_data_and_a_closed_writer(
+    stdin_fd: Callable[[int], None],
+) -> None:
+    r, w = os.pipe()
+    os.set_blocking(r, False)
+    os.write(w, b"ready")
+    os.close(w)
+    stdin_fd(r)
+    os.close(r)
+    assert read_body(RealGateway(), "-", LIMIT) == b"ready"
+
+
+def test_a_timeout_raised_by_a_signal_handler_is_not_mapped_to_unreadable(
+    stdin_fd: Callable[[int], None],
+) -> None:
+    r, w = os.pipe()  # silent, writer open: the read blocks
+    stdin_fd(r)
+    os.close(r)
+
+    def fire(signum: int, frame: FrameType | None) -> None:
+        raise TimeoutError("deadline")
+
+    old = signal.signal(signal.SIGALRM, fire)
+    signal.setitimer(signal.ITIMER_REAL, 0.2)
+    try:
+        with pytest.raises(TimeoutError):
+            read_body(RealGateway(), "-", LIMIT)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+        signal.setitimer(signal.ITIMER_REAL, HANG_SECONDS)  # re-arm the hang guard
+        os.close(w)
+
+
+@pytest.mark.parametrize("exc", [TimeoutError, InterruptedError])
+def test_an_interruption_while_reading_a_file_is_not_mapped_to_unreadable(
+    exc: type[OSError], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    f = tmp_path / "b"
+    f.write_bytes(b"x")
+
+    def boom(fd: int, nbytes: int) -> bytes:
+        raise exc("interrupted")
+
+    monkeypatch.setattr(gateway_module, "_read_fd", boom)
+    with pytest.raises(exc):
+        read_body(RealGateway(), f, LIMIT)
 
 
 # --- argument checks and policy -------------------------------------------------------------
 
 
-@pytest.mark.parametrize("bad", [0, -1])
-def test_a_non_positive_limit_is_a_programming_error(bad: int, tmp_path: Path) -> None:
+@pytest.mark.parametrize("bad", [0, -1, 1.5, 8192.0, True, "8192", None])
+def test_a_limit_that_is_not_a_positive_int_is_a_programming_error(
+    bad: object, tmp_path: Path
+) -> None:
     with pytest.raises(ValueError):
-        read_body(RealGateway(), tmp_path / "x", bad)
+        read_body(RealGateway(), tmp_path / "x", bad)  # type: ignore[arg-type]
 
 
 def test_every_reason_has_a_fixed_message() -> None:
@@ -442,6 +569,38 @@ def test_fake_file_contract(tmp_path: Path) -> None:
         with pytest.raises(BodyError) as e:
             read_body(gw, Path(name), 10)
         assert e.value.reason == reason
+
+
+def test_fake_file_contract_for_a_socket_and_a_directory_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gw = FakeGateway(tmp_path)
+    (gw.root / "dir").mkdir()
+    monkeypatch.chdir(gw.root)
+    srv = socket.socket(socket.AF_UNIX)
+    try:
+        srv.bind("sock")
+        for name in ("sock", "dir"):
+            with pytest.raises(BodyError) as e:
+                read_body(gw, Path(name), 10)
+            assert e.value.reason == "not_regular"
+    finally:
+        srv.close()
+
+
+def test_fake_stdin_with_lone_surrogates_never_raises(tmp_path: Path) -> None:
+    gw = FakeGateway(tmp_path)
+    gw.terminal.stdin = "a\ud800b\udc80"
+    assert gw.read_stdin_bounded(100) == b"a\xed\xa0\x80b\x80"
+
+
+@pytest.mark.parametrize("reason", ["terminal", "not_regular", "unreadable"])
+def test_fake_stdin_error_knob_models_a_refused_stdin(tmp_path: Path, reason: str) -> None:
+    gw = FakeGateway(tmp_path)
+    gw.terminal.stdin_error = reason
+    with pytest.raises(BodyError) as e:
+        read_body(gw, "-", 5)
+    assert e.value.reason == reason
 
 
 def test_fake_stdin_contract(tmp_path: Path) -> None:
