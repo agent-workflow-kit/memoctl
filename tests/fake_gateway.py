@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import random
 import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from memoctl.gateway import GatewayError
+from memoctl.gateway import FileRead, GatewayError, PathInfo, _info
 
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -78,6 +79,8 @@ class FakeGateway:
         self.terminal = FakeTerminal()
         self.crontab = FakeCrontab()
         self.login: str | None = "tester"
+        self.uid_value = os.getuid()  # tests set another value to simulate a foreign owner
+        self.environ: dict[str, str] = {}
         self.runs: list[tuple[list[str], str | bytes | None, float | None]] = []
         self._scripted: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {}
         self._random = random.Random(seed)
@@ -118,6 +121,41 @@ class FakeGateway:
         if resolved != self.root and self.root not in resolved.parents:
             raise GatewayError(f"fake gateway: {path} is outside {self.root}")
         return resolved
+
+    def _confined_nofollow(self, path: Path) -> Path:
+        """Like ``_confined`` but the last component is not resolved (for ``lstat``)."""
+        if "\0" in str(path):
+            raise GatewayError(f"fake gateway: embedded NUL in path {str(path)!r}")
+        full = self.root / path
+        parent = self._confined(full.parent)
+        return parent / full.name
+
+    def uid(self) -> int:
+        return self.uid_value
+
+    def env(self, name: str) -> str | None:
+        return self.environ.get(name)
+
+    def stat_path(self, path: Path, *, follow: bool) -> PathInfo | None:
+        target = self._confined(path) if follow else self._confined_nofollow(path)
+        try:
+            return _info(target.stat() if follow else target.lstat())
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+
+    def list_dir(self, path: Path) -> list[str]:
+        return os.listdir(self._confined(path))
+
+    def open_file(self, path: Path, limit: int) -> FileRead | None:
+        target = self._confined_nofollow(path)
+        try:
+            info = _info(target.lstat())
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        if info.kind != "file":
+            return FileRead(PathInfo(info.kind, info.uid, info.mode), b"")
+        with target.open("rb") as handle:
+            return FileRead(info, handle.read(limit + 1))
 
     def read_bytes(self, path: Path) -> bytes:
         return self._confined(path).read_bytes()
