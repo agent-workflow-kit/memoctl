@@ -64,16 +64,66 @@ def test_files_round_trip_exact_bytes(tmp_path: Path) -> None:
     assert gw.read_bytes(tmp_path / "f") == data
 
 
-def test_stdio_goes_through_the_process_descriptors(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_stdin_comes_from_the_process_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO("in\n"))
+    assert RealGateway().stdin_read() == "in\n"
+
+
+def test_output_goes_to_descriptors_1_and_2(capfdbinary: pytest.CaptureFixture[bytes]) -> None:
     gw = RealGateway()
-    assert gw.stdin_read() == "in\n"
     gw.write_out("o")
     gw.write_err("e")
-    captured = capsys.readouterr()
-    assert (captured.out, captured.err) == ("o", "e")
+    captured = capfdbinary.readouterr()
+    assert (captured.out, captured.err) == (b"o", b"e")
+
+
+def test_output_is_utf8_with_errors_replaced_not_locale_encoded(
+    capfdbinary: pytest.CaptureFixture[bytes],
+) -> None:
+    RealGateway().write_out("caf\u00e9 \udcff")
+    assert capfdbinary.readouterr().out == "café ?".encode()
+
+
+def test_output_is_written_in_full(capfdbinary: pytest.CaptureFixture[bytes]) -> None:
+    RealGateway().write_out("x" * 200_000)
+    assert len(capfdbinary.readouterr().out) == 200_000
+
+
+def test_a_closed_or_broken_stdout_is_ignored(capfdbinary: pytest.CaptureFixture[bytes]) -> None:
+    saved = os.dup(1)
+    reader, writer = os.pipe()
+    os.close(reader)
+    os.dup2(writer, 1)
+    try:
+        RealGateway().write_out("x")
+        os.close(1)
+        RealGateway().write_out("y")
+    finally:
+        os.dup2(saved, 1)
+        os.close(saved)
+        os.close(writer)
+    capfdbinary.readouterr()
+
+
+def test_login_name_comes_from_the_password_database() -> None:
+    assert RealGateway().login_name() == pwd.getpwuid(os.getuid()).pw_name
+
+
+def test_login_name_is_none_when_the_lookup_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(uid: int) -> pwd.struct_passwd:
+        raise KeyError(uid)
+
+    monkeypatch.setattr(pwd, "getpwuid", missing)
+    assert RealGateway().login_name() is None
+
+
+def test_home_lookup_failure_is_a_gateway_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(uid: int) -> pwd.struct_passwd:
+        raise KeyError(uid)
+
+    monkeypatch.setattr(pwd, "getpwuid", missing)
+    with pytest.raises(GatewayError, match="password database"):
+        RealGateway().home()
 
 
 def test_terminal_width_has_a_positive_fallback() -> None:
@@ -186,3 +236,14 @@ def test_embedded_nul_in_argv_is_a_gateway_error() -> None:
 def test_embedded_nul_in_env_is_a_gateway_error() -> None:
     with pytest.raises(GatewayError, match="could not run"):
         gateway._exec(["/bin/true"], None, None, {"A": "b\x00c"})
+
+
+def test_crontab_no_crontab_message_must_start_stderr(
+    fake_crontab: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, _ = fake_crontab
+    monkeypatch.setenv("FAKE_CRONTAB_STDERR", "crontab: no crontab for x")
+    with pytest.raises(GatewayError):
+        RealGateway(crontab_bin=script).crontab_read()
+    monkeypatch.setenv("FAKE_CRONTAB_STDERR", "no crontab for")
+    assert RealGateway(crontab_bin=script).crontab_read() is None

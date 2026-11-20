@@ -167,3 +167,10 @@ def test_crontab_write_rejects_non_bytes(tmp_path: Path) -> None:
     with pytest.raises(TypeError):
         gw.crontab_write("text")  # type: ignore[arg-type]
     assert gw.crontab.writes == []
+
+
+def test_login_name_is_scriptable_and_may_be_absent(tmp_path: Path) -> None:
+    gw = FakeGateway(tmp_path)
+    assert gw.login_name() == "tester"
+    gw.login = None
+    assert gw.login_name() is None

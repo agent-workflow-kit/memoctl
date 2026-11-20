@@ -77,6 +77,7 @@ class FakeGateway:
         self.clock = FakeClock(start)
         self.terminal = FakeTerminal()
         self.crontab = FakeCrontab()
+        self.login: str | None = "tester"
         self.runs: list[tuple[list[str], str | bytes | None, float | None]] = []
         self._scripted: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {}
         self._random = random.Random(seed)
@@ -86,6 +87,9 @@ class FakeGateway:
 
     def home(self) -> Path:
         return self._home
+
+    def login_name(self) -> str | None:
+        return self.login
 
     def stdin_read(self) -> str:
         return self.terminal.stdin
