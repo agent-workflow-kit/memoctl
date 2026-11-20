@@ -60,8 +60,14 @@ def _process_guard(
 
     class GuardedPopen(real_popen):  # type: ignore[misc, valid_type]
         def __init__(self, args: Any, *a: Any, **kw: Any) -> None:
-            argv = [os.fsdecode(x) for x in args] if not isinstance(args, (str, bytes)) else [args]
-            program = argv[0] if argv else ""
+            if isinstance(args, (str, bytes)):
+                # A command string (shell form): never allow it to mention crontab.
+                if "crontab" in os.fsdecode(args):
+                    raise CrontabGuardError(f"refusing shell command mentioning crontab: {args!r}")
+                program = ""
+            else:
+                argv = [os.fsdecode(x) for x in args]
+                program = argv[0] if argv else ""
             if os.path.basename(program) == "crontab":
                 resolved = Path(program).resolve() if os.sep in program else None
                 if resolved is None or base not in resolved.parents:
