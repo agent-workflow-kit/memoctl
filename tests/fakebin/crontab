@@ -5,10 +5,18 @@
 # FAKE_CRONTAB_EXIT  exit status to force for every call (default 0); a forced failure
 #                    records the call but does not store the new table
 #
+# FAKE_CRONTAB_STDERR  stderr message for `-l` when no table is stored, which then exits 1
+#                    (default "no crontab for fake")
+#
+# Known deviations from a real crontab: unknown or extra arguments exit 64 (real: 1 with a
+# usage message); no "crontab: installing new crontab" message on stderr; no syntax
+# validation of the table; input without a trailing newline, or empty input, is accepted.
+#
 # Files in FAKE_CRONTAB_DIR:
 #   crontab      the stored table (written by `crontab -`, shown by `crontab -l`)
 #   calls.log    one line per call: "<n> <args> exit=<status>"
 #   input.<n>    the exact bytes call <n> read from standard input
+#   env.<n>      LC_ALL and CRONTAB_NOHEADER as call <n> saw them ("<unset>" when absent)
 dir=${FAKE_CRONTAB_DIR:-}
 if [ -z "$dir" ]; then
     echo "fake crontab: FAKE_CRONTAB_DIR is not set" >&2
@@ -18,6 +26,8 @@ forced=${FAKE_CRONTAB_EXIT:-0}
 touch "$dir/calls.log"
 n=$(($(wc -l <"$dir/calls.log") + 1))
 status=0
+echo "LC_ALL=${LC_ALL-<unset>}" >"$dir/env.$n"
+echo "CRONTAB_NOHEADER=${CRONTAB_NOHEADER-<unset>}" >>"$dir/env.$n"
 case "$1" in
 -l)
     if [ "$forced" != 0 ]; then
@@ -25,7 +35,7 @@ case "$1" in
     elif [ -f "$dir/crontab" ]; then
         cat "$dir/crontab"
     else
-        echo "no crontab for fake" >&2
+        echo "${FAKE_CRONTAB_STDERR:-no crontab for fake}" >&2
         status=1
     fi
     ;;

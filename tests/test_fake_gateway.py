@@ -137,3 +137,33 @@ def test_fake_never_starts_a_process(tmp_path: Path, monkeypatch: pytest.MonkeyP
     gw.crontab_read()
     gw.script_run(["t"])
     gw.run(["t"])
+
+
+def test_relative_paths_resolve_against_the_root_not_the_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gw = FakeGateway(tmp_path / "root")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    gw.write_bytes(Path("rel.txt"), b"x")
+    assert (gw.root / "rel.txt").read_bytes() == b"x"
+    assert not (elsewhere / "rel.txt").exists()
+    assert gw.read_bytes(Path("rel.txt")) == b"x"
+    with pytest.raises(GatewayError):
+        gw.read_bytes(Path("../elsewhere/rel.txt"))
+
+
+def test_embedded_nul_in_a_path_is_a_gateway_error(tmp_path: Path) -> None:
+    gw = FakeGateway(tmp_path)
+    with pytest.raises(GatewayError, match="NUL"):
+        gw.read_bytes(Path("a\0b"))
+    with pytest.raises(GatewayError, match="NUL"):
+        gw.write_bytes(Path("a\0b"), b"")
+
+
+def test_crontab_write_rejects_non_bytes(tmp_path: Path) -> None:
+    gw = FakeGateway(tmp_path)
+    with pytest.raises(TypeError):
+        gw.crontab_write("text")  # type: ignore[arg-type]
+    assert gw.crontab.writes == []

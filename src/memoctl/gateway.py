@@ -2,15 +2,18 @@
 
 This is the only module that reads the clock, the password-database home, the terminal, the
 standard descriptors, standard input, randomness or files, and the only one that starts a
-process (including ``crontab``) or, later, makes an HTTP call. Tests substitute a fake
-(``tests/fake_gateway.py``) or fake binaries (``tests/fakebin/``); ``tests/test_import_boundary.py``
-fails if another module reaches outside directly.
+process (including ``crontab``). An HTTP method is added by the issue that first needs it.
+Tests substitute a fake (``tests/fake_gateway.py``) or fake binaries (``tests/fakebin/``);
+``tests/test_import_boundary.py`` fails if another module reaches outside directly.
 
 Commands are always run as argv lists, never through a shell, and untrusted text is passed via
 stdin or files, never in argv or the environment. Process output is decoded as UTF-8 with
 ``surrogateescape`` so no byte sequence raises or is lost.
 
 A command reads the clock once with ``now()`` and hands the value down as a parameter.
+todo(#16): enforce one clock read per command.
+
+todo(#5): env accessor (kind_env, XDG) - ``os.environ`` is banned outside the gateway.
 """
 
 from __future__ import annotations
@@ -78,17 +81,33 @@ def _to_bytes(text: str | bytes | None) -> bytes | None:
     return text
 
 
-def run(
+def _exec(
+    argv: list[str],
+    stdin: bytes | None,
+    timeout: float | None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run ``argv`` without a shell; any start failure or timeout becomes a ``GatewayError``."""
+    try:
+        return subprocess.run(
+            argv,
+            input=stdin,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GatewayError(f"{argv!r} timed out after {timeout}s") from exc
+    except OSError as exc:
+        raise GatewayError(f"{argv!r} could not run: {exc}") from exc
+
+
+def _run(
     argv: list[str], *, stdin: str | bytes | None = None, timeout: float | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run ``argv`` without a shell; output is decoded as UTF-8 with ``surrogateescape``."""
-    raw = subprocess.run(
-        argv,
-        input=_to_bytes(stdin),
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
+    raw = _exec(argv, _to_bytes(stdin), timeout)
     return subprocess.CompletedProcess(
         raw.args,
         raw.returncode,
@@ -100,8 +119,9 @@ def run(
 class RealGateway:
     """The production gateway."""
 
-    def __init__(self, *, crontab_bin: str = "crontab") -> None:
+    def __init__(self, *, crontab_bin: str = "crontab", crontab_timeout: float = 30) -> None:
         self._crontab_bin = crontab_bin
+        self._crontab_timeout = crontab_timeout
 
     def now(self) -> datetime:
         return datetime.fromtimestamp(time.time(), UTC)
@@ -135,37 +155,44 @@ class RealGateway:
         return secrets.token_hex(nbytes)
 
     def read_bytes(self, path: Path) -> bytes:
+        """Read the whole file. Raises ``OSError`` as the filesystem does."""
         return Path(path).read_bytes()
 
     def write_bytes(self, path: Path, data: bytes) -> None:
+        """Write ``data`` to ``path``.
+
+        Not atomic (a crash can leave a truncated file), does not set a file mode, does not
+        create parent directories and does not fsync.
+        todo(#8): file modes and atomic replace.
+        """
         Path(path).write_bytes(data)
 
     def run(
         self, argv: list[str], *, stdin: str | bytes | None = None, timeout: float | None = None
     ) -> subprocess.CompletedProcess[str]:
-        return run(argv, stdin=stdin, timeout=timeout)
+        return _run(argv, stdin=stdin, timeout=timeout)
 
     def crontab_read(self) -> bytes | None:
         result = self._crontab(["-l"], None)
         if result.returncode == 0:
             return result.stdout
-        if result.returncode == 1 and b"no crontab" in result.stderr:
+        if result.returncode == 1 and result.stderr.strip().startswith(b"no crontab for "):
             return None
         raise self._failure("-l", result)
 
     def crontab_write(self, data: bytes) -> None:
+        if not isinstance(data, bytes):
+            raise TypeError(f"crontab_write needs bytes, got {type(data).__name__}")
         result = self._crontab(["-"], data)
         if result.returncode != 0:
             raise self._failure("-", result)
 
     def _crontab(self, args: list[str], stdin: bytes | None) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(
-            [self._crontab_bin, *args],
-            input=stdin,
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
+        # An explicit copy: the message language is fixed (the "no crontab for" check) and
+        # CRONTAB_NOHEADER (which changes what ``-l`` prints) never reaches the child.
+        env = {k: v for k, v in os.environ.items() if k != "CRONTAB_NOHEADER"}
+        env["LC_ALL"] = "C"
+        return _exec([self._crontab_bin, *args], stdin, self._crontab_timeout, env)
 
     def _failure(self, arg: str, result: subprocess.CompletedProcess[bytes]) -> GatewayError:
         detail = result.stderr.decode(ENCODING, ERRORS).strip()

@@ -59,8 +59,14 @@ class FakeCrontab:
 class FakeGateway:
     """Implements ``memoctl.gateway.Gateway`` with no real home, clock, terminal or crontab.
 
-    Files live under ``root`` and every path is confined to it (symlinks resolved).
+    Files live under ``root``: relative paths resolve against ``root`` (never the working
+    directory) and every path is confined to it (symlinks resolved).
     ``run`` never starts a process: results are scripted with ``script_run``.
+
+    Known deviations of the crontab fakes (this class and ``tests/fakebin/crontab``) from a
+    real crontab: unknown or extra arguments exit 64 (real: 1 with a usage message); no
+    "crontab: installing new crontab" message on stderr; no syntax validation of the table;
+    input without a trailing newline, or empty input, is accepted as is.
     """
 
     def __init__(self, root: Path, *, seed: int = 0, start: datetime = EPOCH) -> None:
@@ -102,7 +108,9 @@ class FakeGateway:
         return self._random.randbytes(nbytes).hex()
 
     def _confined(self, path: Path) -> Path:
-        resolved = Path(path).resolve()
+        if "\0" in str(path):
+            raise GatewayError(f"fake gateway: embedded NUL in path {str(path)!r}")
+        resolved = (self.root / path).resolve()
         if resolved != self.root and self.root not in resolved.parents:
             raise GatewayError(f"fake gateway: {path} is outside {self.root}")
         return resolved
@@ -132,6 +140,8 @@ class FakeGateway:
         return self.crontab.table
 
     def crontab_write(self, data: bytes) -> None:
+        if not isinstance(data, bytes):
+            raise TypeError(f"crontab_write needs bytes, got {type(data).__name__}")
         self._check_crontab()
         self.crontab.writes.append(data)
         self.crontab.table = data

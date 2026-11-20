@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# todo(#6): argparse --version/error output and implicit sys.argv bypass the gateway.
 def main(argv: list[str] | None = None, gateway: Gateway | None = None) -> int:
     gateway = gateway or RealGateway()
     parser = build_parser()

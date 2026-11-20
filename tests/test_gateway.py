@@ -17,21 +17,21 @@ from tests.conftest import CrontabGuardError
 
 
 def test_run_decodes_output_as_utf8_with_surrogateescape() -> None:
-    result = gateway.run(["/bin/sh", "-c", "printf 'caf\\303\\251 \\377'"])
+    result = gateway._run(["/bin/sh", "-c", "printf 'caf\\303\\251 \\377'"])
     assert result.stdout == "café \udcff"
 
 
 def test_run_passes_stdin_without_a_shell() -> None:
-    result = gateway.run(["/bin/cat"], stdin="a; echo $HOME `x`\n")
+    result = gateway._run(["/bin/cat"], stdin="a; echo $HOME `x`\n")
     assert result.stdout == "a; echo $HOME `x`\n"
 
 
 def test_run_returns_nonzero_status_without_raising() -> None:
-    assert gateway.run(["/bin/sh", "-c", "exit 3"]).returncode == 3
+    assert gateway._run(["/bin/sh", "-c", "exit 3"]).returncode == 3
 
 
 def test_run_stdin_round_trips_surrogates() -> None:
-    assert gateway.run(["/bin/cat"], stdin="\udcff").stdout == "\udcff"
+    assert gateway._run(["/bin/cat"], stdin="\udcff").stdout == "\udcff"
 
 
 def test_now_is_timezone_aware_utc() -> None:
@@ -117,6 +117,62 @@ def test_default_crontab_is_refused_by_the_guard() -> None:
 
 def test_a_crontab_outside_the_test_tmp_dir_is_refused() -> None:
     with pytest.raises(CrontabGuardError):
-        gateway.run(["/usr/bin/crontab", "-l"])
+        gateway._run(["/usr/bin/crontab", "-l"])
     with pytest.raises(CrontabGuardError):
         RealGateway(crontab_bin="crontab").crontab_read()
+
+
+def test_missing_binary_is_a_gateway_error_naming_argv() -> None:
+    with pytest.raises(GatewayError, match="no-such-binary-xyz"):
+        gateway._run(["/nonexistent/no-such-binary-xyz"])
+
+
+def test_missing_crontab_binary_is_a_gateway_error(tmp_path: Path) -> None:
+    gw = RealGateway(crontab_bin=str(tmp_path / "crontab"))
+    with pytest.raises(GatewayError, match="could not run"):
+        gw.crontab_read()
+    with pytest.raises(GatewayError, match="could not run"):
+        gw.crontab_write(b"x\n")
+
+
+def test_run_timeout_is_a_gateway_error() -> None:
+    with pytest.raises(GatewayError, match="timed out"):
+        gateway._run(["/bin/sleep", "5"], timeout=0.2)
+
+
+def test_crontab_timeout_is_a_gateway_error(fake_crontab: tuple[str, Path], tmp_path: Path) -> None:
+    slow = tmp_path / "slow" / "crontab"
+    slow.parent.mkdir()
+    slow.write_text("#!/bin/sh\nsleep 5\n")
+    slow.chmod(0o755)
+    gw = RealGateway(crontab_bin=str(slow), crontab_timeout=0.2)
+    with pytest.raises(GatewayError, match="timed out"):
+        gw.crontab_read()
+    with pytest.raises(GatewayError, match="timed out"):
+        gw.crontab_write(b"x\n")
+
+
+def test_crontab_write_rejects_non_bytes(fake_crontab: tuple[str, Path]) -> None:
+    script, state = fake_crontab
+    with pytest.raises(TypeError):
+        RealGateway(crontab_bin=script).crontab_write("text")  # type: ignore[arg-type]
+    assert not (state / "calls.log").exists()
+
+
+def test_crontab_read_unrelated_exit_1_is_an_error(
+    fake_crontab: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, _ = fake_crontab
+    monkeypatch.setenv("FAKE_CRONTAB_STDERR", "bad entry; no crontab installed")
+    with pytest.raises(GatewayError, match="bad entry"):
+        RealGateway(crontab_bin=script).crontab_read()
+
+
+def test_crontab_child_gets_c_locale_and_no_noheader(
+    fake_crontab: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script, state = fake_crontab
+    monkeypatch.setenv("CRONTAB_NOHEADER", "Y")
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    RealGateway(crontab_bin=script).crontab_read()
+    assert (state / "env.1").read_text().splitlines() == ["LC_ALL=C", "CRONTAB_NOHEADER=<unset>"]
