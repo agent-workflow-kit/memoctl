@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from memoctl.gateway import GatewayError
+from memoctl.gateway import BodySourceError, GatewayError
 
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -40,7 +40,7 @@ class FakeClock:
 class FakeTerminal:
     """Scripted standard input and recorded output; not a tty unless the test says so."""
 
-    stdin: str = ""
+    stdin: str | bytes = ""
     stdout: str = ""
     stderr: str = ""
     width: int = 80
@@ -91,8 +91,32 @@ class FakeGateway:
     def login_name(self) -> str | None:
         return self.login
 
-    def stdin_read(self) -> str:
-        return self.terminal.stdin
+    def read_stdin_bounded(self, nbytes: int) -> bytes:
+        if self.terminal.tty.get(0, False):
+            raise BodySourceError("terminal")
+        data = self.terminal.stdin
+        raw = data.encode("utf-8", "surrogateescape") if isinstance(data, str) else data
+        return raw[:nbytes]
+
+    def read_file_bounded(self, path: Path, nbytes: int) -> bytes:
+        if "\0" in str(path) or str(path) == "":
+            raise BodySourceError("unreadable")
+        last = self.root / path
+        if last.is_symlink():
+            raise BodySourceError("symlink")
+        try:
+            target = self._confined(path)
+        except GatewayError:
+            raise BodySourceError("unreadable") from None
+        if not target.exists():
+            raise BodySourceError("unreadable")
+        if not target.is_file():
+            raise BodySourceError("not_regular")
+        try:
+            with target.open("rb") as f:
+                return f.read(nbytes)
+        except OSError:
+            raise BodySourceError("unreadable") from None
 
     def write_out(self, text: str) -> None:
         self.terminal.stdout += text
