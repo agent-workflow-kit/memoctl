@@ -80,7 +80,7 @@ Checked in this order; the first failure is reported. Each refusal of items 1 to
 
 Items 2 to 4 also apply to search text (`field` `text`).
 
-`--body-file` must name a regular file; it is opened without following a symlink in its last component, with `O_NONBLOCK` and `O_CLOEXEC`; the descriptor must be a regular file on `fstat`, and the size is bounded only by the read cap (procfs files report size 0). At most `limits.max_body_bytes` + 1 bytes are read (one more than the limit, to tell "at the limit" from "over it"). A symlink, FIFO, directory or device exits 2. `-` reads standard input with the same cap and the same checks; stdin that is a terminal exits 2 (never blocks on a person). A stdin that does not close is cut off by the [deadline](#deadlines).
+`--body-file` must name a regular file; it is opened without following a symlink in its last component, with `O_NONBLOCK` and `O_CLOEXEC`; the descriptor must be a regular file on `fstat`, and the size is bounded only by the read cap (procfs files report size 0). At most `limits.max_body_bytes` + 1 bytes are read (one more than the limit, to tell "at the limit" from "over it"). A symlink, FIFO, directory or device exits 2. `-` reads standard input with the same cap and the same checks; stdin that is a terminal exits 2 (never blocks on a person). Standard input is not a path, so only a terminal and a directory are refused; pipes, sockets, files and character devices are read under the same bound. A stdin that does not close is cut off by the [deadline](#deadlines).
 
 ### Secret check
 
