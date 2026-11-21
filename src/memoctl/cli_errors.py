@@ -19,8 +19,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from memoctl.body import BodyTextError
+from memoctl.bodyread import BodyError
 from memoctl.config import ConfigError
 from memoctl.grammar import GrammarError
+from memoctl.lifetime import ClockError
+from memoctl.secretscan import SecretDetected
+from memoctl.statedir import UnsafeStateError
 from memoctl.store import SchemaNewerError, StoreError
 
 OK = 0
@@ -275,17 +280,26 @@ def _register_defaults() -> None:
             details={"field": e.field[:MAX_FIELD]},  # the schema caps a field at 4096
         ),
     )
-    # Not on this base; each owner adds one register_error line here:
-    # todo(#11): bodyread.BodyError -> usage, details = e.details (field, plus limit on
-    #   too_long); no "reason" key (never the path or content).
-    # todo(#12): body.BodyTextError -> usage, details {field (body|text), class, line, limit}.
-    # todo(#13): secretscan.SecretDetected -> exit 20 refused, reason secret_detected,
-    #   details {class, field}. Never render a traceback: frames hold the caller's text.
-    # todo(#8): statedir.UnsafeStateError -> exit 20 refused, reason unsafe_state; plain
-    #   OSError from state creation (EROFS, EACCES, EIO) needs its own mapping there.
-    # todo(#14): author/lifetime GrammarError is covered above; lifetime.ClockError ->
-    #   internal (exit 1): interface.md has no clock code, so a bad clock is an environment
-    #   fault. Register it with ``internal_failure`` (decision recorded on issue #6).
+    register_error(BodyError, lambda e: Failure(USAGE, "usage", e.message, details=e.details))
+    register_error(BodyTextError, lambda e: Failure(USAGE, "usage", e.message, details=e.details))
+    register_error(
+        SecretDetected,
+        lambda e: Failure(REFUSED, "refused", e.message, "secret_detected", details=e.details),
+    )
+    register_error(
+        UnsafeStateError,
+        lambda e: Failure(REFUSED, "refused", "state directory is not safe to use", "unsafe_state"),
+    )
+    # A failure to create or reach the state directory (EROFS, EACCES, EIO, ...) is not an
+    # unsafe_state refusal (interface.md, State): the state cannot be used, so exit 12
+    # db_unreadable with no errno or path text.
+    register_error(
+        OSError, lambda e: Failure(FAILED, "failed", "state cannot be accessed", "db_unreadable")
+    )
+    # A bad clock is an environment fault with no code of its own (interface.md, Exit codes).
+    register_error(ClockError, lambda e: internal_failure())
+    # Tracebacks must never render locals: the frames of BodyTextError and SecretDetected hold
+    # the caller's text. Nothing here renders a traceback at all.
     # todo(#33): a crontab GatewayError -> exit 12 failed, reason crontab_failed. A
     #   GatewayError is internal elsewhere (a bug or an environment fault).
     # The deadline's own timer writes a pre-built envelope and exits 12 (memoctl.deadline); a

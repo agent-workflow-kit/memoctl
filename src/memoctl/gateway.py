@@ -15,8 +15,9 @@ exit (``exit_now``) live here too; ``memoctl.deadline`` builds the command deadl
 
 Body sources (``read_file_bounded``, ``read_stdin_bounded``) return raw bytes, never text.
 
-A command reads the clock once with ``now()`` and hands the value down as a parameter.
-todo(#16): enforce one clock read per command.
+A command reads the clock once with ``now()`` and hands the value down as a parameter; ``add``
+reads it once at its step 7 (``tests/test_cmd_add.py`` asserts a single read). ``now()`` floors
+``time.time_ns()``, so the seconds and milliseconds derived from it never round up.
 
 ``env`` is the only way to read an environment variable (``os.environ`` is banned elsewhere).
 The config loader never calls it: HOME and XDG_* are not read (interface.md, Config).
@@ -40,7 +41,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn, Protocol
 
@@ -433,6 +434,9 @@ class AlarmHandle(Protocol):
         ...
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
 class Gateway(Protocol):
     """Everything memoctl needs from outside the process."""
 
@@ -796,7 +800,9 @@ class RealGateway:
         self._crontab_timeout = crontab_timeout
 
     def now(self) -> datetime:
-        return datetime.fromtimestamp(time.time(), UTC)
+        # Integer nanoseconds floored to microseconds (a datetime's resolution): a float
+        # would round a reading within 0.5 us below a second up to the next second.
+        return _EPOCH + timedelta(microseconds=time.time_ns() // 1000)
 
     def home(self) -> Path:
         try:

@@ -159,8 +159,11 @@ class FakeGateway:
         self.mono = 1000.0
         self.alarms: list[FakeAlarm] = []
         self.exits: list[int] = []
+        self.now_calls = 0  # clock reads: a command reads the clock once
+        self.stdin_reads = 0  # read_stdin_bounded calls: a refusal before the body never reads
 
     def now(self) -> datetime:
+        self.now_calls += 1
         return self.clock.now()
 
     def home(self) -> Path:
@@ -218,6 +221,7 @@ class FakeGateway:
         raise FakeExit(code)
 
     def read_stdin_bounded(self, nbytes: int) -> bytes:
+        self.stdin_reads += 1
         if self.terminal.stdin_error is not None:
             raise BodySourceError(self.terminal.stdin_error)
         if self.terminal.tty.get(0, False):

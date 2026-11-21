@@ -33,6 +33,26 @@ def test_run_stdin_round_trips_surrogates() -> None:
     assert gateway._run(["/bin/cat"], stdin="\udcff").stdout == "\udcff"
 
 
+@pytest.mark.parametrize(
+    ("ns", "seconds", "micro"),
+    [
+        (1_999_999_999, 1, 999_999),  # 0.5 microsecond below the second: float() rounds up
+        (1_000_000_000_000_000_000 - 1, 999_999_999, 999_999),
+        (0, 0, 0),
+        (1_700_000_000_123_456_789, 1_700_000_000, 123_456),
+    ],
+)
+def test_now_floors_time_ns_exactly(
+    monkeypatch: pytest.MonkeyPatch, ns: int, seconds: int, micro: int
+) -> None:
+    """The clock is read as integer nanoseconds and floored; no float rounding to the next
+    second (interface.md, Log)."""
+    monkeypatch.setattr("memoctl.gateway.time.time_ns", lambda: ns)
+    now = RealGateway().now()
+    assert int(now.timestamp()) == seconds
+    assert now.microsecond == micro
+
+
 def test_now_is_timezone_aware_utc() -> None:
     now = RealGateway().now()
     assert now.tzinfo is not None
