@@ -1,0 +1,19 @@
+note 7
+repo: owner/repo
+topic: queue
+kind: unknown
+labels: a=b\u{001B}
+status: live
+created: 2026-01-02T03:04:05Z
+expires: 2026-02-01T03:04:05Z
+superseded_by: -
+supersedes: 3
+size: 11 bytes
+body_sha256: 0000000000000000000000000000000000000000000000000000000000000000
+body:
+| plain
+| \u{001B}]0;t\u{0007} title
+| \u{202E}evil\u{202C}    tab\u{000D}
+| \u{D800}
+|
+|

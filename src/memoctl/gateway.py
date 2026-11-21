@@ -751,26 +751,40 @@ def _is_symlink(path: Path) -> bool:
         return False
 
 
+# Bound on the wait for a blocked output pipe, per ``_write_fd`` call (the deadline restarts on
+# each call); ``emit`` makes at most three (stdout, stderr, warnings), so the worst case is ~9 s.
+WRITE_WAIT_SECONDS = 3.0
+
+
 def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
     """Write ``text`` to a standard descriptor as UTF-8 with errors replaced, never through the
     locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says.
+
+    A non-blocking descriptor that is full (EAGAIN) is waited on for at most
+    ``WRITE_WAIT_SECONDS`` per call, then retried; partial writes continue.
 
     With ``bound`` the write is for a signal handler that must not hang: it waits for the
     descriptor to be writable for at most ``bound`` seconds in all (``poll``, EINTR retried
     with the time left) and writes in small chunks, then gives up silently. The descriptor is
     left blocking (its open file description may be shared with other processes)."""
     view = memoryview(text.encode(ENCODING, "replace"))
-    end = None if bound is None else time.monotonic() + bound
+    end = time.monotonic() + (WRITE_WAIT_SECONDS if bound is None else bound)
     try:
         while view:
-            if end is None:
+            if bound is None:
                 chunk = view
             elif _writable_before(fd, end):
                 chunk = view[:_BOUNDED_CHUNK]
             else:
                 return
-            view = view[os.write(fd, chunk) :]
-    except OSError:
+            try:
+                view = view[os.write(fd, chunk) :]
+            except BlockingIOError:
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    return
+                select.select([], [fd], [], remaining)
+    except (OSError, ValueError):
         pass
 
 
