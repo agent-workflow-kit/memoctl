@@ -148,7 +148,7 @@ def _is_json_document(data: bytes) -> bool:
     """Whether ``data`` is one JSON object or array (a bare number or word is plain text)."""
     try:
         return isinstance(json.loads(data.decode("utf-8")), dict | list)
-    except ValueError:
+    except (ValueError, RecursionError):  # not JSON, or nested too deeply to parse
         return False
 
 

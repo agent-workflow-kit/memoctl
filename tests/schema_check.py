@@ -189,7 +189,7 @@ def validate_json_output(name: str, raw: bytes) -> Any:
         doc = json.loads(
             raw.decode("utf-8"), parse_constant=_reject_constant, object_pairs_hook=_no_duplicates
         )
-    except ValueError as e:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
+    except (ValueError, RecursionError) as e:  # Unicode/JSON decode errors are ValueErrors
         raise SchemaViolation(name, [f"$: output is not one strict JSON document: {e}"]) from e
     validate(name, doc)
     return doc

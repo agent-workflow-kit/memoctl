@@ -272,6 +272,10 @@ def test_plain_text_is_not_mistaken_for_json(root: Path, data: bytes) -> None:
     check_golden("t/a.txt", data, root=root, environ={UPDATE_ENV: "1"})
 
 
+def test_deeply_nested_output_in_a_text_golden_is_plain_text(root: Path) -> None:
+    check_golden("t/a.txt", b"[" * 100000, root=root, environ={UPDATE_ENV: "1"})
+
+
 def test_a_definitions_only_schema_cannot_validate_a_json_golden(root: Path) -> None:
     with pytest.raises(AssertionError, match="not an output schema"):
         check_golden("t/a.json", b"{}\n", schema="defs", root=root, environ={UPDATE_ENV: "1"})

@@ -222,6 +222,31 @@ def test_additional_properties_with_a_schema() -> None:
     assert list(v.iter_errors({"b": "s"}))
 
 
+def _nodes_with(keyword: str, node: Any) -> bool:
+    if isinstance(node, dict):
+        return keyword in node or any(_nodes_with(keyword, v) for v in node.values())
+    if isinstance(node, list):
+        return any(_nodes_with(keyword, v) for v in node)
+    return False
+
+
+def test_no_schema_combines_unevaluated_properties_with_pattern_properties() -> None:
+    # jsonschema evaluates `unevaluatedProperties` through a private helper that matches
+    # `patternProperties` with Python's `re` (where `$` accepts a trailing newline), and that
+    # helper cannot be replaced by the regress-based overrides of the harness's validator. So a
+    # schema must not use the two together, or the harness and CI's check-jsonschema disagree.
+    for name, schema in all_schemas().items():
+        assert not (
+            _nodes_with("unevaluatedProperties", schema)
+            and _nodes_with("patternProperties", schema)
+        ), f"{name}: unevaluatedProperties together with patternProperties"
+
+
+def test_a_deeply_nested_output_is_a_violation_not_a_traceback() -> None:
+    with pytest.raises(SchemaViolation, match="not one strict JSON document"):
+        validate_json_output("cli/error", b"[" * 100000 + b"\n")
+
+
 # --- a schema is not a way to skip validation -------------------------------------------------
 
 
