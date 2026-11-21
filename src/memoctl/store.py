@@ -467,7 +467,19 @@ class Store:
         if self.mode is Mode.READ:
             raise RuntimeError("write transaction on a read-only store")
         with self._transaction("BEGIN IMMEDIATE"):
+            self._recheck()
             yield
+
+    def _recheck(self) -> None:
+        """Under the write lock, read the identity and version again: another process may have
+        migrated or replaced the store since it was opened (a refusal rolls the transaction
+        back)."""
+        try:
+            found = _classify(_inspect(self._conn))
+        except sqlite3.Error as exc:
+            raise _failure(exc, self) from None
+        if found != CURRENT:
+            raise StoreError(DB_CORRUPT)
 
     @contextmanager
     def read(self) -> Iterator[None]:

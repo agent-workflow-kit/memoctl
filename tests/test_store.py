@@ -458,8 +458,8 @@ def test_triggers_and_views_never_run_even_if_present(state: StateDir) -> None:
         s.execute(
             "CREATE TRIGGER t AFTER INSERT ON rate BEGIN INSERT INTO rate VALUES ('fired', 1); END"
         )
-        with s.write():
-            s.execute("INSERT INTO rate VALUES ('a/b', 1)")
+        # not inside write(): the transaction's schema re-check refuses a changed schema
+        s.execute("INSERT INTO rate VALUES ('a/b', 1)")
         assert s.execute("SELECT count(*) FROM rate").fetchone()[0] == 1
 
 

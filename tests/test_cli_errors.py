@@ -366,11 +366,16 @@ def test_unsafe_state_maps_to_exit_20_without_the_reason_word() -> None:
     assert (f.exit_code, f.reason, f.details) == (REFUSED, "unsafe_state", None)
 
 
-@pytest.mark.parametrize("exc", [OSError(30, "x"), PermissionError(13, "x"), FileNotFoundError()])
-def test_a_plain_os_error_is_a_failed_state_not_internal(exc: OSError) -> None:
-    f = _validated(failure_for(exc))
+def test_a_state_access_error_is_a_failed_state_not_internal() -> None:
+    from memoctl.statedir import StateAccessError
+
+    f = _validated(failure_for(StateAccessError()))
     assert (f.exit_code, f.code, f.reason, f.details) == (FAILED, "failed", "db_unreadable", None)
-    assert "30" not in f.envelope()  # no errno text, no path
+
+
+@pytest.mark.parametrize("exc", [OSError(30, "x"), PermissionError(13, "x"), FileNotFoundError()])
+def test_a_bare_os_error_is_internal(exc: OSError) -> None:
+    assert failure_for(exc) == cli_errors.internal_failure()
 
 
 def test_clock_error_is_internal() -> None:

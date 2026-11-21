@@ -25,7 +25,7 @@ from memoctl.config import ConfigError
 from memoctl.grammar import GrammarError
 from memoctl.lifetime import ClockError
 from memoctl.secretscan import SecretDetected
-from memoctl.statedir import UnsafeStateError
+from memoctl.statedir import StateAccessError, UnsafeStateError
 from memoctl.store import SchemaNewerError, StoreError
 
 OK = 0
@@ -298,7 +298,8 @@ def _register_defaults() -> None:
     # unsafe_state refusal (interface.md, State): the state cannot be used, so exit 12
     # db_unreadable with no errno or path text.
     register_error(
-        OSError, lambda e: Failure(FAILED, "failed", "state cannot be accessed", "db_unreadable")
+        StateAccessError,
+        lambda e: Failure(FAILED, "failed", "state cannot be accessed", "db_unreadable"),
     )
     # A bad clock is an environment fault with no code of its own (interface.md, Exit codes).
     register_error(ClockError, lambda e: internal_failure())

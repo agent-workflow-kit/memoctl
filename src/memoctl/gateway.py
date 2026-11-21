@@ -764,8 +764,11 @@ def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
     """Write ``text`` to a standard descriptor as UTF-8 with errors replaced, never through the
     locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says.
 
-    A non-blocking descriptor that is full (EAGAIN) is waited on for at most
-    ``WRITE_WAIT_SECONDS`` per call, then retried; partial writes continue.
+    Without ``bound`` the descriptor is waited on (``poll``) before each small write for at most
+    ``WRITE_WAIT_SECONDS`` per call, then the write gives up silently; this holds for a blocking
+    pipe too (one ``write`` of a large chunk would block until a reader drains it). A
+    non-blocking descriptor that is full (EAGAIN) is waited on the same way; partial writes
+    continue.
 
     With ``bound`` the write is for a signal handler that must not hang: it waits for the
     descriptor to be writable for at most ``bound`` seconds in all (``poll``, EINTR retried
@@ -775,9 +778,7 @@ def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
     end = time.monotonic() + (WRITE_WAIT_SECONDS if bound is None else bound)
     try:
         while view:
-            if bound is None:
-                chunk = view
-            elif _writable_before(fd, end):
+            if _writable_before(fd, end):
                 chunk = view[:_BOUNDED_CHUNK]
             else:
                 return

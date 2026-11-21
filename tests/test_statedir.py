@@ -19,7 +19,7 @@ import pytest
 
 from memoctl.config import ConfigError
 from memoctl.gateway import DirHandle, GatewayError, RealGateway
-from memoctl.statedir import UnsafeStateError, open_state_dir
+from memoctl.statedir import StateAccessError, UnsafeStateError, open_state_dir
 from tests.fake_gateway import FakeGateway
 
 
@@ -274,8 +274,9 @@ def test_a_read_only_directory_above_a_missing_level_raises_permission_error(
     try:
         if _unwritable(holder):
             pytest.skip("permissions are not enforced for this user")
-        with pytest.raises(PermissionError):
+        with pytest.raises(StateAccessError) as info:
             open_state_dir(gw, create=True)
+        assert isinstance(info.value.__cause__, PermissionError)
         assert sorted(p.relative_to(home).as_posix() for p in home.rglob("*")) == before
     finally:
         holder.chmod(0o700)
@@ -318,9 +319,10 @@ def test_a_failed_mkdir_propagates_its_own_error_at_every_level(
     home: Path, name: str, err: int
 ) -> None:
     g = FailingGateway(home, name, err)
-    with pytest.raises(OSError) as info:
+    with pytest.raises(StateAccessError) as info:
         open_state_dir(g, create=True)
-    assert info.value.errno == err
+    cause = info.value.__cause__
+    assert isinstance(cause, OSError) and cause.errno == err
     assert not isinstance(info.value, UnsafeStateError)
 
 
@@ -338,9 +340,10 @@ def test_an_unexplained_eacces_on_the_final_open_propagates(home: Path) -> None:
             return None if handle is None else Denying(handle, "", 0)
 
     _state(home).mkdir(parents=True, mode=0o700)
-    with pytest.raises(OSError) as info:
+    with pytest.raises(StateAccessError) as info:
         open_state_dir(G(home), create=False)
-    assert info.value.errno == errno.EACCES
+    cause = info.value.__cause__
+    assert isinstance(cause, OSError) and cause.errno == errno.EACCES
     assert not isinstance(info.value, UnsafeStateError)
 
 

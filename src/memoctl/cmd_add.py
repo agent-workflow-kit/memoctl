@@ -57,7 +57,7 @@ from memoctl.lifetime import (
     parse_expires,
     seconds_since_epoch,
 )
-from memoctl.logfile import LogError, LogRecord, append_record
+from memoctl.logfile import LogRecord, append_record
 from memoctl.render import emit, format_add
 from memoctl.secretscan import check_secrets
 from memoctl.statedir import StateDir, open_state_dir
@@ -65,7 +65,6 @@ from memoctl.store import Mode, Store, open_store
 
 __all__ = ["COMMAND", "run"]
 
-MAX_NOTE_ID = 999_999_999_999_999_999
 LOG_FAILED_WARNING = "warning (log_failed): the note was stored but its log record was not written"
 
 
@@ -320,7 +319,7 @@ def step14_append_log(state: StateDir, plan: Plan, result: Result, gateway: Gate
     )
     try:
         append_record(state, record, plan.now)
-    except (LogError, OSError):
+    except Exception:  # noqa: BLE001 - the note is durable: any failure here is only a warning
         gateway.write_err(f"{LOG_FAILED_WARNING}\n")
 
 

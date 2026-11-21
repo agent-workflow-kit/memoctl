@@ -31,7 +31,8 @@ Status: 0.1.0-design, 2026-11-18. This plan implements [interface.md](interface.
 | `bodyread.py` | 2 | The bounded reader for `--body-file` and standard input (size cap, symlink and special-file refusals). |
 | `body.py` | 2 | Body validation (six classes, combining runs, NFKC bound). |
 | `secretscan.py` | 2 | The secret check (patterns, `mask_env`). |
-| `notes.py` | 3 and 6 | `add` (order, dedupe, supersede, lifetime, limits), `delete` (chain repointing), `prune`. |
+| `cmd_add.py` | 3 | The `add` command: the 14 ordered steps, one function each. |
+| `notes.py` | 3 and 6 | The rules `add` calls (dedupe, supersede, limits: #17, #18), `delete` (chain repointing), `prune`. |
 | `logfile.py` | 3 | `log.jsonl` append and rotation. |
 | `search.py` | 4 | Term parsing and streaming matching. |
 | `render.py` | 4 and 5 | The read-time sanitizer, terminal rendering, the context block (plain and fenced). |

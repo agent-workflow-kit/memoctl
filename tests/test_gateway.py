@@ -335,3 +335,38 @@ def test_a_pipe_that_never_drains_gives_up_after_the_bound(
     finally:
         os.close(reader)
         os.close(writer)
+
+
+def test_a_full_blocking_pipe_gives_up_after_the_bound_instead_of_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway, "WRITE_WAIT_SECONDS", 0.2)
+    reader, writer = os.pipe()
+    os.set_blocking(writer, False)
+    while True:  # fill it to capacity, then make the descriptor blocking again
+        try:
+            os.write(writer, b"\0" * 4096)
+        except BlockingIOError:
+            break
+    os.set_blocking(writer, True)
+    done = threading.Event()
+
+    def write() -> None:
+        gateway._write_fd(writer, "x" * 100_000)
+        done.set()
+
+    thread = threading.Thread(target=write, daemon=True)
+    thread.start()
+    finished = done.wait(timeout=10)
+    if not finished:  # unblock the stuck writer so the test can clean up
+        os.set_blocking(reader, False)
+        while True:
+            try:
+                if not os.read(reader, 65536):
+                    break
+            except BlockingIOError:
+                break
+        thread.join(timeout=5)
+    os.close(reader)
+    os.close(writer)
+    assert finished

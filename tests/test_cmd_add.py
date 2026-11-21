@@ -338,9 +338,38 @@ def test_actor_default_on_a_terminal_is_the_login_name(gw: FakeGateway) -> None:
 
 
 @pytest.mark.parametrize("bad", ["", "bot", "human:", "robot:x", "auto:a b", "auto:" + "x" * 65])
-def test_a_bad_actor_is_usage_before_anything_else(gw: FakeGateway, bad: str) -> None:
-    code, out, _ = add(gw, f"--actor={bad}", repo="Bad Repo")
+def test_a_bad_actor_is_usage_actor_and_nothing_is_touched(gw: FakeGateway, bad: str) -> None:
+    code, out, _ = add(gw, f"--actor={bad}")
     assert code == 2 and error_of(out)["details"] == {"field": "actor"}
+    assert gw.stdin_reads == 0 and not state_dir(gw).exists()
+
+
+# The step-1 fields in the interface's order, each with a way to make it bad.
+STEP1_FAULTS: list[tuple[str, list[str]]] = [
+    ("repo", ["--repo=Bad_Repo"]),
+    ("topic", ["--topic=Bad Topic"]),
+    ("label", ["--label=novalue"]),
+    ("kind", ["--kind=Upper"]),
+    ("supersedes", ["--supersedes=abc"]),
+    ("actor", ["--actor=bot"]),
+    ("expires", ["--expires=1s"]),
+]
+
+
+@pytest.mark.parametrize(
+    ("first", "second"), list(itertools.combinations(STEP1_FAULTS, 2)), ids=lambda f: f[0]
+)
+def test_of_two_step_1_faults_the_earlier_field_in_the_spec_order_wins(
+    gw: FakeGateway, first: tuple[str, list[str]], second: tuple[str, list[str]]
+) -> None:
+    faults = dict(item.split("=", 1) for _, bad in (first, second) for item in bad)
+    faults.setdefault("--repo", REPO)
+    faults.setdefault("--topic", "build")
+    args = ["add", "--body-file", "-", "--json", *(f"{k}={v}" for k, v in faults.items())]
+    gw.terminal.stdin = "a body"
+    gw.terminal.stdout = ""
+    code = main(args, gw)
+    assert code == 2 and error_of(gw.terminal.stdout)["details"] == {"field": first[0]}
     assert gw.stdin_reads == 0 and not state_dir(gw).exists()
 
 
@@ -630,6 +659,37 @@ def test_a_state_directory_that_cannot_be_created_is_exit_12_not_internal(gw: Fa
     assert (code, error["code"], error["reason"]) == (12, "failed", "db_unreadable")
 
 
+def test_a_state_directory_that_cannot_be_entered_is_exit_12(gw: FakeGateway) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory modes")
+    sd = state_dir(gw)
+    sd.mkdir(parents=True)
+    sd.chmod(0o500)  # readable, not writable: the database cannot be created
+    code, out, _ = add(gw)
+    error = error_of(out)
+    assert (code, error["code"], error["reason"]) == (12, "failed", "db_unreadable")
+
+
+def test_a_read_only_database_is_exit_12_db_unreadable(gw: FakeGateway) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores file modes")
+    add(gw)
+    (state_dir(gw) / "state.db").chmod(0o400)
+    code, out, _ = add(gw, body="again")
+    assert (code, error_of(out)["reason"]) == (12, "db_unreadable")
+
+
+def test_an_unrelated_os_error_is_internal_not_db_unreadable(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(cmd_add, "step13_insert", boom)
+    code, out, _ = add(gw)
+    assert (code, error_of(out)["code"]) == (1, "internal")
+
+
 def test_a_database_of_a_newer_schema_is_exit_12_and_unchanged(gw: FakeGateway) -> None:
     add(gw)
     db = state_dir(gw) / "state.db"
@@ -719,6 +779,20 @@ def test_an_os_error_from_the_log_is_the_same_warning(
     code, out, err = add(gw, json_mode=False)
     assert (code, out) == (0, "note 1 created\n") and "No space" not in err
     assert err == f"{cmd_add.LOG_FAILED_WARNING}\n"
+
+
+@pytest.mark.parametrize("exc", [ValueError("x"), RuntimeError("y")])
+def test_any_other_error_from_the_log_append_is_the_same_warning_and_exit_0(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch, exc: Exception
+) -> None:
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise exc
+
+    monkeypatch.setattr(cmd_add, "append_record", broken)
+    code, out, err = add(gw)
+    assert code == 0 and json.loads(out)["id"] == 1
+    assert err == f"{cmd_add.LOG_FAILED_WARNING}\n"
+    assert len(stored(gw)) == 1
 
 
 def test_a_log_file_that_is_not_a_regular_file_warns_without_failing(gw: FakeGateway) -> None:
@@ -882,6 +956,28 @@ def _s9(gw: FakeGateway, argv: list[str]) -> None:
     sd.chmod(0o700)
 
 
+def _s9_locked(gw: FakeGateway, argv: list[str]) -> None:
+    state = open_state_dir(gw, create=True)
+    with state:
+        store = open_store(state, Mode.INIT)
+        assert store is not None
+        store.close()
+    blocker = sqlite3.connect(state_dir(gw) / "state.db", isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    gw.blocker = blocker  # type: ignore[attr-defined]
+
+
+def _s9_corrupt(gw: FakeGateway, argv: list[str]) -> None:
+    sd = state_dir(gw)
+    sd.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(sd / "state.db")
+    conn.execute("CREATE TABLE other (x)")
+    conn.commit()
+    conn.close()
+    (sd / "state.db").chmod(0o600)
+    sd.chmod(0o700)
+
+
 Scenario = tuple[
     str, Callable[[FakeGateway, list[str]], None], Callable[[int, dict[str, Any]], bool]
 ]
@@ -894,47 +990,103 @@ SCENARIOS: list[Scenario] = [
     ("7", _s7, lambda c, e: c == 1 and e["code"] == "internal"),
     ("8", _s8, lambda c, e: c == 20 and e["reason"] == "unsafe_state"),
     ("9", _s9, lambda c, e: c == 12 and e["reason"] == "schema_newer"),
+    ("9l", _s9_locked, lambda c, e: c == 12 and e["reason"] == "db_locked"),
+    ("9c", _s9_corrupt, lambda c, e: c == 12 and e["reason"] == "db_corrupt"),
 ]
+
+
+def _step(scenario: Scenario) -> int:
+    return int(scenario[0].rstrip("lc"))  # "9l" and "9c" are step 9 too
+
+
+def _without_sidecars(files: dict[str, tuple[Any, ...]]) -> dict[str, tuple[Any, ...]]:
+    return {k: v for k, v in files.items() if not k.endswith(("-wal", "-shm"))}
+
+
+def _release(gw: FakeGateway) -> None:
+    blocker = getattr(gw, "blocker", None)
+    if blocker is not None:
+        blocker.execute("ROLLBACK")
+        blocker.close()
 
 
 def _argv() -> list[str]:
     return ["add", "--repo", REPO, "--topic", "build", "--body-file", "-", "--json"]
 
 
-@pytest.mark.parametrize(("first", "second"), list(itertools.combinations(SCENARIOS, 2)),
-                         ids=lambda s: s[0])  # fmt: skip
+PAIRS = [
+    pair for pair in itertools.combinations(SCENARIOS, 2) if _step(pair[0]) != _step(pair[1])
+]  # two step-9 states would be one database
+
+
+@pytest.mark.parametrize(("first", "second"), PAIRS, ids=lambda s: s[0])
 def test_of_two_failing_steps_the_earlier_wins_and_nothing_was_written(
-    gw: FakeGateway, first: Scenario, second: Scenario
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch, first: Scenario, second: Scenario
 ) -> None:
+    monkeypatch.setattr(store_mod, "WRITE_BUSY_MS", 30)
     argv = _argv()
     gw.terminal.stdin = "a body"
-    for _, setup, _ in (second, first):  # order of setup must not matter
-        setup(gw, argv)
-    before = snapshot(gw.home())
-    gw.terminal.stdout = ""
-    code = main(argv, gw)
+    try:
+        for _, setup, _ in (second, first):  # order of setup must not matter
+            setup(gw, argv)
+        before = snapshot(gw.home())
+        gw.terminal.stdout = ""
+        code = main(argv, gw)
+    finally:
+        _release(gw)
     error = error_of(gw.terminal.stdout)
     assert first[2](code, error), (first[0], second[0], code, error)
     assert gw.now_calls <= 1
-    if int(first[0]) < 5:
+    if _step(first) < 5:
         assert gw.stdin_reads == 0
-    if int(first[0]) < 7:
+    if _step(first) < 7:
         assert gw.now_calls == 0
-    if int(first[0]) < 8:
-        assert snapshot(gw.home()) == before  # not even the state directory
+    if _step(first) < 8:
+        # not even the state directory (the blocker's own -wal/-shm files go with its connection)
+        assert _without_sidecars(snapshot(gw.home())) == _without_sidecars(before)
     assert log_records(gw) == []
-    if not {"8", "9"} & {first[0], second[0]}:  # an unsafe or newer store cannot be read back
+    if not {8, 9} & {_step(first), _step(second)}:  # an unsafe or newer store cannot be read back
         assert stored(gw) == []
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s[0])
-def test_each_failing_step_alone_reports_itself(gw: FakeGateway, scenario: Scenario) -> None:
+def test_each_failing_step_alone_reports_itself(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch, scenario: Scenario
+) -> None:
+    monkeypatch.setattr(store_mod, "WRITE_BUSY_MS", 30)
     argv = _argv()
     gw.terminal.stdin = "a body"
-    scenario[1](gw, argv)
-    gw.terminal.stdout = ""
-    code = main(argv, gw)
+    try:
+        scenario[1](gw, argv)
+        gw.terminal.stdout = ""
+        code = main(argv, gw)
+    finally:
+        _release(gw)
     assert scenario[2](code, error_of(gw.terminal.stdout))
+    assert log_records(gw) == []
+
+
+def test_the_store_version_is_checked_again_inside_the_write_transaction(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 9 passed; another process then migrates the store past this tool."""
+    original = cmd_add.step9_open_store
+
+    def bump(state: Any) -> Any:
+        store = original(state)
+        conn = sqlite3.connect(state.db_path)
+        conn.execute("PRAGMA user_version = 99")
+        conn.close()
+        return store
+
+    monkeypatch.setattr(cmd_add, "step9_open_store", bump)
+    code, out, _ = add(gw)
+    error = error_of(out)
+    assert (code, error["reason"]) == (12, "schema_newer")
+    monkeypatch.undo()
+    conn = sqlite3.connect(state_dir(gw) / "state.db")
+    assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 0
+    conn.close()
     assert log_records(gw) == []
 
 

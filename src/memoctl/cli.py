@@ -97,14 +97,19 @@ def _run(
     namespace = parser.parse_args(args)
     if namespace.command is None:
         raise UsageError("argv")
-    # Every command parses --actor (interface.md, Global flags): a bad one is exit 2 before the
-    # deadline is armed. The default is resolved by the command (``author.resolve_actor``).
-    if namespace.actor is not None and not matches("actor", namespace.actor):
-        raise UsageError("actor")
     by_name = {command.name: command for command in commands}
     # Armed after parsing; leaving the block disarms (and ends in exit 12 when the time had
     # run out), so nothing is reported after the deadline passed. A command disarms earlier at
     # its own disarm points through ``memoctl.deadline.current()``.
     with Deadline(gateway, json_mode=json_mode) as deadline:
         deadline.arm(initial_seconds(namespace.command))
+        # Every command parses --actor (interface.md, Global flags). ``add`` validates it in its
+        # step 1, at its place in the order of the fields (repo, topic, labels, kind,
+        # supersedes, actor, expires); the others check it here.
+        if (
+            namespace.command != "add"
+            and namespace.actor is not None
+            and not matches("actor", namespace.actor)
+        ):
+            raise UsageError("actor")
         return by_name[namespace.command].run(namespace, gateway)
