@@ -421,6 +421,10 @@ class Store:
             # a lone surrogate, or an integer beyond 64 bits; both messages echo the value
             raise ValueError("invalid parameter") from None
 
+    @property
+    def in_transaction(self) -> bool:
+        return self._conn.in_transaction
+
     @contextmanager
     def write(self) -> Iterator[None]:
         """``BEGIN IMMEDIATE`` (the lock is taken at once, so the busy timeout applies), commit
@@ -463,8 +467,10 @@ class Store:
         *,
         labels: bool = False,
         on_bad: str = "skip",
+        descending: bool = False,
     ) -> Iterator[NoteRow]:
-        """The ``notes`` rows (ordered by id) that pass the row checks.
+        """The ``notes`` rows (ordered by id, highest first with ``descending``) that pass the
+        row checks. The rows stream: a caller that stops early never reads the rest.
 
         ``where`` is a fixed SQL fragment such as ``"WHERE repo = ?"`` (never input; values go
         in ``params``; the type is ``LiteralString`` and a fragment that does not start with
@@ -480,7 +486,10 @@ class Store:
             raise ValueError("on_bad must be skip or raise")
         if where and (not where.startswith("WHERE ") or any(t in where for t in _UNSAFE_FRAGMENT)):
             raise ValueError("where must be a plain WHERE clause")
-        cursor = self.execute(f"SELECT {NOTE_COLUMNS} FROM notes {where} ORDER BY id", params)
+        direction: LiteralString = "DESC" if descending else "ASC"
+        cursor = self.execute(
+            f"SELECT {NOTE_COLUMNS} FROM notes {where} ORDER BY id {direction}", params
+        )
         try:
             for raw in self._rows(cursor):
                 row = check_note_row(raw)
