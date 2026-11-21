@@ -33,7 +33,9 @@ todo(#20): the concurrent-writer process tests of the plan's stage 3.
 
 from __future__ import annotations
 
+import errno
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -64,6 +66,7 @@ ROTATE_BYTES = 10 * 1024 * 1024
 LOCK_WAIT_SECONDS = 1.0
 MAX_LINE_BYTES = 4095  # "under 4096 bytes", the newline included
 MAX_VERSION_LENGTH = 64
+_VERSION = re.compile(rf"[\x21-\x7e]{{1,{MAX_VERSION_LENGTH}}}")  # printable ASCII, no space
 MAX_SIZE = 65536
 EVENTS = ("add", "delete", "prune")
 ACTOR_SOURCES = ("flag", "tty", "default")
@@ -106,7 +109,10 @@ def format_ts(now: datetime) -> str:
     if now.tzinfo is None:
         raise LogError("invalid_record")
     utc = now.astimezone(UTC)
-    return f"{utc:%Y-%m-%dT%H:%M:%S}.{utc.microsecond // 1000:03d}Z"
+    return (
+        f"{utc.year:04d}-{utc.month:02d}-{utc.day:02d}T"
+        f"{utc.hour:02d}:{utc.minute:02d}:{utc.second:02d}.{utc.microsecond // 1000:03d}Z"
+    )
 
 
 def _is_int(value: object) -> bool:
@@ -157,7 +163,7 @@ def encode_record(record: LogRecord, now: datetime, version: str = __version__) 
     """The bytes of one log line (the newline included). Raises :class:`LogError`
     ``invalid_record`` or ``too_long``."""
     _check(record)
-    if not isinstance(version, str) or not 1 <= len(version) <= MAX_VERSION_LENGTH:
+    if not isinstance(version, str) or not _VERSION.fullmatch(version):
         raise LogError("invalid_record")
     fields: Mapping[str, Any] = {
         "ts": format_ts(now),
@@ -189,7 +195,15 @@ def _open_checked(state: StateDir, name: str) -> FileHandle:
     """Open ``name`` below the state directory (created at 0600 when missing) and require a
     regular file owned by the user; an own file with another mode is set back to 0600."""
     try:
-        handle = state.handle.open_file_at(name, FILE_MODE, create=True)
+        try:
+            handle = state.handle.open_file_at(name, FILE_MODE, create=True)
+        except PermissionError as exc:
+            if exc.errno != errno.EACCES:
+                raise
+            _repair_mode(state, name)
+            handle = state.handle.open_file_at(name, FILE_MODE, create=True)
+    except LogError:
+        raise
     except OSError:
         raise LogError("open_failed") from None
     if handle is None:  # only without create; kept for the type
@@ -207,6 +221,14 @@ def _open_checked(state: StateDir, name: str) -> FileHandle:
         handle.close()
         raise
     return handle
+
+
+def _repair_mode(state: StateDir, name: str) -> None:
+    """``name`` exists but its mode lacks owner read/write (the ``O_RDWR`` open got ``EACCES``):
+    set an own regular file to 0600 so the caller can retry once. A symlink, a FIFO or another
+    owner's file is refused; any other failure is an ``OSError``."""
+    if not state.handle.repair_file_mode(name, state.uid, FILE_MODE):
+        raise LogError("unsafe_file")
 
 
 def _write_line(handle: FileHandle, line: bytes) -> None:

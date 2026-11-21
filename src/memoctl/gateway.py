@@ -135,6 +135,13 @@ class DirHandle(Protocol):
         through :meth:`FileHandle.stat`."""
         ...
 
+    def repair_file_mode(self, name: str, uid: int, mode: int) -> bool:
+        """Set ``name`` to exactly ``mode`` when it is a regular file owned by ``uid``, for a
+        file whose current mode denies the owner access (so :meth:`open_file_at` got ``EACCES``).
+        No symlink is followed and a FIFO is never opened. ``False`` when the file is missing or
+        is not an own regular file (nothing is changed); ``OSError`` as the filesystem reports."""
+        ...
+
     def size_of(self, name: str) -> int | None:
         """Size in bytes of the regular file ``name`` (no symlink followed); ``None`` when it is
         missing, ``-1`` when it is not a regular file."""
@@ -321,6 +328,31 @@ class _RealDirHandle:
                 raise  # the directory itself is gone
             return None
         return _RealFileHandle(fd)
+
+    def repair_file_mode(self, name: str, uid: int, mode: int) -> bool:
+        fd = self._live()
+        component = _component(name)
+        info = self.lstat(name)
+        if info is None or info.kind != "file" or info.uid != uid:
+            return False
+        # Open it read-only, then write-only, to fchmod the verified inode. A mode that denies
+        # both (0000, 0100) leaves chmod by name, which never follows a symlink.
+        for access in (os.O_RDONLY, os.O_WRONLY):
+            flags = access | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            try:
+                ro = os.open(component, flags, dir_fd=fd)
+            except PermissionError:
+                continue
+            try:
+                st = os.fstat(ro)
+                if not stat.S_ISREG(st.st_mode) or st.st_uid != uid:
+                    return False
+                os.fchmod(ro, mode)
+                return True
+            finally:
+                os.close(ro)
+        os.chmod(component, mode, dir_fd=fd, follow_symlinks=False)
+        return True
 
     def size_of(self, name: str) -> int | None:
         try:

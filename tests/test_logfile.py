@@ -183,12 +183,29 @@ def test_event_specific_rules() -> None:
     encode_record(LogRecord("delete", 1, "auto:x", "flag", reinstated=2), NOW)
 
 
-def test_overlong_version_is_refused_and_a_lone_surrogate_version_is_escaped() -> None:
+def test_overlong_version_is_refused() -> None:
     with pytest.raises(LogError):
         encode_record(add_record(), NOW, "v" * 65)
-    line = encode_record(add_record(), NOW, "\ud800")
-    line.decode("ascii")
-    assert json.loads(line)["version"] == "\ud800"
+
+
+@pytest.mark.parametrize(
+    "version", ["", "1\n", "\ud800", "caf\u00e9", "a b", "1\x00", "\x7f", "\u00e9" * 3, 5]
+)
+def test_out_of_grammar_version_is_refused(version: Any) -> None:
+    with pytest.raises(LogError) as exc:
+        encode_record(add_record(), NOW, version)
+    assert exc.value.reason == "invalid_record"
+
+
+def test_a_plain_version_is_accepted() -> None:
+    assert json.loads(encode_record(add_record(), NOW, "0.1.0+g1_a-b"))["version"] == "0.1.0+g1_a-b"
+
+
+def test_year_below_1000_is_zero_padded_and_matches_the_schema() -> None:
+    ts = format_ts(datetime(5, 1, 2, 3, 4, 5, tzinfo=UTC))
+    assert ts == "0005-01-02T03:04:05.000Z"
+    line = encode_record(add_record(), datetime(5, 1, 2, 3, 4, 5, tzinfo=UTC))
+    validate("log", json.loads(line))
 
 
 def test_maximal_record_fits_the_line_cap() -> None:
@@ -596,6 +613,88 @@ def test_processes_rotating_at_once_rotate_once_and_lose_no_line(
         if raw:  # a blank line is allowed: a writer that saw another's write half done adds one
             json.loads(raw)  # no torn or merged line
     assert os.stat(sdir.path / LOG_NAME).st_mode & 0o7777 == 0o600
+
+
+# ---- unreadable modes of our own files ------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", [0o400, 0o200, 0o000, 0o444])
+def test_own_log_without_owner_rw_is_repaired(sdir: StateDir, mode: int) -> None:
+    path = sdir.path / LOG_NAME
+    path.write_bytes(b'{"old":1}\n')
+    path.chmod(mode)
+    append_record(sdir, add_record(), NOW)
+    assert os.stat(path).st_mode & 0o7777 == 0o600
+    assert len(lines(path)) == 2
+
+
+@pytest.mark.parametrize("mode", [0o400, 0o200, 0o000, 0o444])
+def test_own_lock_without_owner_rw_is_repaired_and_rotation_works(
+    sdir: StateDir, mode: int
+) -> None:
+    big(sdir.path / LOG_NAME)
+    lock = sdir.path / "log.lock"
+    lock.write_bytes(b"")
+    lock.chmod(mode)
+    append_record(sdir, add_record(), NOW)
+    assert os.stat(lock).st_mode & 0o7777 == 0o600
+    assert os.stat(sdir.path / ROTATED_NAME).st_size == ROTATE_BYTES
+    assert len(lines(sdir.path / LOG_NAME)) == 1
+
+
+def test_a_new_log_under_umask_0277_is_usable(sdir: StateDir) -> None:
+    old = os.umask(0o277)
+    try:
+        append_record(sdir, add_record(), NOW)
+    finally:
+        os.umask(old)
+    assert os.stat(sdir.path / LOG_NAME).st_mode & 0o7777 == 0o600
+
+
+def test_unreadable_foreign_file_is_not_repaired(
+    sdir: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = sdir.path / LOG_NAME
+    path.write_bytes(b"")
+    path.chmod(0o000)
+    monkeypatch.setattr(StateDir, "uid", property(lambda self: os.getuid() + 1))
+    with pytest.raises(LogError) as exc:
+        append_record(sdir, add_record(), NOW)
+    assert exc.value.reason in ("unsafe_file", "open_failed")
+    assert os.stat(path).st_mode & 0o7777 == 0o000
+
+
+def test_eacces_on_a_symlink_or_fifo_is_not_repaired(sdir: StateDir, tmp_path: Path) -> None:
+    target = tmp_path / "t"
+    target.write_bytes(b"")
+    target.chmod(0o000)
+    (sdir.path / LOG_NAME).symlink_to(target)
+    with pytest.raises(LogError):
+        append_record(sdir, add_record(), NOW)
+    assert os.stat(target).st_mode & 0o7777 == 0o000
+    (sdir.path / LOG_NAME).unlink()
+    os.mkfifo(sdir.path / LOG_NAME, 0o000)
+    with pytest.raises(LogError):
+        append_record(sdir, add_record(), NOW)
+    assert os.stat(sdir.path / LOG_NAME).st_mode & 0o7777 == 0o000
+
+
+def test_an_eacces_that_is_not_repairable_is_open_failed_without_a_path(
+    sdir: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = sdir.path / LOG_NAME
+    path.write_bytes(b"")
+    path.chmod(0o000)
+
+    def deny(*a: Any, **k: Any) -> None:
+        raise PermissionError(errno.EACCES, "x", str(path))
+
+    monkeypatch.setattr("memoctl.gateway.os.chmod", deny)
+    monkeypatch.setattr("memoctl.gateway.os.fchmod", deny)
+    with pytest.raises(LogError) as exc:
+        append_record(sdir, add_record(), NOW)
+    assert exc.value.reason == "open_failed"
+    assert str(sdir.path) not in str(exc.value)
 
 
 # ---- the gateway pieces -------------------------------------------------------------------
