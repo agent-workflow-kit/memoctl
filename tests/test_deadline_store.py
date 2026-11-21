@@ -267,3 +267,43 @@ def test_the_timeout_still_maps_when_the_callback_is_fine(
         s.execute("SELECT 1 UNION ALL SELECT 2").fetchall()
     assert e.value.reason == "timeout"
     s.close()
+
+
+# -- the handler outlives a failed transaction; a stale callback error does not leak ----------
+
+LONG = (
+    "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c LIMIT 1000) "
+    "SELECT count(*) FROM c"
+)
+
+
+def test_the_progress_handler_stays_installed_after_a_failed_transaction(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(store_module, "PROGRESS_STEPS", 1)
+    s = open_store(state, Mode.WRITE)
+    assert s is not None
+    expired = [False]
+    s.set_progress_handler(lambda: expired[0])
+    with pytest.raises(StoreError), s.write():
+        s.execute("INSERT INTO rate (repo, at) VALUES ('x', 1)")
+        raise StoreError("limit")
+    expired[0] = True  # the deadline passes after the failed transaction
+    with pytest.raises(StoreError) as e:
+        s.execute(LONG).fetchall()
+    assert e.value.reason == "timeout"
+    s.close()
+
+
+def test_a_stale_callback_error_is_not_attributed_to_a_later_interrupt(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(store_module, "PROGRESS_STEPS", 1)
+    s = open_store(state, Mode.READ)
+    assert s is not None
+    s.set_progress_handler(lambda: True)
+    s._callback_error = ZeroDivisionError("stale")  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(StoreError) as e:
+        s.execute(LONG).fetchall()
+    assert e.value.reason == "timeout"
+    s.close()

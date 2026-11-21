@@ -386,6 +386,7 @@ class Store:
         self._busy_ms = 0  # the configured busy timeout (set by open_store)
         self._busy_cap: Callable[[], int | None] | None = None
         self._callback_error: BaseException | None = None  # raised by the progress callback
+        self._progress: Callable[[], int] | None = None  # the installed progress callback
 
     # -- lifecycle
     def close(self) -> None:
@@ -410,6 +411,7 @@ class Store:
         """Call ``handler`` every :data:`PROGRESS_STEPS` virtual-machine steps; a true return
         interrupts the running statement, which then raises ``StoreError("timeout")``."""
         if handler is None:
+            self._progress = None
             self._conn.set_progress_handler(None, 0)
             return
 
@@ -420,6 +422,7 @@ class Store:
                 self._callback_error = exc
                 return 1
 
+        self._progress = callback
         self._conn.set_progress_handler(callback, PROGRESS_STEPS)
 
     def set_busy_cap(self, cap: Callable[[], int | None] | None) -> None:
@@ -447,6 +450,7 @@ class Store:
         sqlite cannot bind raises ``ValueError("invalid parameter")`` without the value. TEXT
         comes back as ``str`` (or the undecodable marker), so rows read this way go through
         :func:`check_note_row`."""
+        self._callback_error = None  # one a statement never raised must not leak into this one
         try:
             return Cursor(self._conn.execute(sql, params), self)
         except sqlite3.Error as exc:
@@ -474,6 +478,7 @@ class Store:
     def _transaction(self, begin: LiteralString) -> Iterator[None]:
         if self._conn.in_transaction:
             raise RuntimeError("transaction already open")
+        self._callback_error = None
         try:
             self._apply_busy()  # the lock wait of BEGIN IMMEDIATE ends with the deadline
         except sqlite3.Error as exc:
@@ -486,12 +491,16 @@ class Store:
         except BaseException as exc:
             if self._conn.in_transaction:
                 # An interrupted COMMIT leaves the transaction open, and the progress handler
-                # would interrupt the ROLLBACK as well: take it off first so the rollback runs.
+                # would interrupt the ROLLBACK as well: take it off for the rollback only, then
+                # put the same callback back so later statements stay interruptible.
                 self._conn.set_progress_handler(None, 0)
                 try:
                     self._conn.execute("ROLLBACK")
                 except sqlite3.Error:
                     pass
+                finally:
+                    if self._progress is not None:
+                        self._conn.set_progress_handler(self._progress, PROGRESS_STEPS)
             if isinstance(exc, sqlite3.Error):
                 raise _failure(exc, self) from None
             raise
