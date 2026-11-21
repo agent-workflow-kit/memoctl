@@ -37,6 +37,7 @@ BANNED_MODULES = {
     "getpass",
     "shutil",
     "glob",
+    "fcntl",
 }
 # Canonical dotted names (after alias resolution) that reach the host, whether called or
 # merely referenced.
@@ -280,6 +281,9 @@ def test_module_reaches_outside_only_through_the_gateway(path: Path) -> None:
     [
         "import subprocess",
         "import subprocess as sp",
+        "import fcntl",
+        "from fcntl import flock",
+        "def f():\n    import fcntl",
         "from subprocess import run",
         "import time",
         "from time import time as t",

@@ -20,6 +20,7 @@ The config loader never calls it: HOME and XDG_* are not read (interface.md, Con
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
 import pwd
 import secrets
@@ -125,7 +126,107 @@ class DirHandle(Protocol):
         with exactly ``mode`` (the umask does not apply). ``False`` when anything is there."""
         ...
 
+    def open_file_at(self, name: str, mode: int, *, create: bool) -> FileHandle | None:
+        """Open the file ``name`` for reading and appending: ``O_RDWR | O_APPEND | O_NOFOLLOW |
+        O_NONBLOCK | O_CLOEXEC`` (a final symlink is refused, a FIFO does not block). With
+        ``create`` a missing file is made with ``mode`` (the umask is not compensated: callers
+        call :meth:`FileHandle.set_mode`); without it ``None`` is returned for a missing file.
+        Any other failure raises ``OSError``. The kind and owner are the caller's to check
+        through :meth:`FileHandle.stat`."""
+        ...
+
+    def size_of(self, name: str) -> int | None:
+        """Size in bytes of the regular file ``name`` (no symlink followed); ``None`` when it is
+        missing, ``-1`` when it is not a regular file."""
+        ...
+
+    def rename(self, old: str, new: str) -> None:
+        """``renameat``: atomically move ``old`` onto ``new`` (replacing a file there) inside this
+        directory. Never follows a symlink; ``OSError`` as the filesystem reports."""
+        ...
+
     def close(self) -> None: ...
+
+
+class FileHandle(Protocol):
+    """An open regular-file descriptor opened by :meth:`DirHandle.open_file_at`. ``close`` is
+    idempotent; any other call on a closed handle raises ``OSError``."""
+
+    def stat(self) -> PathInfo:
+        """Kind, owner and mode of the opened file (``fstat``)."""
+        ...
+
+    def size(self) -> int:
+        """Size in bytes (``fstat``)."""
+        ...
+
+    def set_mode(self, mode: int) -> None:
+        """Set the permission bits exactly (``fchmod``; the umask does not apply)."""
+        ...
+
+    def read_at(self, offset: int, count: int) -> bytes:
+        """``pread``: up to ``count`` bytes at ``offset`` (empty past the end)."""
+        ...
+
+    def append(self, data: bytes) -> int:
+        """Exactly one ``write`` call; returns the number of bytes it wrote, which may be fewer
+        than ``len(data)`` (the caller decides). ``OSError`` as the filesystem reports."""
+        ...
+
+    def lock_exclusive(self, timeout: float) -> bool:
+        """Take an exclusive ``flock``, polling a non-blocking attempt for at most ``timeout``
+        seconds; ``False`` when it was not got in time. The lock is released by ``close``."""
+        ...
+
+    def close(self) -> None: ...
+
+
+LOCK_POLL_SECONDS = 0.01
+
+
+class _RealFileHandle:
+    def __init__(self, fd: int) -> None:
+        self._fd: int | None = fd
+
+    def _live(self) -> int:
+        if self._fd is None:
+            raise OSError(errno.EBADF, "file handle is closed")
+        return self._fd
+
+    def stat(self) -> PathInfo:
+        return _info(os.fstat(self._live()))
+
+    def size(self) -> int:
+        return os.fstat(self._live()).st_size
+
+    def set_mode(self, mode: int) -> None:
+        os.fchmod(self._live(), mode)
+
+    def read_at(self, offset: int, count: int) -> bytes:
+        return os.pread(self._live(), count, offset)
+
+    def append(self, data: bytes) -> int:
+        if not isinstance(data, bytes):
+            raise TypeError(f"append needs bytes, got {type(data).__name__}")
+        return os.write(self._live(), data)
+
+    def lock_exclusive(self, timeout: float) -> bool:
+        fd = self._live()
+        deadline = time.monotonic() + max(timeout, 0.0)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                pass
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(LOCK_POLL_SECONDS)
+
+    def close(self) -> None:
+        if self._fd is not None:
+            fd, self._fd = self._fd, None
+            os.close(fd)
 
 
 class _RealDirHandle:
@@ -208,6 +309,29 @@ class _RealDirHandle:
         finally:
             os.close(fd)
         return True
+
+    def open_file_at(self, name: str, mode: int, *, create: bool) -> FileHandle | None:
+        flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        if create:
+            flags |= os.O_CREAT
+        try:
+            fd = os.open(_component(name), flags, mode, dir_fd=self._live())
+        except FileNotFoundError:
+            if create:
+                raise  # the directory itself is gone
+            return None
+        return _RealFileHandle(fd)
+
+    def size_of(self, name: str) -> int | None:
+        try:
+            st = os.stat(_component(name), dir_fd=self._live(), follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        return st.st_size if stat.S_ISREG(st.st_mode) else -1
+
+    def rename(self, old: str, new: str) -> None:
+        fd = self._live()
+        os.rename(_component(old), _component(new), src_dir_fd=fd, dst_dir_fd=fd)
 
     def close(self) -> None:
         if self._fd is not None:
