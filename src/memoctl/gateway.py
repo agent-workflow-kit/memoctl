@@ -151,12 +151,42 @@ class _RealDirHandle:
         return _RealDirHandle(fd)
 
     def make_dir(self, name: str, mode: int) -> None:
-        # mkdir applies the umask, so the mode is set again by name afterwards (not through an
-        # opened descriptor: a hostile umask such as 0o777 leaves a directory its owner cannot
-        # open yet). The process-wide umask is never changed, so no other thread is affected.
+        """Make ``name`` with exactly ``mode`` (the umask does not apply, and is never touched).
+
+        mkdir applies the umask, so the mode is set again afterwards, by name and without
+        following a symlink: ``chmod(..., dir_fd=, follow_symlinks=False)``. A hostile umask such
+        as 0o777 leaves a directory its owner cannot open yet, so no descriptor is opened for
+        this. Where that call is unavailable (``NotImplementedError``, ``ValueError`` or
+        ENOTSUP/ENOSYS, e.g. no /proc for the glibc emulation) the name is opened with
+        O_NOFOLLOW and ``fchmod`` is used instead, which needs the owner read bit. If the mode
+        cannot be set, the just-made directory is removed again (best effort, so a mode-0
+        leftover never blocks later runs) and the original error propagates."""
         fd = self._live()
         os.mkdir(_component(name), mode, dir_fd=fd)
-        os.chmod(name, mode, dir_fd=fd)
+        try:
+            try:
+                os.chmod(name, mode, dir_fd=fd, follow_symlinks=False)
+            except (NotImplementedError, ValueError):
+                self._fchmod_nofollow(fd, name, mode)
+            except OSError as exc:
+                if exc.errno not in (errno.ENOTSUP, errno.ENOSYS):
+                    raise
+                self._fchmod_nofollow(fd, name, mode)
+        except BaseException:
+            try:
+                os.rmdir(name, dir_fd=fd)
+            except OSError:
+                pass
+            raise
+
+    @staticmethod
+    def _fchmod_nofollow(fd: int, name: str, mode: int) -> None:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        sub = os.open(name, flags, dir_fd=fd)
+        try:
+            os.fchmod(sub, mode)
+        finally:
+            os.close(sub)
 
     def set_mode(self, mode: int) -> None:
         os.fchmod(self._live(), mode)

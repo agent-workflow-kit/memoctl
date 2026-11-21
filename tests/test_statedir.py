@@ -164,8 +164,9 @@ def test_a_dangling_symlink_as_the_state_dir_is_refused_and_not_created_through(
 ) -> None:
     (home / ".local" / "state").mkdir(parents=True)
     _state(home).symlink_to(tmp_path / "nowhere")
-    with pytest.raises(UnsafeStateError):
+    with pytest.raises(UnsafeStateError) as info:
         open_state_dir(gw, create=create)
+    assert info.value.reason == "not_a_directory"
     assert not (tmp_path / "nowhere").exists()
 
 
@@ -378,6 +379,46 @@ def test_the_home_variables_are_never_read(
         assert sd is not None
     assert _state(home).is_dir()
     assert os.listdir(other) == []
+
+
+class _SwapAfterMake:
+    """Wraps a handle so ``name`` becomes a symlink right after our mkdir of it."""
+
+    def __init__(self, inner: DirHandle, name: str, target: Path, path: Path) -> None:
+        self._inner = inner
+        self._args = (name, target, path)
+        self._path = path
+
+    def make_dir(self, name: str, mode: int) -> None:
+        self._inner.make_dir(name, mode)
+        if name == self._args[0]:
+            os.rmdir(self._path)
+            os.symlink(self._args[1], self._path)
+
+    def open_dir(self, name: str, *, follow: bool) -> Any:
+        sub = self._inner.open_dir(name, follow=follow)
+        return None if sub is None else _SwapAfterMake(sub, *self._args)
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(self._inner, attr)
+
+
+def test_a_symlink_swapped_in_right_after_the_final_mkdir_is_refused(
+    home: Path, tmp_path: Path
+) -> None:
+    target = tmp_path / "elsewhere"
+    target.mkdir(mode=0o700)
+
+    class G(HomeGateway):
+        def open_dir(self, path: Path, *, follow: bool) -> Any:
+            handle = super().open_dir(path, follow=follow)
+            return (
+                None if handle is None else _SwapAfterMake(handle, "memoctl", target, _state(home))
+            )
+
+    with pytest.raises(UnsafeStateError) as info:
+        open_state_dir(G(home), create=True)
+    assert info.value.reason == "not_a_directory"
 
 
 # --- races ------------------------------------------------------------------------------------

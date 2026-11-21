@@ -5,6 +5,7 @@ The same behaviors are checked on the real gateway (private temp dirs) and on th
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from collections.abc import Callable, Iterator
@@ -167,6 +168,61 @@ def test_mkdir_never_follows_a_dangling_symlink(gw_and_dir: tuple[Gateway, Path]
     finally:
         handle.close()
     assert not (d / "nowhere").exists()
+
+
+def _real_handle(d: Path) -> object:
+    handle = RealGateway().open_dir(d, follow=True)
+    assert handle is not None
+    return handle
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_mkdir_does_not_follow_a_symlink_swapped_in_before_the_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fallback: bool
+) -> None:
+    d = tmp_path / "d"
+    d.mkdir()
+    target = tmp_path / "target"
+    target.mkdir(mode=0o755)
+    target.chmod(0o755)
+    real_chmod = os.chmod
+
+    def swapping_chmod(path: str, mode: int, **kw: object) -> None:
+        if path == "child":
+            (d / "child").rmdir()
+            (d / "child").symlink_to(target)
+            if fallback:
+                raise NotImplementedError("no nofollow chmod")
+        real_chmod(path, mode, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "chmod", swapping_chmod)
+    handle = _real_handle(d)
+    try:
+        with pytest.raises(OSError):
+            handle.make_dir("child", 0o700)  # type: ignore[attr-defined]
+    finally:
+        handle.close()  # type: ignore[attr-defined]
+    assert _mode(target) == 0o755
+
+
+def test_mkdir_removes_the_directory_when_the_chmod_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    d = tmp_path / "d"
+    d.mkdir()
+
+    def failing_chmod(*_: object, **__: object) -> None:
+        raise OSError(errno.EIO, "injected")
+
+    monkeypatch.setattr(os, "chmod", failing_chmod)
+    handle = _real_handle(d)
+    try:
+        with pytest.raises(OSError) as info:
+            handle.make_dir("child", 0o700)  # type: ignore[attr-defined]
+    finally:
+        handle.close()  # type: ignore[attr-defined]
+    assert info.value.errno == errno.EIO
+    assert not (d / "child").exists()
 
 
 def test_set_mode_is_exact_despite_the_umask(

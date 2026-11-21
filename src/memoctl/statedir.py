@@ -160,7 +160,7 @@ def _descend(cur: DirHandle, name: str, *, final: bool, create: bool, uid: int) 
             if info is not None and info.kind == "symlink":
                 raise UnsafeStateError("not_a_directory" if final else "parent") from None
             continue
-        made = cur.open_dir(name, follow=False)
+        made = _open_final(cur, name, uid) if final else cur.open_dir(name, follow=False)
         if made is None:
             continue
         try:
