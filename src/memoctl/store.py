@@ -42,7 +42,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import TracebackType
@@ -274,7 +274,9 @@ def _as_int(value: object, low: int, high: int) -> int | None:
     return None
 
 
-def check_note_row(values: Sequence[object]) -> NoteRow | None:
+def check_note_row(
+    values: Sequence[object], labels: tuple[tuple[str, str], ...] = ()
+) -> NoteRow | None:
     """The row as a :class:`NoteRow`, or ``None`` when any column fails its rule.
 
     Beyond the interface's list (integers, grammars, text), the bounds of the output schemas
@@ -282,7 +284,7 @@ def check_note_row(values: Sequence[object]) -> NoteRow | None:
     1 to 65536 and equal to the body's UTF-8 length, a body of 1 to 65536 UTF-8 bytes, a repo
     of at most 255 characters and a 64-character lowercase hex ``body_sha256``. A ``bool``, a
     float, a blob or a text that is not valid UTF-8 where an integer or text belongs fails. The
-    hash is not recomputed.
+    hash is not recomputed. ``labels`` (already checked by the caller) go into the row.
     """
     if len(values) != 10:
         return None
@@ -310,7 +312,42 @@ def check_note_row(values: Sequence[object]) -> NoteRow | None:
         return None
     if len(body.encode("utf-8")) != size_bytes:  # also bounds the body to MAX_BODY_BYTES
         return None
-    return NoteRow(note_id, repo, topic, kind, body, sha, size_bytes, created_at, expires_at, by)
+    return NoteRow(
+        note_id, repo, topic, kind, body, sha, size_bytes, created_at, expires_at, by, labels
+    )
+
+
+def _merge_labels(
+    note_id: Any,
+    pairs: Iterator[tuple[Any, ...]],
+    peeked: tuple[Any, ...] | None,
+    descending: bool,
+) -> tuple[tuple[tuple[str, str], ...] | None, tuple[Any, ...] | None]:
+    """The labels of ``note_id`` from ``pairs`` (ordered by ``note_id`` like the rows), sorted
+    by key then value, or ``None`` when one is bad or there are more than ``MAX_LABELS``; and
+    the first pair of a later note (consumed but not yet used). Pairs of an earlier id (only
+    possible outside one snapshot) are dropped."""
+    out: list[tuple[str, str]] = []
+    bad = False
+    count = 0
+    item = peeked if peeked is not None else next(pairs, None)
+    while item is not None:
+        nid = item[0]
+        if nid == note_id:
+            count += 1
+            if count <= MAX_LABELS + 1 and not bad:
+                pair = check_label_row(item[1], item[2])
+                if pair is None:
+                    bad = True
+                else:
+                    out.append(pair)
+        elif (nid > note_id) if descending else (nid < note_id):
+            pass  # an earlier note's pair: not ours
+        else:
+            break
+        item = next(pairs, None)
+    found = None if bad or count > MAX_LABELS else tuple(sorted(out))
+    return found, item
 
 
 # --- the connection -------------------------------------------------------------------------
@@ -421,6 +458,10 @@ class Store:
             # a lone surrogate, or an integer beyond 64 bits; both messages echo the value
             raise ValueError("invalid parameter") from None
 
+    @property
+    def in_transaction(self) -> bool:
+        return self._conn.in_transaction
+
     @contextmanager
     def write(self) -> Iterator[None]:
         """``BEGIN IMMEDIATE`` (the lock is taken at once, so the busy timeout applies), commit
@@ -463,8 +504,10 @@ class Store:
         *,
         labels: bool = False,
         on_bad: str = "skip",
+        descending: bool = False,
     ) -> Iterator[NoteRow]:
-        """The ``notes`` rows (ordered by id) that pass the row checks.
+        """The ``notes`` rows (ordered by id, highest first with ``descending``) that pass the
+        row checks. The rows stream: a caller that stops early never reads the rest.
 
         ``where`` is a fixed SQL fragment such as ``"WHERE repo = ?"`` (never input; values go
         in ``params``; the type is ``LiteralString`` and a fragment that does not start with
@@ -480,13 +523,26 @@ class Store:
             raise ValueError("on_bad must be skip or raise")
         if where and (not where.startswith("WHERE ") or any(t in where for t in _UNSAFE_FRAGMENT)):
             raise ValueError("where must be a plain WHERE clause")
-        cursor = self.execute(f"SELECT {NOTE_COLUMNS} FROM notes {where} ORDER BY id", params)
+        direction: LiteralString = "DESC" if descending else "ASC"
+        cursor = self.execute(
+            f"SELECT {NOTE_COLUMNS} FROM notes {where} ORDER BY id {direction}", params
+        )
+        pairs: Iterator[tuple[Any, ...]] | None = None
+        label_cursor = None
+        if labels:  # one statement for every label, merged with the rows (same id order)
+            label_cursor = self.execute(
+                "SELECT note_id, key, value FROM note_labels"
+                f" WHERE note_id IN (SELECT id FROM notes {where}) ORDER BY note_id {direction}",
+                tuple(params),
+            )
+            pairs = self._rows(label_cursor)
+        peeked: tuple[Any, ...] | None = None
         try:
             for raw in self._rows(cursor):
-                row = check_note_row(raw)
-                if row is not None and labels:
-                    found = self._labels(row.id)
-                    row = None if found is None else replace(row, labels=found)
+                found: tuple[tuple[str, str], ...] | None = ()
+                if pairs is not None:
+                    found, peeked = _merge_labels(raw[0], pairs, peeked, descending)
+                row = None if found is None else check_note_row(raw, found)
                 if row is None:
                     if on_bad == "raise":
                         raise StoreError(DB_CORRUPT)
@@ -495,6 +551,8 @@ class Store:
                 yield row
         finally:
             cursor.close()
+            if label_cursor is not None:
+                label_cursor.close()
 
     @staticmethod
     def _rows(cursor: Cursor) -> Iterator[tuple[Any, ...]]:
@@ -503,19 +561,6 @@ class Store:
             if raw is None:
                 return
             yield raw
-
-    def _labels(self, note_id: int) -> tuple[tuple[str, str], ...] | None:
-        cursor = self.execute(
-            "SELECT key, value FROM note_labels WHERE note_id = ? ORDER BY key, value LIMIT ?",
-            (note_id, MAX_LABELS + 1),
-        )
-        out: list[tuple[str, str]] = []
-        for key, value in self._rows(cursor):
-            pair = check_label_row(key, value)
-            if pair is None:
-                return None
-            out.append(pair)
-        return None if len(out) > MAX_LABELS else tuple(out)
 
     def check_rows(self) -> None:
         """Run every row check over every note and label, and look for labels of no note
