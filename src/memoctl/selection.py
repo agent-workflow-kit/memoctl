@@ -42,6 +42,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from fractions import Fraction
+from functools import lru_cache
 from typing import Any, Final, NamedTuple
 
 from memoctl.config import Context
@@ -76,7 +77,8 @@ _CANDIDATE_WHERE = (
 class SelectionConfig:
     """The ``context`` settings selection reads (the effective config for the repo).
 
-    Not range-checked here (the config model does that); the walk is defined for every integer.
+    The config model range-checks the real values; this only refuses a value the walk is not
+    defined for (a non-integer, a negative count, a share outside 0 to 1) with ``ValueError``.
     """
 
     author_kinds: tuple[str, ...]
@@ -86,6 +88,25 @@ class SelectionConfig:
     max_per_topic: int
     max_kind_share: Fraction
     note_max_chars: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.author_kinds, tuple) or not all(
+            type(k) is str for k in self.author_kinds
+        ):
+            raise ValueError("author_kinds must be a tuple of strings")
+        counts = {
+            "max_chars": self.max_chars,
+            "max_bytes": self.max_bytes,
+            "max_notes": self.max_notes,
+            "max_per_topic": self.max_per_topic,
+            "note_max_chars": self.note_max_chars,
+        }
+        for name, value in counts.items():
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        share = self.max_kind_share
+        if not isinstance(share, Fraction) or not 0 <= share <= 1:
+            raise ValueError("max_kind_share must be a Fraction from 0 to 1")
 
     @classmethod
     def from_config(cls, ctx: Context) -> SelectionConfig:
@@ -133,7 +154,10 @@ class Selection:
     repo: str
     eligible: int
     notes: tuple[SelectedNote, ...]  # display order: id, highest first
-    bad_rows: int  # rows the store skipped (row checks) during this selection
+    # Rows the store skipped (row checks) during this selection, among the rows the SQL repo,
+    # kind and liveness filter yields: a row of a kind outside author_kinds is excluded before
+    # the row checks and never counted.
+    bad_rows: int
 
     @property
     def shown(self) -> int:
@@ -158,11 +182,15 @@ class Selection:
 
 def u16(text: str) -> int:
     """UTF-16 code units of ``text``."""
+    if text.isascii():
+        return len(text)
     return len(text.encode("utf-16-le")) // 2
 
 
 def b8(text: str) -> int:
     """UTF-8 bytes of ``text``."""
+    if text.isascii():
+        return len(text)
     return len(text.encode("utf-8"))
 
 
@@ -177,6 +205,7 @@ def omit_line(repo: str, omitted: int) -> str:
 # --- rendering one note -----------------------------------------------------------------------
 
 
+@lru_cache(maxsize=4096)
 def _date(created: int) -> str:
     d = datetime.fromtimestamp(created, tz=UTC)
     return f"{d.year:04d}-{d.month:02d}-{d.day:02d}"

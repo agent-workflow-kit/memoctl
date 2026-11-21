@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from memoctl.config import Context
 from memoctl.selection import (
     Candidate,
     SelectionConfig,
@@ -39,10 +40,34 @@ SHA = "a" * 64
 KINDS = ("implement", "audit", "draft-ticket", "improve")
 
 
+_IGNORABLE = (
+    {0x34F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180F, 0x2800, 0x3164, 0xFFA0}
+    | set(range(0x180B, 0x180E))
+    | set(range(0xFE00, 0xFE10))
+    | set(range(0xE0100, 0xE01F0))
+)
+
+
+def _refused(c: str) -> bool:
+    if c in "\n\t":
+        return False
+    return unicodedata.category(c)[0] == "C" or ord(c) in _IGNORABLE or c in "\u2028\u2029"
+
+
 def sanitize(text: str) -> str:
-    """A stand-in for the #24 sanitizer, written independently here."""
-    out = unicodedata.normalize("NFKC", text)
-    out = "".join(c for c in out if c == "\n" or c == "\t" or unicodedata.category(c)[0] != "C")
+    """A stand-in for the #24 sanitizer, written independently here.
+
+    Follows docs/interface.md, Sanitizer: NFKC and removal of every refused character (category
+    C*, U+2028/2029 and the default-ignorables of Body rules item 3) until stable, tab to four
+    spaces, then ``<`` to ``&lt;``. It does not model the real sanitizer's combining-mark run
+    limit (Body rules item 4); no fixture here holds such a run.
+    """
+    out = text
+    while True:
+        nxt = "".join(c for c in unicodedata.normalize("NFKC", out) if not _refused(c))
+        if nxt == out:
+            break
+        out = nxt
     return out.replace("\t", "    ").replace("<", "&lt;")
 
 
@@ -254,6 +279,13 @@ def test_whitespace_only_sanitized_body_is_not_a_candidate(db: Db) -> None:
     assert ids(sel) == [ok] and sel.eligible == 1
 
 
+def test_the_stand_in_sanitizer_removes_what_the_interface_lists() -> None:
+    gone = "\u2028\u2029\u034f\u115f\u1160\u180b\u180d\u2800\u3164\ufe0f\uffa0\U000e0100\u200b"
+    assert sanitize("a" + gone + "b") == "ab"
+    assert sanitize("a\tb<") == "a    b&lt;"
+    assert sanitize("\u2800") == ""
+
+
 def test_measured_on_the_sanitizer_output_not_nfkc_of_the_stored_text(db: Db) -> None:
     db.add(body="abc")
     db.add(body="def")
@@ -441,6 +473,50 @@ def test_walk_share_n_is_at_least_one_and_char_share_applies() -> None:
     assert [n.id for n in walk(cs, 1000, 1000, c)] == [8, 7]
 
 
+def test_walk_two_same_kind_notes_together_over_share_c_defer_the_second() -> None:
+    # share_c = 100, share_n = 2: 60 + 60 > 100 although each fits alone
+    cs = cands([(9, "a", "x", 60), (8, "b", "x", 60), (7, "c", "y", 10), (6, "d", "y", 10)])
+    cs += cands([(5, "e", "z", 10)])
+    c = cfg(max_chars=200, max_notes=4, max_kind_share=Fraction(1, 2))
+    assert [n.id for n in walk(cs, 10**6, 10**6, c)] == [9, 7, 6, 5]
+
+
+def test_walk_a_kind_landing_exactly_on_share_c_is_allowed() -> None:
+    cs = cands([(9, "a", "x", 50), (8, "b", "x", 50), (7, "c", "y", 10), (6, "d", "y", 10)])
+    cs += cands([(5, "e", "z", 10)])
+    c = cfg(max_chars=200, max_notes=4, max_kind_share=Fraction(1, 2))
+    assert [n.id for n in walk(cs, 10**6, 10**6, c)] == [9, 8, 7, 6]
+
+
+def test_walk_share_c_is_floored_when_the_product_is_fractional() -> None:
+    # 1/3 x 1000 = 333.33: share_c 333, so a 334 note is deferred (a ceiling would admit it);
+    # share_n = max(1, floor(2/3)) = 1
+    cs = cands([(9, "a", "x", 334), (8, "b", "y", 10), (7, "c", "z", 10)])
+    c = cfg(max_chars=1000, max_notes=2, max_kind_share=Fraction(1, 3))
+    assert [n.id for n in walk(cs, 10**6, 10**6, c)] == [8, 7]
+    cs = cands([(9, "a", "x", 333), (8, "b", "y", 10), (7, "c", "z", 10)])  # exactly share_c
+    assert [n.id for n in walk(cs, 10**6, 10**6, c)] == [9, 8]
+
+
+def test_walk_pass_two_respects_max_per_topic() -> None:
+    # 9 is deferred (60 > share_c 50); 8 then takes topic "a"; in pass 2 the topic is full
+    cs = cands([(9, "a", "x", 60), (8, "a", "y", 10)])
+    c = cfg(max_chars=100, max_notes=5, max_per_topic=1, max_kind_share=Fraction(1, 2))
+    assert [n.id for n in walk(cs, 10**6, 10**6, c)] == [8]
+
+
+def test_walk_pass_two_rechecks_the_character_budget() -> None:
+    cs = cands([(9, "a", "x", 60), (8, "b", "y", 50)])  # 9 deferred; 8 uses 50 of 100
+    c = cfg(max_chars=100, max_notes=5, max_kind_share=Fraction(1, 2))
+    assert [n.id for n in walk(cs, 100, 10**6, c)] == [8]
+
+
+def test_walk_pass_two_rechecks_the_byte_budget() -> None:
+    cs = [Candidate(9, "a", "x", 60, 60), Candidate(8, "b", "y", 10, 50)]
+    c = cfg(max_chars=100, max_notes=5, max_kind_share=Fraction(1, 2))
+    assert [n.id for n in walk(cs, 10**6, 100, c)] == [8]
+
+
 def test_walk_budget_exact_equal_and_smaller_than_one_note() -> None:
     cs = cands([(2, "a", "x", 10), (1, "b", "x", 10)])
     c = cfg(max_kind_share=Fraction(1))
@@ -585,7 +661,7 @@ def test_deterministic_across_runs(db: Db) -> None:
     assert runs[0] == runs[1] == runs[2]
 
 
-def test_large_store_streams_only_what_it_must(db: Db) -> None:
+def test_large_store_selects_the_newest_notes_of_the_repo(db: Db) -> None:
     db.conn.execute("BEGIN")
     for i in range(20000):
         db.conn.execute(
@@ -655,3 +731,104 @@ def test_selection_writes_nothing(db: Db) -> None:
     with s:
         with pytest.raises(StoreError):
             s.execute("INSERT INTO rate (repo, at) VALUES ('x', 1)")
+
+
+# --- reserved line digits, code point widths, bad rows, the config -------------------------------
+
+
+@pytest.mark.parametrize("e", [1, 9, 10, 99, 100, 1000, 99999, 100000])
+def test_budgets_use_the_eligible_count_in_both_reserved_lines(e: int) -> None:
+    head = f"memoctl notes for r/x ({e} of {e} shown)\n"
+    omit = f"[memoctl: {e} more notes not shown; use memoctl list --repo r/x]\n"
+    bc, bb = budgets("r/x", e, cfg(max_chars=9000, max_bytes=60000))
+    assert (bc, bb) == (9000 - len(head) - len(omit), 60000 - len(head) - len(omit))
+
+
+def test_the_budget_edge_moves_when_eligible_gains_a_digit(db: Db) -> None:
+    for i in range(10):  # eligible 10: two digits in the reserved lines
+        db.add(topic=f"t{i}", body="word")
+    wide = cfg(max_chars=9000, max_kind_share=Fraction(1), max_per_topic=1, max_notes=20)
+    full = db.select(config=wide)
+    assert full.shown == 10
+    total = sum(n.u16 for n in full.notes)
+    reserved = len("memoctl notes for example.com/a/b (10 of 10 shown)\n") + len(
+        "[memoctl: 10 more notes not shown; use memoctl list --repo example.com/a/b]\n"
+    )
+    tight = cfg(max_chars=total + reserved, max_kind_share=Fraction(1), max_per_topic=1)
+    assert db.select(config=tight).shown == 10
+    under = cfg(max_chars=total + reserved - 1, max_kind_share=Fraction(1), max_per_topic=1)
+    assert db.select(config=under).shown == 9
+
+
+def test_cut_first_line_counts_u_ffff_as_one_unit_and_u_10000_as_two() -> None:
+    # "| a" is 3 units; the prefix keeps units + 1 LF within the cap 8
+    text, cut = note_text(row(), "a" + "\uffff" * 10, 8)
+    assert cut and text.endswith("| a" + "\uffff" * 4 + "\n[memoctl: note 7 cut]\n")
+    text, cut = note_text(row(), "a" + "\U00010000" * 10, 8)
+    assert cut and text.endswith("| a" + "\U00010000" * 2 + "\n[memoctl: note 7 cut]\n")
+
+
+def test_bad_rows_count_only_this_selection_not_earlier_skips_of_the_store(db: Db) -> None:
+    db.add()
+    db.add(topic="Bad Topic")
+    s = open_store(db.state, Mode.READ)
+    assert s is not None
+    with s:
+        assert len(list(s.notes())) == 1 and s.bad_rows == 1  # a skip before the selection
+        sel = select_context(
+            s, repo=REPO, session_labels=[], config=cfg(), now=NOW, sanitize=sanitize
+        )
+        assert sel.bad_rows == 1 and s.bad_rows == 2
+
+
+def test_bad_rows_ignore_rows_the_sql_filter_excludes(db: Db) -> None:
+    db.add()
+    db.add(topic="Bad Topic", kind="unknown")  # a kind outside author_kinds: never read
+    db.add(topic="Bad Topic", repo="example.com/other")
+    assert db.select().bad_rows == 0
+
+
+@pytest.mark.parametrize(
+    ("share", "chars", "notes"),
+    [(1, 8000, 20), (0.3, 8000, 20), (0.1, 1000, 5), (0.5, 9000, 100), (0.57, 1000, 10)],
+)
+def test_from_config_reads_the_context_settings(share: Any, chars: int, notes: int) -> None:
+    ctx = Context(max_kind_share=share, max_chars=chars, max_notes=notes)
+    got = SelectionConfig.from_config(ctx)
+    assert got.max_kind_share == share_fraction(share)
+    assert (got.max_chars, got.max_notes) == (chars, notes)
+    assert got.author_kinds == tuple(ctx.author_kinds)
+    assert (got.max_bytes, got.max_per_topic, got.note_max_chars) == (
+        ctx.max_bytes, ctx.max_per_topic, ctx.note_max_chars,
+    )  # fmt: skip
+
+
+def test_from_config_defaults() -> None:
+    got = SelectionConfig.from_config(Context())
+    assert (got.max_chars, got.max_bytes, got.max_notes, got.max_per_topic) == (
+        8000, 15000, 20, 2,
+    )  # fmt: skip
+    assert got.max_kind_share == Fraction(1, 2) and got.note_max_chars == 2000
+    assert got.author_kinds == tuple(Context().author_kinds)
+    assert (got.max_kind_share * got.max_chars).__floor__() == 4000
+    assert (SelectionConfig.from_config(Context(max_kind_share=0.3)).max_kind_share * 8000) == 2400
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        dict(max_chars=True), dict(max_chars=1.5), dict(max_chars=-1), dict(max_bytes="1"),
+        dict(max_notes=-1), dict(max_per_topic=2.0), dict(note_max_chars=-5),
+        dict(max_kind_share=0.5), dict(max_kind_share=Fraction(-1, 10)),
+        dict(max_kind_share=Fraction(11, 10)), dict(max_kind_share=True),
+        dict(author_kinds=["a"]), dict(author_kinds=(1,)),
+    ],
+)  # fmt: skip
+def test_selection_config_refuses_values_the_walk_is_not_defined_for(over: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        cfg(**over)
+
+
+def test_selection_config_accepts_the_edges() -> None:
+    cfg(max_notes=0, max_per_topic=0, max_kind_share=Fraction(0))
+    cfg(max_kind_share=Fraction(1), author_kinds=())
