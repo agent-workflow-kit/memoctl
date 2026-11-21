@@ -1290,3 +1290,19 @@ def test_insert_note_on_a_read_store_is_a_programming_error(state: StateDir) -> 
     with pytest.raises(RuntimeError):
         _insert(s)
     s.close()
+
+
+def test_write_rechecks_the_schema_under_the_lock_and_releases_it(state: StateDir) -> None:
+    init(state)
+    with open_store(state, Mode.WRITE) as s:  # type: ignore[union-attr]
+        other = raw(state)
+        other.execute("PRAGMA user_version = 9")  # a newer writer moves on after the open
+        other.close()
+        with pytest.raises(StoreError) as e, s.write():
+            pytest.fail("the body must not run")
+        assert e.value.reason in {"db_corrupt", "schema_newer"}
+        c = raw(state)
+        c.execute("PRAGMA busy_timeout = 0")
+        c.execute("BEGIN IMMEDIATE")  # the refused write rolled back and freed the lock
+        c.execute("ROLLBACK")
+        c.close()

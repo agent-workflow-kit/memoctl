@@ -478,6 +478,8 @@ class Store:
             found = _classify(_inspect(self._conn))
         except sqlite3.Error as exc:
             raise _failure(exc, self) from None
+        # Any non-CURRENT state after taking the lock (e.g. the file replaced by an empty,
+        # uninitialised db) is reported as db_corrupt, deliberately.
         if found != CURRENT:
             raise StoreError(DB_CORRUPT)
 

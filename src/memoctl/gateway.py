@@ -755,8 +755,8 @@ def _is_symlink(path: Path) -> bool:
         return False
 
 
-# Bound on the wait for a blocked output pipe, per ``_write_fd`` call (the deadline restarts on
-# each call); ``emit`` makes at most three (stdout, stderr, warnings), so the worst case is ~9 s.
+# Bound on the wait for a blocked output pipe, per stall: the deadline restarts after every
+# successful write, so only a reader making no progress for this long is abandoned.
 WRITE_WAIT_SECONDS = 3.0
 
 
@@ -765,10 +765,10 @@ def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
     locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says.
 
     Without ``bound`` the descriptor is waited on (``poll``) before each small write for at most
-    ``WRITE_WAIT_SECONDS`` per call, then the write gives up silently; this holds for a blocking
-    pipe too (one ``write`` of a large chunk would block until a reader drains it). A
-    non-blocking descriptor that is full (EAGAIN) is waited on the same way; partial writes
-    continue.
+    ``WRITE_WAIT_SECONDS`` per stall (restarted after each successful write), then it gives up
+    silently; this holds for a blocking pipe too (one ``write`` of a large chunk would block
+    until a reader drains it). A non-blocking descriptor that is full (EAGAIN) is waited on the
+    same way; partial writes continue.
 
     With ``bound`` the write is for a signal handler that must not hang: it waits for the
     descriptor to be writable for at most ``bound`` seconds in all (``poll``, EINTR retried
@@ -784,6 +784,8 @@ def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
                 return
             try:
                 view = view[os.write(fd, chunk) :]
+                if bound is None:  # the budget is per stall: progress restarts it
+                    end = time.monotonic() + WRITE_WAIT_SECONDS
             except BlockingIOError:
                 remaining = end - time.monotonic()
                 if remaining <= 0:

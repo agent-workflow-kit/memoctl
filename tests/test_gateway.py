@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import pwd
 import threading
+import time
 from datetime import UTC
 from pathlib import Path
 
@@ -370,3 +371,27 @@ def test_a_full_blocking_pipe_gives_up_after_the_bound_instead_of_hanging(
     os.close(reader)
     os.close(writer)
     assert finished
+
+
+def test_a_slow_but_steady_reader_receives_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The budget is per stall: the whole transfer outlasts it, no single stall does.
+    monkeypatch.setattr(gateway, "WRITE_WAIT_SECONDS", 0.3)
+    reader, writer = os.pipe()
+    chunks: list[bytes] = []
+
+    def drain() -> None:
+        while chunk := os.read(reader, 4096):
+            chunks.append(chunk)
+            time.sleep(0.02)
+
+    thread = threading.Thread(target=drain)
+    thread.start()
+    payload = "x" * 300_000  # ~75 reads at 20 ms each: well over 0.3 s in all
+    try:
+        gateway._write_fd(writer, payload)
+    finally:
+        os.close(writer)
+        thread.join(timeout=20)
+        os.close(reader)
+    assert not thread.is_alive()
+    assert sum(len(c) for c in chunks) == len(payload)
