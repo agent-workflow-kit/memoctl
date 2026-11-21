@@ -27,6 +27,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -78,6 +79,118 @@ def _info(st: os.stat_result) -> PathInfo:
     return PathInfo(_kind(st.st_mode), st.st_uid, stat.S_IMODE(st.st_mode))
 
 
+def _component(name: str) -> str:
+    """``name`` when it is one plain path component; ``ValueError`` otherwise, so a handle
+    can never be steered out of its directory."""
+    if not name or name in (".", "..") or "/" in name or "\0" in name:
+        raise ValueError(f"not a single path component: {name!r}")
+    return name
+
+
+class DirHandle(Protocol):
+    """An open directory descriptor: every name is relative to it and one component long.
+
+    The callers check the directory once, through :meth:`stat` (``fstat`` on the descriptor),
+    and everything after that goes through the same descriptor, so a swapped path cannot
+    redirect it. ``close`` is idempotent; any other call on a closed handle raises ``OSError``.
+    """
+
+    def stat(self) -> PathInfo:
+        """Kind, owner and mode of the directory itself (``fstat``)."""
+        ...
+
+    def open_dir(self, name: str, *, follow: bool) -> DirHandle | None:
+        """Open the subdirectory ``name`` (a final symlink is followed only when ``follow``).
+        ``None`` when it is missing. A symlink (not following), a non-directory and a refusal
+        raise ``OSError``."""
+        ...
+
+    def mkdir(self, name: str, mode: int) -> None:
+        """Create ``name`` (``mkdirat``; never follows a symlink). ``FileExistsError`` when
+        anything, even a dangling symlink, is there. The directory gets exactly
+        ``mode``: the umask is cleared for the call, so the mode is exact."""
+        ...
+
+    def set_mode(self, mode: int) -> None:
+        """Set the directory's permission bits exactly (``fchmod``; the umask does not apply)."""
+        ...
+
+    def lstat(self, name: str) -> PathInfo | None:
+        """Kind, owner and mode of ``name`` without following a symlink; ``None`` when missing."""
+        ...
+
+    def create_file(self, name: str, mode: int) -> bool:
+        """Create the regular file ``name`` empty, exclusively and without following a symlink,
+        with exactly ``mode`` (the umask does not apply). ``False`` when anything is there."""
+        ...
+
+    def close(self) -> None: ...
+
+
+_UMASK_LOCK = threading.Lock()
+
+
+class _RealDirHandle:
+    def __init__(self, fd: int) -> None:
+        self._fd: int | None = fd
+
+    def _live(self) -> int:
+        if self._fd is None:
+            raise OSError(errno.EBADF, "directory handle is closed")
+        return self._fd
+
+    def stat(self) -> PathInfo:
+        return _info(os.fstat(self._live()))
+
+    def open_dir(self, name: str, *, follow: bool) -> DirHandle | None:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        if not follow:
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(_component(name), flags, dir_fd=self._live())
+        except FileNotFoundError:
+            return None
+        return _RealDirHandle(fd)
+
+    def mkdir(self, name: str, mode: int) -> None:
+        # The umask is cleared for this one call so the directory is created with exactly
+        # ``mode``: a hostile umask (say 0o277) would otherwise leave a directory its owner
+        # cannot open. The umask is process-wide; the lock only orders our own callers, and
+        # every other file this tool creates sets its mode explicitly.
+        with _UMASK_LOCK:
+            old = os.umask(0)
+            try:
+                os.mkdir(_component(name), mode, dir_fd=self._live())
+            finally:
+                os.umask(old)
+
+    def set_mode(self, mode: int) -> None:
+        os.fchmod(self._live(), mode)
+
+    def lstat(self, name: str) -> PathInfo | None:
+        try:
+            return _info(os.stat(_component(name), dir_fd=self._live(), follow_symlinks=False))
+        except FileNotFoundError:
+            return None
+
+    def create_file(self, name: str, mode: int) -> bool:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            fd = os.open(_component(name), flags, mode, dir_fd=self._live())
+        except FileExistsError:
+            return False
+        try:
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        return True
+
+    def close(self) -> None:
+        if self._fd is not None:
+            fd, self._fd = self._fd, None
+            os.close(fd)
+
+
 class Gateway(Protocol):
     """Everything memoctl needs from outside the process."""
 
@@ -117,6 +230,13 @@ class Gateway(Protocol):
         ``OSError``."""
         ...
 
+    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
+        """Open the directory ``path`` (``O_DIRECTORY``; a final symlink is followed only when
+        ``follow``; symlinks in parent components are always followed). ``None`` when it or a
+        parent is missing. A final symlink (not following), a non-directory (also as a parent)
+        and a refusal raise ``OSError``."""
+        ...
+
     def stdin_read(self) -> str: ...
     def write_out(self, text: str) -> None: ...
     def write_err(self, text: str) -> None: ...
@@ -128,7 +248,12 @@ class Gateway(Protocol):
         ...
 
     def read_bytes(self, path: Path) -> bytes: ...
-    def write_bytes(self, path: Path, data: bytes) -> None: ...
+    def write_bytes(self, path: Path, data: bytes, *, mode: int = 0o600) -> None:
+        """Replace ``path`` atomically with ``data`` at exactly ``mode`` (default 0600): a
+        temporary file beside it is written, synced and renamed over it, so a reader sees the
+        old or the new bytes, never a mix, and a symlink at ``path`` is replaced, not written
+        through. The parent is not created (``FileNotFoundError``)."""
+        ...
 
     def run(
         self, argv: list[str], *, stdin: str | bytes | None = None, timeout: float | None = None
@@ -257,6 +382,16 @@ class RealGateway:
         finally:
             os.close(fd)
 
+    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        if not follow:
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            return None
+        return _RealDirHandle(fd)
+
     def stdin_read(self) -> str:
         return sys.stdin.read()
 
@@ -284,14 +419,35 @@ class RealGateway:
         """Read the whole file. Raises ``OSError`` as the filesystem does."""
         return Path(path).read_bytes()
 
-    def write_bytes(self, path: Path, data: bytes) -> None:
-        """Write ``data`` to ``path``.
-
-        Not atomic (a crash can leave a truncated file), does not set a file mode, does not
-        create parent directories and does not fsync.
-        todo(#8): file modes and atomic replace.
-        """
-        Path(path).write_bytes(data)
+    def write_bytes(self, path: Path, data: bytes, *, mode: int = 0o600) -> None:
+        if not isinstance(data, bytes):
+            raise TypeError(f"write_bytes needs bytes, got {type(data).__name__}")
+        target = Path(path)
+        parent = os.fspath(target.parent)
+        temp = os.path.join(parent, f".{target.name}.{secrets.token_hex(8)}.tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        fd = os.open(temp, flags, mode)
+        try:
+            try:
+                os.fchmod(fd, mode)
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view) :]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(temp, target)
+        except BaseException:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+            raise
+        dfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
 
     def run(
         self, argv: list[str], *, stdin: str | bytes | None = None, timeout: float | None = None
