@@ -28,6 +28,7 @@ from memoctl.cli_errors import (
 )
 from memoctl.deadline import Deadline, initial_seconds
 from memoctl.gateway import Gateway, RealGateway
+from memoctl.grammar import matches
 
 STANDARD_FDS = ((0, False), (1, True), (2, True))  # (descriptor, open for writing)
 
@@ -96,6 +97,10 @@ def _run(
     namespace = parser.parse_args(args)
     if namespace.command is None:
         raise UsageError("argv")
+    # Every command parses --actor (interface.md, Global flags): a bad one is exit 2 before the
+    # deadline is armed. The default is resolved by the command (``author.resolve_actor``).
+    if namespace.actor is not None and not matches("actor", namespace.actor):
+        raise UsageError("actor")
     by_name = {command.name: command for command in commands}
     # Armed after parsing; leaving the block disarms (and ends in exit 12 when the time had
     # run out), so nothing is reported after the deadline passed. A command disarms earlier at

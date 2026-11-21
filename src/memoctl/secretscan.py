@@ -19,7 +19,7 @@ once. ``mask_env`` values are compared with ``in`` (a linear substring search). 
 Precondition for EVERY field (repo, topic, each label, kind, body): the text has already
 passed its grammar and length bounds and the combining-mark run bound of body validation
 (#12), because NFKC is unbounded in the input size (a topic of millions of U+FDFA takes
-seconds). This module does not bound any input; todo(#16): the ``add`` step order must run
+seconds). This module does not bound any input: ``add`` (``memoctl.cmd_add``, step 6) runs
 those checks on every field before calling :func:`check_secrets`.
 
 A ``mask_env`` value is compared as written (a code-point substring) against both forms of
@@ -28,8 +28,8 @@ points is skipped; values are read through the gateway only.
 
 The frame that raises holds only the class and the field; env values live in a frame that
 has returned. Traceback frames of the callers hold the text, so callers must never render
-tracebacks with locals. todo(#16): the ``add`` step order calls this after body validation
-(a secret split by a zero-width or control character is refused there first). todo(#6): the CLI maps
+tracebacks with locals. ``add`` calls this after body validation (a secret split by a
+zero-width or control character is refused there first); ``cli_errors`` maps
 :class:`SecretDetected` to exit 20 ``refused``, reason ``secret_detected``, ``details``.
 """
 

@@ -139,9 +139,10 @@ INTERNAL_MESSAGE = "internal error"
 class UsageError(Exception):
     """A usage error with no value in it: ``field`` is a ``[a-z_]{1,32}`` usage field."""
 
-    def __init__(self, field: str = "argv") -> None:
+    def __init__(self, field: str = "argv", limit: int | None = None) -> None:
         super().__init__(f"invalid {field}")
         self.field = field
+        self.limit = limit  # details.limit where one applies (the label count)
 
 
 @dataclass(frozen=True)
@@ -231,11 +232,14 @@ def register_error(exc_type: type[BaseException], mapper: Mapper) -> None:
     MAPPERS[exc_type] = mapper
 
 
-def usage_failure(field: str) -> Failure:
+def usage_failure(field: str, limit: int | None = None) -> Failure:
     if not _USAGE_FIELD.fullmatch(field):
         # A field that is not an identifier would put arbitrary text in the envelope.
         return internal_failure()
-    return Failure(USAGE, "usage", f"invalid {field}", details={"field": field})
+    details: dict[str, Any] = {"field": field}
+    if limit is not None:
+        details["limit"] = limit
+    return Failure(USAGE, "usage", f"invalid {field}", details=details)
 
 
 def failure_for(exc: BaseException) -> Failure:
@@ -269,7 +273,7 @@ _STORE_MESSAGES = {
 
 
 def _register_defaults() -> None:
-    register_error(UsageError, lambda e: usage_failure(e.field))
+    register_error(UsageError, lambda e: usage_failure(e.field, e.limit))
     register_error(GrammarError, lambda e: usage_failure(e.field))
     register_error(
         ConfigError,

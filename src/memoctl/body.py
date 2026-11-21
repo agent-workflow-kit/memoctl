@@ -28,11 +28,13 @@ accepted by a newer interpreter may be stripped by an older one at read time; ac
 Traceback frames of a raised :class:`BodyTextError` hold the decoded text, so callers must
 never render tracebacks with locals (see todo(#6) for the error mapping).
 
-todo(#16): the refused-character classes are defined here from the spec, independently of
-``memoctl.sanitize.refused_class`` (#24). The first issue that merges both branches (#16)
-may deduplicate them; until then both must follow Body rules item 3.
+TODO(#24): the refused-character classes are defined here from the spec, independently of
+``memoctl.sanitize.refused_class``. The sanitizer branch (#24) is not on the branch that wired
+``add`` (#16), so the first branch that merges both feat/add and feat/sanitizer deduplicates
+them (test the tag block U+E0000..E007F before the category lookup); until then both must
+follow Body rules item 3.
 Item 7, the secret check, is :mod:`memoctl.secretscan`; it runs after this validation.
-todo(#6): the CLI maps :class:`BodyTextError` to exit 2 ``usage`` with ``details``.
+``cli_errors`` maps :class:`BodyTextError` to exit 2 ``usage`` with ``details``.
 todo(#5): ``max_bytes`` comes from the effective config (256 to 65536).
 """
 

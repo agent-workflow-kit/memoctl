@@ -6,10 +6,10 @@ it is ``unknown``. A variable value that fails the kind grammar becomes ``unknow
 being echoed, stored, logged or printed: this module never puts a value into a message or a
 result that did not already pass its grammar.
 
-TODO(#16): ``add`` calls :func:`resolve_kind` at step 4 and :func:`kind_is_shown` for the
-``kind_not_shown`` warning. TODO(#13): the secret check of the kind (exit 20 secret_detected,
-details.field kind, from --kind or the variable) runs on the resolved kind in add step 6.
-TODO(#6): map GrammarError to the exit 2 usage envelope.
+``add`` (``memoctl.cmd_add``) calls :func:`resolve_kind` at step 4 and :func:`kind_is_shown` for
+the ``kind_not_shown`` warning; the secret check of the kind (exit 20 ``secret_detected``,
+``details.field`` ``kind``, from ``--kind`` or the variable) runs on the resolved kind in its
+step 6. ``cli_errors`` maps GrammarError to the exit 2 usage envelope.
 """
 
 from __future__ import annotations

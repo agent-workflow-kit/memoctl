@@ -31,8 +31,9 @@ The CLI maps :class:`StoreError` and :class:`SchemaNewerError` to exit 12 (``cli
 deadline installs its progress handler through ``open_store(configure=deadline.configure_store)``;
 an interrupted statement arrives as ``StoreError("timeout")``.
 todo(#15): the change log is appended after :meth:`Store.write` returns (after the commit).
-todo(#16): ``add``'s queries (dedupe, limits, supersede, insert) are added here and run inside
-``Store.write()``.
+``add``'s write is :meth:`Store.insert_note` (the note, its labels and its rate row), run inside
+``Store.write()``. todo(#17): the dedupe and supersede queries and todo(#18): the limit queries
+are added here by their issues and run inside the same transaction.
 """
 
 from __future__ import annotations
@@ -504,6 +505,46 @@ class Store:
             if isinstance(exc, sqlite3.Error):
                 raise _failure(exc, self) from None
             raise
+
+    # -- add
+    def insert_note(
+        self,
+        *,
+        repo: str,
+        topic: str,
+        kind: str,
+        body: str,
+        body_sha256: str,
+        size: int,
+        created: int,
+        expires: int,
+        labels: Sequence[tuple[str, str]],
+    ) -> int:
+        """Insert one note, its labels and its rate row (``add`` step 13); the new id.
+
+        Call it inside :meth:`write` so that all three inserts commit or none does. Every value
+        is bound (never formatted into SQL). The id is checked against the output range (an id
+        above 999999999999999999 cannot be printed): ``StoreError("db_corrupt")``, which rolls
+        the transaction back, never a stored note the tool cannot show.
+        """
+        if self.mode is Mode.READ:
+            raise RuntimeError("insert on a read-only store")
+        cursor = self.execute(
+            "INSERT INTO notes (repo, topic, kind, body, body_sha256, size, created, expires)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (repo, topic, kind, body, body_sha256, size, created, expires),
+        )
+        note_id = cursor.lastrowid
+        cursor.close()
+        if type(note_id) is not int or not 1 <= note_id <= MAX_ID:
+            raise StoreError(DB_CORRUPT)
+        for key, value in labels:
+            self.execute(
+                "INSERT INTO note_labels (note_id, key, value) VALUES (?, ?, ?)",
+                (note_id, key, value),
+            ).close()
+        self.execute("INSERT INTO rate (repo, at) VALUES (?, ?)", (repo, created)).close()
+        return note_id
 
     # -- rows
     def notes(
