@@ -120,14 +120,16 @@ def test_repeated_open_is_idempotent(gw: HomeGateway, home: Path) -> None:
     for _ in range(3):
         with open_state_dir(gw, create=True) as sd:
             assert sd is not None
-    with open_state_dir(gw, create=False) as sd:
-        assert sd is not None
+    sd = open_state_dir(gw, create=False)
+    assert sd is not None
+    sd.close()
 
 
 def test_a_good_existing_dir_opens_without_create(gw: HomeGateway, home: Path) -> None:
     _state(home).mkdir(parents=True, mode=0o700)
-    with open_state_dir(gw, create=False) as sd:
-        assert sd is not None
+    sd = open_state_dir(gw, create=False)
+    assert sd is not None
+    sd.close()
 
 
 # --- refusals ---------------------------------------------------------------------------------
@@ -297,14 +299,14 @@ class _Racer:
         self._inner = inner
         self._rival = rival
 
-    def mkdir(self, name: str, mode: int) -> None:
+    def make_dir(self, name: str, mode: int) -> None:
         if name in self._rival:
-            self._inner.mkdir(name, self._rival.pop(name))
+            self._inner.make_dir(name, self._rival.pop(name))
             sub = self._inner.open_dir(name, follow=False)
             assert sub is not None
             sub.set_mode(0o700 if name != "memoctl" else _RIVAL_MODE[0])
             sub.close()
-        self._inner.mkdir(name, mode)
+        self._inner.make_dir(name, mode)
 
     def open_dir(self, name: str, *, follow: bool) -> Any:
         sub = self._inner.open_dir(name, follow=follow)
@@ -344,28 +346,32 @@ def test_a_rival_creating_the_dir_first_with_a_wide_mode_is_refused(home: Path) 
     assert _mode(_state(home)) == 0o755
 
 
+def _race_once(h: Path) -> list[object]:
+    g = HomeGateway(h)
+    barrier = threading.Barrier(6)
+    results: list[object] = []
+
+    def worker() -> None:
+        barrier.wait()
+        try:
+            with open_state_dir(g, create=True) as sd:
+                results.append(sd is not None)
+        except BaseException as exc:  # noqa: BLE001 - collected and asserted by the caller
+            results.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    return results
+
+
 def test_concurrent_creators_all_succeed_with_0700(tmp_path: Path) -> None:
     for round_ in range(20):
         h = tmp_path / f"h{round_}"
         h.mkdir()
-        g = HomeGateway(h)
-        barrier = threading.Barrier(6)
-        results: list[object] = []
-
-        def worker() -> None:
-            barrier.wait()
-            try:
-                with open_state_dir(g, create=True) as sd:
-                    results.append(sd is not None)
-            except BaseException as exc:  # noqa: BLE001 - collected and asserted below
-                results.append(exc)
-
-        threads = [threading.Thread(target=worker) for _ in range(6)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=30)
-        assert results == [True] * 6
+        assert _race_once(h) == [True] * 6
         assert _mode(_state(h)) == 0o700
         assert _mode(h / ".local") == 0o700
 

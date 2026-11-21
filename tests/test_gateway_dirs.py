@@ -103,7 +103,7 @@ def test_mkdir_creates_with_exactly_the_mode_despite_the_umask(
     handle = gw.open_dir(d, follow=True)
     assert handle is not None
     try:
-        handle.mkdir("child", 0o700)
+        handle.make_dir("child", 0o700)
         sub = handle.open_dir("child", follow=False)
         assert sub is not None
         sub.close()
@@ -119,7 +119,7 @@ def test_mkdir_existing_raises_file_exists(gw_and_dir: tuple[Gateway, Path]) -> 
     assert handle is not None
     try:
         with pytest.raises(FileExistsError):
-            handle.mkdir("child", 0o700)
+            handle.make_dir("child", 0o700)
     finally:
         handle.close()
 
@@ -131,7 +131,7 @@ def test_mkdir_never_follows_a_dangling_symlink(gw_and_dir: tuple[Gateway, Path]
     assert handle is not None
     try:
         with pytest.raises(FileExistsError):
-            handle.mkdir("link", 0o700)
+            handle.make_dir("link", 0o700)
     finally:
         handle.close()
     assert not (d / "nowhere").exists()
@@ -162,7 +162,7 @@ def test_handle_refuses_names_that_are_not_one_component(
     assert handle is not None
     try:
         for call in (
-            lambda: handle.mkdir(name, 0o700),
+            lambda: handle.make_dir(name, 0o700),
             lambda: handle.open_dir(name, follow=False),
             lambda: handle.lstat(name),
             lambda: handle.create_file(name, 0o600),

@@ -22,6 +22,7 @@ from __future__ import annotations
 import errno
 from pathlib import Path
 from types import TracebackType
+from typing import Literal, overload
 
 from memoctl.config import ConfigError, resolve_home
 from memoctl.gateway import DirHandle, Gateway, PathInfo
@@ -121,7 +122,7 @@ def _descend(
         if not create:
             return None, False
         try:
-            cur.mkdir(name, DIR_MODE)
+            cur.make_dir(name, DIR_MODE)
         except FileExistsError:
             continue  # a rival created it (or a dangling symlink sits there): look again
         made = cur.open_dir(name, follow=False)
@@ -136,6 +137,10 @@ def _descend(
     raise UnsafeStateError("race")
 
 
+@overload
+def open_state_dir(gateway: Gateway, *, create: Literal[True]) -> StateDir: ...
+@overload
+def open_state_dir(gateway: Gateway, *, create: bool) -> StateDir | None: ...
 def open_state_dir(gateway: Gateway, *, create: bool) -> StateDir | None:
     """Open and check the state directory; ``None`` when it does not exist (and ``create`` is
     false). With ``create`` the missing levels are made at 0700. Raises

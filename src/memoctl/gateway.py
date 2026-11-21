@@ -105,7 +105,7 @@ class DirHandle(Protocol):
         raise ``OSError``."""
         ...
 
-    def mkdir(self, name: str, mode: int) -> None:
+    def make_dir(self, name: str, mode: int) -> None:
         """Create ``name`` (``mkdirat``; never follows a symlink). ``FileExistsError`` when
         anything, even a dangling symlink, is there. The directory gets exactly
         ``mode``: the umask is cleared for the call, so the mode is exact."""
@@ -152,7 +152,7 @@ class _RealDirHandle:
             return None
         return _RealDirHandle(fd)
 
-    def mkdir(self, name: str, mode: int) -> None:
+    def make_dir(self, name: str, mode: int) -> None:
         # The umask is cleared for this one call so the directory is created with exactly
         # ``mode``: a hostile umask (say 0o277) would otherwise leave a directory its owner
         # cannot open. The umask is process-wide; the lock only orders our own callers, and
