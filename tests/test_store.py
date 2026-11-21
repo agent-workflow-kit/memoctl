@@ -1168,3 +1168,43 @@ def test_unbindable_parameters_raise_a_fixed_value_error(state: StateDir, value:
             s.execute("SELECT ?", (value,))
         assert str(e.value) == "invalid parameter"
         assert e.value.__suppress_context__
+
+
+class _CommitAfterEachStatement:
+    """A connection proxy: after every statement, another connection commits a note plus its
+    label (what a concurrent ``add`` does between two reads)."""
+
+    def __init__(self, conn: sqlite3.Connection, other: sqlite3.Connection) -> None:
+        self._conn, self._other, self.statements = conn, other, 0
+
+    def execute(self, sql: str, *args: Any) -> Any:
+        cur = self._conn.execute(sql, *args)
+        rows = cur.fetchall()  # the statement has read its snapshot before the commit below
+        self.statements += 1
+        self._other.execute("BEGIN IMMEDIATE")
+        insert(self._other, id=None)
+        self._other.execute("INSERT INTO note_labels VALUES (last_insert_rowid(), 'k', 'v')")
+        self._other.execute("COMMIT")
+        return _Replay(rows)
+
+
+class _Replay:
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def fetchone(self) -> Any:
+        return self._rows[0] if self._rows else None
+
+
+def test_label_check_is_not_fooled_by_a_note_committed_mid_check(state: StateDir) -> None:
+    init(state)
+    other = raw(state)
+    other.execute("PRAGMA busy_timeout = 5000")
+    conn = raw(state)
+    try:
+        proxy = _CommitAfterEachStatement(conn, other)
+        store_mod._check_labels_against_sequence(proxy)  # type: ignore[arg-type]
+        assert proxy.statements == 1  # one snapshot, not two reads a commit can fall between
+    finally:
+        conn.close()
+        other.close()

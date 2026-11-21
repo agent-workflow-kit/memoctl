@@ -647,11 +647,13 @@ def _classify(snap: _Snapshot) -> str:
 def _check_labels_against_sequence(conn: sqlite3.Connection) -> None:
     """No label may name a note id the sequence has not issued: otherwise the next note would
     inherit planted labels. ``note_id > seq``, or any label when there is no sequence row."""
-    seq = _scalar(conn, "SELECT max(seq) FROM sqlite_sequence WHERE name = 'notes'")
-    top = _scalar(conn, "SELECT max(note_id) FROM note_labels")
-    if top is None:
-        return
-    if type(seq) is not int or type(top) is not int or top > seq:
+    # one statement, so one snapshot: two reads would let a concurrent ``add`` commit between them
+    bad = _scalar(
+        conn,
+        "SELECT EXISTS(SELECT 1 FROM note_labels WHERE note_id >"
+        " COALESCE((SELECT max(seq) FROM sqlite_sequence WHERE name = 'notes'), 0))",
+    )
+    if bad != 0:
         raise StoreError(DB_CORRUPT)
 
 
