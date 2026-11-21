@@ -117,7 +117,6 @@ def add_global_flags(parser: argparse.ArgumentParser, *, dry_run: bool) -> None:
     """The flags every command accepts after its name (interface.md, Global flags)."""
     parser.add_argument("--json", action="store_true", help="machine-readable JSON on stdout")
     parser.add_argument("--actor", default=None, help="who is acting (recorded in the log)")
-    # todo(#16): validate --actor (grammar, field "actor") and resolve the default.
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--verbose", action="store_true", help="one line per phase on stderr")
     group.add_argument("--quiet", action="store_true", help="suppress status output")

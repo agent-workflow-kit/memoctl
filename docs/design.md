@@ -17,6 +17,7 @@ Uncommitted shared knowledge that agents leave for each other. Layer: L1 (primit
 - `pyyaml`: the config is YAML (design guide section 3). Used with `safe_load` through a duplicate-key-rejecting loader ([Config](interface.md#config)).
 - `pydantic`: validates the config and the `--json` output models (guide section 3). Importing it costs about 100 ms on a cold start, well inside the `context` deadline; a design-time measurement put `context` on a 10 000-note store at 30 to 40 ms without it.
 - `jsonschema` and `types-pyyaml` are dev-only: the first checks `config.example.yaml` and the loader against `schemas/config.json` in tests, the second supplies PyYAML type stubs. Neither is a runtime dependency.
+- `regress` is dev-only: the ECMAScript regular-expression engine that CI's `check-jsonschema` uses, so a test compiles every schema pattern with the engine CI judges them by (Python's `re` accepts patterns that engine rejects). It is not a runtime dependency.
 - Everything else is the standard library: `sqlite3` (WAL), `argparse`, `unicodedata`, `hashlib`, `secrets`, `signal`, `fcntl`.
 
 ## Decisions
@@ -90,8 +91,11 @@ Package `src/memoctl/` (design guide section 15):
 | `cli_errors.py` | Exit codes, the error envelope, and the table mapping exception types to them. A clock fault (`ClockError`) is exit 1 `internal`: the interface has no clock code and the schema enums are closed. |
 | `config.py` | Home lookup, YAML loading, the Pydantic config model, per-repo overrides, the effective config for a repo. |
 | `grammar.py` | Every grammar, duration parsing, `fullmatch` helpers. |
-| `body.py` | Body reading and validation, the secret check. |
+| `bodyread.py` | The bounded reader for `--body-file` and standard input. |
+| `body.py` | Body validation (six classes, combining runs, NFKC bound). |
+| `secretscan.py` | The secret check: patterns and `mask_env` values over the repo id, topic, labels, kind and body (named so it never shadows the standard library `secrets`). |
 | `store.py` | SQLite open modes, migrations, the queries (all SQL lives here). |
+| `cmd_add.py` | The `add` command: its 14 steps as one function each, called in the interface's order (argv grammars, config, body, secrets, clock, state, store transaction, log, output). The dedupe, supersede and limit rules of steps 10 to 12 are `notes.py`'s (#17, #18); until then they are named seams in this module. |
 | `notes.py` | The rules of `add`, `delete`, `prune`: supersede, dedupe, limits, chain repointing and reinstatement on `delete`. |
 | `selection.py` | Context selection and fairness. |
 | `render.py` | The sanitizer and the block (plain and fenced). |

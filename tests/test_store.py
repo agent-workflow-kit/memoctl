@@ -458,8 +458,8 @@ def test_triggers_and_views_never_run_even_if_present(state: StateDir) -> None:
         s.execute(
             "CREATE TRIGGER t AFTER INSERT ON rate BEGIN INSERT INTO rate VALUES ('fired', 1); END"
         )
-        with s.write():
-            s.execute("INSERT INTO rate VALUES ('a/b', 1)")
+        # not inside write(): the transaction's schema re-check refuses a changed schema
+        s.execute("INSERT INTO rate VALUES ('a/b', 1)")
         assert s.execute("SELECT count(*) FROM rate").fetchone()[0] == 1
 
 
@@ -1208,3 +1208,101 @@ def test_label_check_is_not_fooled_by_a_note_committed_mid_check(state: StateDir
     finally:
         conn.close()
         other.close()
+
+
+# -- insert_note (add step 13) ----------------------------------------------------------------
+
+
+def _insert(s: Any, **over: Any) -> int:
+    args: dict[str, Any] = dict(
+        repo="example.com/a/b", topic="t", kind="unknown", body="hello", body_sha256=SHA,
+        size=5, created=1000, expires=2000, labels=(("a", "1"), ("b", "2")),
+    )  # fmt: skip
+    args.update(over)
+    return s.insert_note(**args)
+
+
+def test_insert_note_writes_note_labels_and_rate_row_in_one_transaction(state: StateDir) -> None:
+    s = open_store(state, Mode.INIT)
+    assert s is not None
+    with s.write():
+        note_id = _insert(s)
+    assert note_id == 1
+    rows = list(s.notes(labels=True))
+    assert [(r.id, r.body, r.created, r.expires, r.superseded_by) for r in rows] == [
+        (1, "hello", 1000, 2000, None)
+    ]
+    assert rows[0].labels == (("a", "1"), ("b", "2"))
+    assert s.execute("SELECT repo, at FROM rate").fetchall() == [("example.com/a/b", 1000)]
+    s.close()
+
+
+def test_insert_note_rolls_everything_back_when_the_block_raises(state: StateDir) -> None:
+    s = open_store(state, Mode.INIT)
+    assert s is not None
+    with pytest.raises(RuntimeError), s.write():
+        _insert(s)
+        raise RuntimeError("after the inserts")
+    assert list(s.notes()) == []
+    assert s.execute("SELECT count(*) FROM rate").fetchone()[0] == 0
+    assert s.execute("SELECT count(*) FROM note_labels").fetchone()[0] == 0
+    s.close()
+
+
+def test_insert_note_ids_increase_and_are_never_reused(state: StateDir) -> None:
+    s = open_store(state, Mode.INIT)
+    assert s is not None
+    with s.write():
+        first = _insert(s)
+    with s.write():
+        s.execute("DELETE FROM notes WHERE id = ?", (first,)).close()
+    with s.write():
+        second = _insert(s)
+    assert (first, second) == (1, 2)
+    s.close()
+
+
+def test_insert_note_refuses_an_id_the_output_cannot_hold(state: StateDir) -> None:
+    init(state)
+    c = raw(state)
+    c.execute(
+        "INSERT INTO notes (id, repo, topic, kind, body, body_sha256, size, created, expires)"
+        " VALUES (999999999999999998, 'example.com/a', 't', 'unknown', 'x', ?, 1, 1, 2)",
+        (SHA,),
+    )
+    c.execute("DELETE FROM notes")
+    c.close()
+    s = open_store(state, Mode.INIT)
+    assert s is not None
+    with s.write():
+        assert _insert(s) == 999999999999999999  # the last printable id is still allowed
+    with pytest.raises(StoreError) as e, s.write():
+        _insert(s)  # AUTOINCREMENT would give 10**18 or fail: neither is stored
+    assert e.value.reason in ("db_corrupt", "db_unreadable")
+    assert [r.id for r in s.notes()] == [999999999999999999]
+    s.close()
+
+
+def test_insert_note_on_a_read_store_is_a_programming_error(state: StateDir) -> None:
+    init(state)
+    s = open_store(state, Mode.READ)
+    assert s is not None
+    with pytest.raises(RuntimeError):
+        _insert(s)
+    s.close()
+
+
+def test_write_rechecks_the_schema_under_the_lock_and_releases_it(state: StateDir) -> None:
+    init(state)
+    with open_store(state, Mode.WRITE) as s:  # type: ignore[union-attr]
+        other = raw(state)
+        other.execute("PRAGMA user_version = 9")  # a newer writer moves on after the open
+        other.close()
+        with pytest.raises(StoreError) as e, s.write():
+            pytest.fail("the body must not run")
+        assert e.value.reason in {"db_corrupt", "schema_newer"}
+        c = raw(state)
+        c.execute("PRAGMA busy_timeout = 0")
+        c.execute("BEGIN IMMEDIATE")  # the refused write rolled back and freed the lock
+        c.execute("ROLLBACK")
+        c.close()
