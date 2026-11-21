@@ -84,7 +84,10 @@ Package `src/memoctl/` (design guide section 15):
 
 | Module | Responsibility |
 |---|---|
-| `cli.py` | argparse, `--json` pre-scan, exit-code mapping, output. |
+| `cli.py` | Entry point: descriptor check, `--json` pre-scan, dispatch, last-resort handler. |
+| `cli_args.py` | argparse with its printing and exiting neutralized, global flags, the `Command` record, the pre-scan. |
+| `cli_commands.py` | The table of subcommands (one line per command). |
+| `cli_errors.py` | Exit codes, the error envelope, and the table mapping exception types to them. A clock fault (`ClockError`) is exit 1 `internal`: the interface has no clock code and the schema enums are closed. |
 | `config.py` | Home lookup, YAML loading, the Pydantic config model, per-repo overrides, the effective config for a repo. |
 | `grammar.py` | Every grammar, duration parsing, `fullmatch` helpers. |
 | `body.py` | Body reading and validation, the secret check. |
