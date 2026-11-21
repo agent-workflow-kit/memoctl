@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import random
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NoReturn
 
 from memoctl.gateway import (
     TEMP_PREFIX,
@@ -43,6 +46,35 @@ class FakeClock:
     def advance(self, delta: timedelta) -> None:
         """Move by ``delta``; a negative ``delta`` moves backward."""
         self._now += delta
+
+
+class FakeExit(BaseException):
+    """``exit_now`` on the fake: a ``BaseException`` so no ``except Exception`` swallows it."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class FakeAlarm:
+    """A one-shot alarm on the fake's monotonic clock; it fires when the test advances time."""
+
+    def __init__(self, gw: FakeGateway, seconds: float, on_alarm: Callable[[], None]) -> None:
+        self._gw = gw
+        self.on_alarm = on_alarm
+        self.at = gw.mono + seconds
+        self.released = False
+        self.fired = False
+
+    def reset(self, seconds: float) -> None:
+        self.at = self._gw.mono + seconds
+
+    def release(self) -> bool:
+        if self.released:
+            return False
+        self.released = True
+        self._gw.alarms.remove(self)
+        return self.fired or self._gw.mono >= self.at
 
 
 @dataclass
@@ -89,9 +121,18 @@ class FakeGateway:
         self.login: str | None = "tester"
         self.uid_value = os.getuid()  # tests set another value to simulate a foreign owner
         self.environ: dict[str, str] = {}
+        self.argv_value: list[str] = []
+        # Open descriptors by name ("r" or "w"); a test closes one with ``del gw.fds[1]``.
+        self.fds: dict[int, str] = {0: "r", 1: "w", 2: "w"}
+        self.next_free_fd = 0
+        self.devnull_fails = False
+        self.fd_calls: list[tuple[str, int] | tuple[str, int, int]] = []
         self.runs: list[tuple[list[str], str | bytes | None, float | None]] = []
         self._scripted: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {}
         self._random = random.Random(seed)
+        self.mono = 1000.0
+        self.alarms: list[FakeAlarm] = []
+        self.exits: list[int] = []
 
     def now(self) -> datetime:
         return self.clock.now()
@@ -102,13 +143,61 @@ class FakeGateway:
     def login_name(self) -> str | None:
         return self.login
 
+    def argv(self) -> list[str]:
+        return list(self.argv_value)
+
+    def fd_is_open(self, fd: int) -> bool:
+        self.fd_calls.append(("fstat", fd))
+        return fd in self.fds
+
+    def open_devnull(self, *, write: bool) -> int:
+        if self.devnull_fails:
+            raise OSError(errno.EMFILE, "too many open files")
+        fd = self.next_free_fd
+        while fd in self.fds:
+            fd += 1
+        self.fds[fd] = "w" if write else "r"
+        self.fd_calls.append(("open", fd))
+        return fd
+
+    def dup_onto(self, src: int, dst: int) -> None:
+        self.fds[dst] = self.fds[src]
+        self.fd_calls.append(("dup2", src, dst))
+
+    def release_fd(self, fd: int) -> None:
+        self.fds.pop(fd, None)
+        self.fd_calls.append(("close", fd))
+
+    def monotonic(self) -> float:
+        return self.mono
+
+    def alarm_arm(self, seconds: float, on_alarm: Callable[[], None]) -> FakeAlarm:
+        if not 0 < seconds <= 3600:
+            raise ValueError("alarm seconds out of range")
+        alarm = FakeAlarm(self, seconds, on_alarm)
+        self.alarms.append(alarm)
+        return alarm
+
+    def advance_mono(self, seconds: float) -> None:
+        """Move the monotonic clock; an armed alarm that runs out calls its handler (as the
+        signal would, between two bytecodes)."""
+        self.mono += seconds
+        for alarm in list(self.alarms):
+            if not alarm.fired and self.mono >= alarm.at:
+                alarm.fired = True
+                alarm.on_alarm()
+
+    def exit_now(self, code: int) -> NoReturn:
+        self.exits.append(code)
+        raise FakeExit(code)
+
     def stdin_read(self) -> str:
         return self.terminal.stdin
 
-    def write_out(self, text: str) -> None:
+    def write_out(self, text: str, *, bound: float | None = None) -> None:
         self.terminal.stdout += text
 
-    def write_err(self, text: str) -> None:
+    def write_err(self, text: str, *, bound: float | None = None) -> None:
         self.terminal.stderr += text
 
     def isatty(self, fd: int) -> bool:

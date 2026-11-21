@@ -45,7 +45,7 @@ Uncommitted shared knowledge that agents leave for each other. Layer: L1 (primit
 | D-20 | `add` is idempotent by content. | Retries and re-runs would otherwise fill the limits with identical notes. Dedupe runs before the supersede checks, so a retry of a supersede returns the note it created; `--supersedes` of an identical note is the refresh. A dedupe hit is always a live note. | [`add`](interface.md#add) |
 | D-21 | No TUI in 0.x. | About 200 notes per repo; `list`, `show` and `delete` cover the human tasks. | [TUI](interface.md#tui) |
 | D-22 | A short list of high-confidence secret patterns plus `mask_env` values is refused on `add`. | Notes are re-injected into every later session of the repo; no filter catches everything, so the residual risk is documented. Patterns are searched in raw and NFKC text, and the repo id and kind are checked too. | [Secret check](interface.md#secret-check) |
-| D-23 | Every command has a deadline (`context.deadline`, 2 s by default, for `context`; 30 s for the others): a `SIGALRM` timer whose handler exits 12; all waits are bounded below it. | A deadline that only a Python-level check could notice does not fire while SQLite waits on a lock; a default-action signal would exit with a signal status and no `reason`. The handler prints pre-built bytes, and the timer is disarmed before stdout is written, so partial output cannot happen. A deadline that fires while a commit runs reports a stored change as `timeout`; a retry of `add` is safe and the log record is missing, the same window a signal has. Disarming before the commit was rejected because a hung commit would then have no bound. | [Deadlines](interface.md#deadlines) |
+| D-23 | Every command has a deadline (`context.deadline`, 2 s by default, for `context`; 30 s for the others): a `SIGALRM` timer whose handler exits 12; all waits are bounded below it. | A deadline that only a Python-level check could notice does not fire while SQLite waits on a lock; a default-action signal would exit with a signal status and no `reason`. The handler prints pre-built bytes, and the timer is disarmed before stdout is written, so partial output cannot happen. A deadline that fires while a commit runs reports a stored change as `timeout`; a retry of `add` is safe and the log record is missing, the same window a signal has. Disarming before the commit was rejected because a hung commit would then have no bound. Implementation: `signal` and `threading` are the gateway's (`alarm_arm`, `exit_now`; the import-boundary test bans them elsewhere); `memoctl.deadline` keeps the policy. A disarm point that finds the timer already run out exits 12 itself, so the outcome does not depend on when Python dispatches the signal; the gateway kills the direct children it started (not their grandchildren) before `os._exit`; a bounded write to a full pipe or stopped terminal never delays the exit, and every lock wait is capped to the time left. | [Deadlines](interface.md#deadlines) |
 | D-24 | The state directory is checked on an `O_NOFOLLOW` descriptor; `state.db` is checked with `lstat`, created `0600` with `O_EXCL` by `add` only, and opened by path; the `-wal`, `-shm` and `-journal` sidecars get the same `lstat` check. | SQLite gives `-wal` and `-shm` the database's mode, not the umask's; a symlinked `state.db` is silently followed. Python's `sqlite3` takes no descriptor, so the check is against accidents and other users, not against a same-user swap. Rows are checked before use and `trusted_schema` is off. | [State](interface.md#state) |
 | D-25 | Ordering uses `id` only; timestamps come from one gateway clock read per command, bound as a parameter; a caller can supply none. | A forged future timestamp sorted first and survived age pruning; a clock set back made a fresh note look old. | [Lifetime](interface.md#lifetime) |
 
@@ -84,7 +84,10 @@ Package `src/memoctl/` (design guide section 15):
 
 | Module | Responsibility |
 |---|---|
-| `cli.py` | argparse, `--json` pre-scan, exit-code mapping, output. |
+| `cli.py` | Entry point: descriptor check, `--json` pre-scan, dispatch, last-resort handler. |
+| `cli_args.py` | argparse with its printing and exiting neutralized, global flags, the `Command` record, the pre-scan. |
+| `cli_commands.py` | The table of subcommands (one line per command). |
+| `cli_errors.py` | Exit codes, the error envelope, and the table mapping exception types to them. A clock fault (`ClockError`) is exit 1 `internal`: the interface has no clock code and the schema enums are closed. |
 | `config.py` | Home lookup, YAML loading, the Pydantic config model, per-repo overrides, the effective config for a repo. |
 | `grammar.py` | Every grammar, duration parsing, `fullmatch` helpers. |
 | `body.py` | Body reading and validation, the secret check. |
@@ -96,7 +99,8 @@ Package `src/memoctl/` (design guide section 15):
 | `statedir.py` | The state directory check and the `0600` creation. |
 | `logfile.py` | `log.jsonl` append and rotation. |
 | `crontab.py` | The managed block logic (pure; the calls are in the gateway). |
-| `gateway.py` | The only module that reads the clock, randomness, the password database, the terminal, the filesystem handles, stdin and `crontab`; tests replace it. |
+| `gateway.py` | The only module that reads the clock (wall and monotonic), randomness, the password database, the terminal, argv, the standard descriptors, the filesystem handles, stdin and `crontab`, and the only one that touches signals and threads (`alarm_arm`, `exit_now`); tests replace it. |
+| `deadline.py` | The command deadline policy on the gateway's alarm: one deadline per process, the pre-built timeout report, the disarm point, the SQLite progress callback and busy-timeout cap. |
 
 ## Data model
 
