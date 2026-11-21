@@ -15,7 +15,8 @@ Body sources (``read_file_bounded``, ``read_stdin_bounded``) return raw bytes, n
 A command reads the clock once with ``now()`` and hands the value down as a parameter.
 todo(#16): enforce one clock read per command.
 
-todo(#5): env accessor (kind_env, XDG) - ``os.environ`` is banned outside the gateway.
+``env`` is the only way to read an environment variable (``os.environ`` is banned elsewhere).
+The config loader never calls it: HOME and XDG_* are not read (interface.md, Config).
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import shutil
 import stat
 import subprocess
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -58,6 +60,42 @@ class BodySourceError(GatewayError):
         self.reason = reason
 
 
+@dataclass(frozen=True)
+class PathInfo:
+    """What the config checks need to know about a path.
+
+    ``kind`` is ``file`` (regular), ``dir``, ``symlink`` or ``other`` (FIFO, device, socket).
+    ``mode`` holds the permission bits only.
+    """
+
+    kind: str
+    uid: int
+    mode: int
+
+
+@dataclass(frozen=True)
+class FileRead:
+    """The result of ``open_file``: ``info`` describes the opened descriptor; ``data`` is the
+    first ``limit + 1`` bytes for a regular file and empty for every other kind."""
+
+    info: PathInfo
+    data: bytes
+
+
+def _kind(mode: int) -> str:
+    if stat.S_ISREG(mode):
+        return "file"
+    if stat.S_ISDIR(mode):
+        return "dir"
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    return "other"
+
+
+def _info(st: os.stat_result) -> PathInfo:
+    return PathInfo(_kind(st.st_mode), st.st_uid, stat.S_IMODE(st.st_mode))
+
+
 class Gateway(Protocol):
     """Everything memoctl needs from outside the process."""
 
@@ -81,6 +119,30 @@ class Gateway(Protocol):
     def read_stdin_bounded(self, nbytes: int) -> bytes:
         """Read at most ``nbytes`` bytes from standard input (fewer at end of file). Raises
         ``BodySourceError`` for a terminal, a directory or a descriptor that cannot be read."""
+        ...
+
+    def uid(self) -> int:
+        """The real user id of the process."""
+        ...
+
+    def env(self, name: str) -> str | None:
+        """The value of environment variable ``name``, or ``None`` when it is unset."""
+        ...
+
+    def stat_path(self, path: Path, *, follow: bool) -> PathInfo | None:
+        """Kind, owner and mode of ``path`` (``lstat`` unless ``follow``); ``None`` when it or
+        a parent is missing. Other errors raise ``OSError``."""
+        ...
+
+    def list_dir(self, path: Path) -> list[str]:
+        """The entry names of a directory, unordered. Raises ``OSError`` as the filesystem does."""
+        ...
+
+    def open_file(self, path: Path, limit: int) -> FileRead | None:
+        """Open ``path`` without following a symlink and without blocking, check the opened
+        descriptor and read at most ``limit + 1`` bytes of a regular file. ``None`` when the
+        file is missing; a symlink gives kind ``symlink`` (nothing read). Other errors raise
+        ``OSError``."""
         ...
 
     def write_out(self, text: str) -> None: ...
@@ -272,6 +334,46 @@ class RealGateway:
             raise  # the deadline (todo(#10)) or a signal handler, not an unreadable source
         except OSError:
             raise BodySourceError("unreadable") from None
+
+    def uid(self) -> int:
+        return os.getuid()
+
+    def env(self, name: str) -> str | None:
+        return os.environ.get(name)
+
+    def stat_path(self, path: Path, *, follow: bool) -> PathInfo | None:
+        try:
+            st = Path(path).stat() if follow else Path(path).lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        return _info(st)
+
+    def list_dir(self, path: Path) -> list[str]:
+        return os.listdir(path)
+
+    def open_file(self, path: Path, limit: int) -> FileRead | None:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        try:
+            fd = os.open(path, flags)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, getattr(errno, "EMLINK", -1)):
+                return FileRead(PathInfo("symlink", -1, 0), b"")
+            raise
+        try:
+            info = _info(os.fstat(fd))
+            chunks: list[bytes] = []
+            remaining = limit + 1
+            while info.kind == "file" and remaining > 0:
+                chunk = os.read(fd, min(remaining, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return FileRead(info, b"".join(chunks))
+        finally:
+            os.close(fd)
 
     def write_out(self, text: str) -> None:
         _write_fd(1, text)

@@ -31,7 +31,7 @@ never render tracebacks with locals (see todo(#6) for the error mapping).
 todo(#16): the refused-character classes are defined here from the spec, independently of
 ``memoctl.sanitize.refused_class`` (#24). The first issue that merges both branches (#16)
 may deduplicate them; until then both must follow Body rules item 3.
-todo(#13): item 7, the secret check, runs after this validation.
+Item 7, the secret check, is :mod:`memoctl.secretscan`; it runs after this validation.
 todo(#6): the CLI maps :class:`BodyTextError` to exit 2 ``usage`` with ``details``.
 todo(#5): ``max_bytes`` comes from the effective config (256 to 65536).
 """

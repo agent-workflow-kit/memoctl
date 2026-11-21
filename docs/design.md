@@ -16,6 +16,7 @@ Uncommitted shared knowledge that agents leave for each other. Layer: L1 (primit
 
 - `pyyaml`: the config is YAML (design guide section 3). Used with `safe_load` through a duplicate-key-rejecting loader ([Config](interface.md#config)).
 - `pydantic`: validates the config and the `--json` output models (guide section 3). Importing it costs about 100 ms on a cold start, well inside the `context` deadline; a design-time measurement put `context` on a 10 000-note store at 30 to 40 ms without it.
+- `jsonschema` and `types-pyyaml` are dev-only: the first checks `config.example.yaml` and the loader against `schemas/config.json` in tests, the second supplies PyYAML type stubs. Neither is a runtime dependency.
 - Everything else is the standard library: `sqlite3` (WAL), `argparse`, `unicodedata`, `hashlib`, `secrets`, `signal`, `fcntl`.
 
 ## Decisions
@@ -87,7 +88,8 @@ Package `src/memoctl/` (design guide section 15):
 | `config.py` | Home lookup, YAML loading, the Pydantic config model, per-repo overrides, the effective config for a repo. |
 | `grammar.py` | Every grammar, duration parsing, `fullmatch` helpers. |
 | `bodyread.py` | The bounded reader for `--body-file` and standard input. |
-| `body.py` | Body validation (six classes, combining runs, NFKC bound), the secret check. |
+| `body.py` | Body validation (six classes, combining runs, NFKC bound). |
+| `secretscan.py` | The secret check: patterns and `mask_env` values over the repo id, topic, labels, kind and body (named so it never shadows the standard library `secrets`). |
 | `store.py` | SQLite open modes, migrations, the queries (all SQL lives here). |
 | `notes.py` | The rules of `add`, `delete`, `prune`: supersede, dedupe, limits, chain repointing and reinstatement on `delete`. |
 | `selection.py` | Context selection and fairness. |
