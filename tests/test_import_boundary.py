@@ -14,10 +14,10 @@ import pytest
 SRC = Path(__file__).resolve().parent.parent / "src" / "memoctl"
 GATEWAY = SRC / "gateway.py"
 
-# Whole modules that reach outside. todo(#9): sqlite3 opens files itself and is not banned
-# yet; the issue that adds the store decides how it goes through the gateway. todo(#10):
-# signal and threading are likewise left to the issue that needs them. io is not banned
-# (StringIO is harmless); io.open is listed below.
+# Whole modules that reach outside. sqlite3 opens files itself, so it is banned everywhere
+# except the one module in ALLOWED_IMPORTS (store.py, which checks the file through the state
+# directory first). todo(#10): signal and threading are left to the issue that needs them.
+# io is not banned (StringIO is harmless); io.open is listed below.
 BANNED_MODULES = {
     "subprocess",
     "time",
@@ -37,7 +37,10 @@ BANNED_MODULES = {
     "getpass",
     "shutil",
     "glob",
+    "sqlite3",
 }
+# Module file name -> banned modules it alone may import (pinned by tests below).
+ALLOWED_IMPORTS = {"store.py": {"sqlite3"}}
 # Canonical dotted names (after alias resolution) that reach the host, whether called or
 # merely referenced. todo(#6): sys.argv is not banned because the CLI needs it.
 BANNED_REFS = {
@@ -201,6 +204,7 @@ def _is_banned_ref(name: str) -> bool:
 
 
 def violations(source: str, filename: str = "<module>") -> list[str]:
+    allowed = ALLOWED_IMPORTS.get(filename, set())
     found: list[str] = []
     tree = ast.parse(source, filename)
     aliases = _aliases(tree)
@@ -208,11 +212,11 @@ def violations(source: str, filename: str = "<module>") -> list[str]:
         where = f"{filename}:{getattr(node, 'lineno', 0)}"
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name.split(".")[0] in BANNED_MODULES:
+                if alias.name.split(".")[0] in BANNED_MODULES - allowed:
                     found.append(f"{where}: import {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
-            if module.split(".")[0] in BANNED_MODULES:
+            if module.split(".")[0] in BANNED_MODULES - allowed:
                 found.append(f"{where}: from {module} import ...")
             for alias in node.names:
                 if alias.name == "*":
@@ -377,6 +381,7 @@ def test_scanner_accepts_harmless_code(source: str) -> None:
         "import shutil as sh",
         "from shutil import copy",
         "import glob",
+        "import sqlite3",
         # new banned os calls
         "import os\nos.execv('a', [])",
         "import os\nos.execvp('a', [])",
@@ -467,7 +472,6 @@ def test_scanner_flags_aliases_and_new_bans(source: str) -> None:
         "from os import path\npath.join('a', 'b')",
         "import os\nos.sep",
         "import sys\nsys.argv[1:]",
-        "import sqlite3",
         "import signal\nimport threading\nimport io\nio.StringIO()",
         "from pathlib import Path as P\nP('x') / 'y'",
         "from datetime import datetime as D, UTC\nD(2026, 1, 1, tzinfo=UTC)",
@@ -484,3 +488,15 @@ def test_scanner_flags_aliases_and_new_bans(source: str) -> None:
 )
 def test_scanner_accepts_gateway_routed_and_harmless_code(source: str) -> None:
     assert violations(source) == []
+
+
+def test_only_the_store_may_import_sqlite3() -> None:
+    assert ALLOWED_IMPORTS == {"store.py": {"sqlite3"}}
+    assert violations("import sqlite3", "store.py") == []
+    assert violations("import sqlite3", "cli.py") != []
+    assert violations("from sqlite3 import connect", "statedir.py") != []
+    assert violations("import sqlite3 as s", "gateway_like.py") != []
+    # the allowance is for sqlite3 alone
+    assert violations("import subprocess", "store.py") != []
+    importers = [p.name for p in _modules() if "sqlite3" in p.read_text(encoding="utf-8")]
+    assert "store.py" in importers

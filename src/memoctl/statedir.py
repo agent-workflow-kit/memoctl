@@ -18,7 +18,8 @@ todo(#6): the CLI maps :class:`UnsafeStateError` to exit 20 ``unsafe_state`` and
 from a failed creation (read-only parent, no permission on a parent, I/O error) to its exit.
 todo(#32): ``validate``'s check that the nearest existing ancestor of the state directory is
 writable and searchable is owned by #32, not done here.
-todo(#9): the store opens ``state.db`` by :attr:`StateDir.db_path` after :meth:`check_db`.
+The store (``store.py``) opens ``state.db`` by :attr:`StateDir.db_path` after
+:meth:`check_db` and :meth:`check_sidecars`.
 todo(#15): ``log.jsonl`` and ``log.lock`` are opened relative to :attr:`StateDir.handle`.
 """
 
@@ -36,6 +37,7 @@ __all__ = ["DB_NAME", "STATE_PARTS", "StateDir", "UnsafeStateError", "open_state
 
 STATE_PARTS = (".local", "state", "memoctl")
 DB_NAME = "state.db"
+SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 DIR_MODE = 0o700
 FILE_MODE = 0o600
 OWNER_USE = 0o500  # read and search, which opening a directory needs
@@ -97,6 +99,17 @@ class StateDir:
             return False
         _check(info, self._gateway.uid(), "file", "not_a_file")
         return True
+
+    def check_sidecars(self) -> None:
+        """SQLite's ``-wal``, ``-shm`` and ``-journal`` files, when present, must be regular
+        files owned by the user with no group or other permission (a symlink or a wrong mode
+        there is :class:`UnsafeStateError` like ``state.db``). SQLite opens them by path, so
+        this is the same check-then-open boundary as ``state.db``."""
+        uid = self._gateway.uid()
+        for suffix in SIDECAR_SUFFIXES:
+            info = self.handle.lstat(DB_NAME + suffix)
+            if info is not None:
+                _check(info, uid, "file", "not_a_file")
 
     def create_db(self) -> bool:
         """Create an empty ``state.db`` at 0600, exclusively, without following a symlink.
