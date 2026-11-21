@@ -622,6 +622,51 @@ def test_state_dir_open_error_after_the_check_is_unsafe_state(
     assert r.checks[2].reason == "unsafe_state"
 
 
+def test_state_dir_open_error_still_warns_on_unsafe_filesystem(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_state(gw)
+    gw.mountinfo = MOUNTINFO.format(mnt=gw.home().resolve(), fs="nfs").encode()
+
+    def boom(path: Path, *, follow: bool) -> None:
+        raise OSError(errno.EIO, "io")
+
+    monkeypatch.setattr(gw, "open_dir", boom)
+    r = checked(gw)
+    assert r.exit_code == 20 and r.checks[1].reason == "unsafe_state"
+    assert r.warnings == ("unsafe_filesystem",)
+
+
+def test_missing_state_dir_with_unsafe_parent_warns_from_the_nearest_existing_ancestor(
+    gw: FakeGateway,
+) -> None:
+    # open_state_dir refuses (".local" is a file), the state dir does not exist, so the warning
+    # is judged on the nearest existing ancestor (_warning_base fallback)
+    (gw.home() / ".local").write_text("x")
+    gw.mountinfo = MOUNTINFO.format(mnt=gw.home().resolve(), fs="nfs").encode()
+    r = checked(gw)
+    assert r.exit_code == 20 and r.checks[1].reason == "unsafe_state"
+    assert r.warnings == ("unsafe_filesystem",)
+
+
+@pytest.mark.parametrize("which", ["access", "stat_path"])
+def test_os_error_while_checking_a_missing_state_dir_is_unsafe_state(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch, which: str
+) -> None:
+    real = getattr(gw, which)
+
+    def boom(*args: Any, **kw: Any) -> Any:
+        if which == "stat_path" and args[0] != gw.home().joinpath(".local"):
+            return real(*args, **kw)
+        raise OSError(errno.EIO, "io")
+
+    monkeypatch.setattr(gw, which, boom)
+    r = checked(gw)
+    assert r.exit_code == 20 and names(r) == ["config", "state_dir"]
+    assert r.checks[1].reason == "unsafe_state"
+    assert r.checks[1].message == "the state directory cannot be created"
+
+
 def test_database_lstat_error_is_unsafe_state(
     gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -710,11 +755,15 @@ def test_cut_last_mountinfo_line_is_ignored(
     monkeypatch.setattr("memoctl.validation.MOUNTINFO_LIMIT", len(head))
     assert len(gw.read_mountinfo(len(head)) or b"") == len(head)  # exactly the cap
     assert checked(gw).warnings == ()
-    # a complete last line at exactly the cap is cut too, and the earlier lines still count
+    # only an unterminated tail is dropped: a complete last line that ends exactly at the cap
+    # (its LF is the last byte) is whole and counts
     full = f"1 0 0:1 / / rw - ext4 x rw\n2 1 0:2 / {home} rw - nfs x rw\n".encode()
     gw.mountinfo = full
-    monkeypatch.setattr("memoctl.validation.MOUNTINFO_LIMIT", len(full) + 1)
+    monkeypatch.setattr("memoctl.validation.MOUNTINFO_LIMIT", len(full))
     assert checked(gw).warnings == ("unsafe_filesystem",)
+    # one byte less and the LF is cut off: the last line is unterminated and ignored
+    monkeypatch.setattr("memoctl.validation.MOUNTINFO_LIMIT", len(full) - 1)
+    assert checked(gw).warnings == ()
 
 
 # --- real gateway helpers -------------------------------------------------------------------
