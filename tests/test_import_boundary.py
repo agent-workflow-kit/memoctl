@@ -47,6 +47,7 @@ BANNED_MODULES = {
     "concurrent",
     "sched",
     "resource",
+    "fcntl",
 }
 # Module file name -> banned modules it alone may import (pinned by tests below).
 ALLOWED_IMPORTS = {"store.py": {"sqlite3"}}
@@ -295,6 +296,9 @@ def test_module_reaches_outside_only_through_the_gateway(path: Path) -> None:
     [
         "import subprocess",
         "import subprocess as sp",
+        "import fcntl",
+        "from fcntl import flock",
+        "def f():\n    import fcntl",
         "from subprocess import run",
         "import time",
         "from time import time as t",
