@@ -17,7 +17,7 @@ ENVELOPE = (
     '{"error": {"code": "failed", "message": "deadline passed", "reason": "timeout", '
     '"details": null, "retryable": true}}\n'
 )
-STATUS = "failed (timeout): the deadline passed\n"
+STATUS = "failed (timeout): deadline passed\n"
 
 
 @pytest.fixture
@@ -106,7 +106,10 @@ def test_double_arm_and_nesting_are_refused(gw: FakeGateway, tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
-    "bad", [0, -1, -0.0, math.nan, math.inf, -math.inf, 3601, 10**9, True, None, "5", b"5"]
+    "bad",
+    [0, -1, -0.0, math.nan, math.inf, -math.inf, 3601, 10**9, True, None]
+    + [pytest.param(10**400, id="huge"), pytest.param(-(10**400), id="neg-huge")]
+    + ["5", b"5"],
 )
 def test_bad_durations_are_refused_and_arm_nothing(gw: FakeGateway, bad: object) -> None:
     with Deadline(gw) as d:
@@ -187,7 +190,7 @@ def test_expired_is_the_progress_callback(gw: FakeGateway) -> None:
 
 
 def test_a_failing_write_cannot_stop_the_exit(gw: FakeGateway) -> None:
-    def broken(text: str) -> None:
+    def broken(text: str, *, bound: float | None = None) -> None:
         raise BrokenPipeError
 
     gw.write_err = broken  # type: ignore[method-assign]
@@ -219,3 +222,33 @@ def test_current_is_inert_without_a_deadline() -> None:
 @pytest.mark.parametrize(("command", "seconds"), [("context", 2.0), ("add", 30.0), ("cron", 30.0)])
 def test_initial_seconds(command: str, seconds: float) -> None:
     assert dl.initial_seconds(command) == seconds
+
+
+def test_fire_bounds_its_writes(gw: FakeGateway) -> None:
+    """The handler's writes must not wait on a reader that is not reading (a full pipe)."""
+    bounds: list[float | None] = []
+
+    def record(text: str, *, bound: float | None = None) -> None:
+        bounds.append(bound)
+
+    gw.write_out = record  # type: ignore[method-assign]
+    gw.write_err = record  # type: ignore[method-assign]
+    with pytest.raises(FakeExit), Deadline(gw, json_mode=True) as d:
+        d.arm(1)
+        gw.advance_mono(1)
+    assert bounds == [dl.REPORT_BOUND_SECONDS] * 2
+    assert 0 < dl.REPORT_BOUND_SECONDS <= 0.5
+
+
+def test_remaining_ms_is_the_time_left_plus_a_margin(gw: FakeGateway) -> None:
+    with Deadline(gw) as d:
+        assert d.remaining_ms() is None  # not armed
+        d.arm(1)
+        assert d.remaining_ms() == 1000 + dl.BUSY_MARGIN_MS
+        gw.mono += 0.25
+        assert d.remaining_ms() == 750 + dl.BUSY_MARGIN_MS
+        gw.alarms[0].at = float("inf")  # the fake timer must not fire in this test
+        gw.mono += 5
+        assert d.remaining_ms() == 0  # passed: no wait at all
+        d.disarm()
+        assert d.remaining_ms() is None

@@ -205,6 +205,7 @@ def test_store_timeout_maps_to_the_same_failure_as_the_timer() -> None:
     f = failure_for(StoreError("timeout"))
     assert (f.exit_code, f.reason, f.retryable) == (12, "timeout", True)
     assert json.loads(f.envelope()) == json.loads(ENVELOPE)
+    assert f.status_line() == dl.STATUS_LINE == "failed (timeout): deadline passed\n"
 
 
 @pytest.mark.parametrize(

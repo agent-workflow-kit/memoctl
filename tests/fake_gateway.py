@@ -194,10 +194,10 @@ class FakeGateway:
     def stdin_read(self) -> str:
         return self.terminal.stdin
 
-    def write_out(self, text: str) -> None:
+    def write_out(self, text: str, *, bound: float | None = None) -> None:
         self.terminal.stdout += text
 
-    def write_err(self, text: str) -> None:
+    def write_err(self, text: str, *, bound: float | None = None) -> None:
         self.terminal.stderr += text
 
     def isatty(self, fd: int) -> bool:

@@ -15,8 +15,11 @@ elsewhere); this module only keeps the policy:
   already run out (a deadline that passed during a commit) the command ends with exit 12
   ``timeout`` at once, so a timeout is never reported after the output started and never
   skipped when the time had passed before it;
-- :meth:`Deadline.expired` is the SQLite progress callback for long statements: the Python
-  handler cannot run while SQLite works.
+- :meth:`Deadline.expired` is the SQLite progress callback for long statements and
+  :meth:`Deadline.remaining_ms` caps every lock wait: the Python handler cannot run while SQLite
+  works;
+- the handler's writes are bounded (:data:`REPORT_BOUND_SECONDS` per stream), so a full pipe or a
+  stopped terminal cannot keep the process from leaving.
 
 Commands reach the installed deadline through :func:`current` (an inert one when none is
 installed, as in a unit test of a command alone).
@@ -50,8 +53,14 @@ TIMEOUT_EXIT = 12
 COMMAND_SECONDS = 30.0  # every command but ``context``
 CONTEXT_PROBE_SECONDS = 2.0  # ``context`` until its config is loaded, then ``context.deadline``
 TIMEOUT_REASON = "timeout"
-# The stderr line is fixed by interface.md and differs from the envelope message.
-STATUS_LINE = "failed (timeout): the deadline passed\n"
+REPORT_BOUND_SECONDS = (
+    0.1  # per stream: the handler never waits longer on a reader that is not reading
+)
+BUSY_MARGIN_MS = 10  # a lock wait outlasts the deadline by this much, so the timer wins the race
+# The one timeout failure: the handler's stderr line and envelope are built from it, so they
+# equal what the main path prints for ``StoreError("timeout")`` (``failure_for``).
+_FAILURE = Failure(FAILED, "failed", "deadline passed", TIMEOUT_REASON)
+STATUS_LINE = _FAILURE.status_line()
 
 
 class DeadlineError(RuntimeError):
@@ -66,7 +75,8 @@ def initial_seconds(command: str) -> float:
 def _checked(seconds: float) -> float:
     if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
         raise DeadlineError("a deadline is a number of seconds")
-    if not math.isfinite(seconds) or not 0 < seconds <= MAX_ALARM_SECONDS:
+    # The range test alone also rejects nan and inf, and compares a huge int without float().
+    if not 0 < seconds <= MAX_ALARM_SECONDS:
         raise DeadlineError("a deadline must be above 0 and at most an hour")
     return float(seconds)
 
@@ -77,8 +87,7 @@ _CURRENT: Deadline | None = None
 class Deadline:
     def __init__(self, gateway: Gateway, *, json_mode: bool = False) -> None:
         self._gateway = gateway
-        failure = Failure(FAILED, "failed", "deadline passed", TIMEOUT_REASON)
-        self._stdout = failure.envelope() if json_mode else ""
+        self._stdout = _FAILURE.envelope() if json_mode else ""
         self._stderr = STATUS_LINE
         self._handle: AlarmHandle | None = None
         self._started = 0.0
@@ -160,6 +169,15 @@ class Deadline:
         which raises ``StoreError("timeout")``)."""
         return self._handle is not None and self._gateway.monotonic() >= self._at
 
+    def remaining_ms(self) -> int | None:
+        """Milliseconds until the deadline (0 once it passed, a small margin added so that a lock
+        wait capped to it ends after the timer fired); ``None`` when not armed. The store caps
+        every busy timeout to this: a Python handler cannot run during a lock wait."""
+        if self._handle is None:
+            return None
+        left = self._at - self._gateway.monotonic()
+        return 0 if left <= 0 else math.ceil(left * 1000) + BUSY_MARGIN_MS
+
     def fire(self) -> None:
         """Write the timeout report and leave with exit 12. Writes cannot stop the exit: it is
         in a ``finally``, so a failing write or a second signal still ends in exit 12."""
@@ -168,14 +186,15 @@ class Deadline:
         self._firing = True
         try:
             if self._stdout:
-                self._gateway.write_out(self._stdout)
-            self._gateway.write_err(self._stderr)
+                self._gateway.write_out(self._stdout, bound=REPORT_BOUND_SECONDS)
+            self._gateway.write_err(self._stderr, bound=REPORT_BOUND_SECONDS)
         finally:
             self._gateway.exit_now(TIMEOUT_EXIT)
 
     def configure_store(self, store: Store) -> None:
         """The ``configure`` hook of ``open_store``: interrupts statements after the deadline."""
         store.set_progress_handler(self.expired)
+        store.set_busy_cap(self.remaining_ms)
 
 
 class _Inert:

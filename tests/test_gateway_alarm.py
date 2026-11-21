@@ -8,6 +8,7 @@ see the process end start one, record its pid at launch and kill exactly that pi
 from __future__ import annotations
 
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from memoctl import gateway as gateway_module
 from memoctl.gateway import GatewayError, RealGateway
 
 WAIT = 10.0  # generous: only an upper bound on waiting for a signal that must arrive
@@ -179,11 +181,40 @@ def test_a_signal_dispatched_after_release_is_ignored(gw: RealGateway) -> None:
     assert hits == []
 
 
-@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf"), 3601, True, None, "1"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        0,
+        -1,
+        float("nan"),
+        float("inf"),
+        3601,
+        pytest.param(10**400, id="huge"),
+        pytest.param(-(10**400), id="neg-huge"),
+        True,
+        None,
+        "1",
+    ],
+)
 def test_bad_durations_are_refused_and_nothing_is_changed(gw: RealGateway, bad: object) -> None:
     with pytest.raises(ValueError):
         gw.alarm_arm(bad, lambda: None)  # type: ignore[arg-type]
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+def test_a_sigalrm_pending_while_blocked_does_not_fire_the_new_alarm(
+    gw: RealGateway, host: None
+) -> None:
+    """A SIGALRM left pending before the arm (blocked at startup, inherited across exec) must
+    not hit the handler the moment the arm unblocks the signal."""
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+    os.kill(os.getpid(), signal.SIGALRM)  # pending, blocked
+    hits: list[int] = []
+    alarm = gw.alarm_arm(30, lambda: hits.append(1))
+    time.sleep(0.1)
+    assert hits == []
+    assert alarm.release() is False
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
 
 
 def test_arming_off_the_main_thread_is_refused(gw: RealGateway) -> None:
@@ -277,7 +308,7 @@ ENVELOPE = (
     b'{"error": {"code": "failed", "message": "deadline passed", "reason": "timeout", '
     b'"details": null, "retryable": true}}\n'
 )
-STATUS = b"failed (timeout): the deadline passed\n"
+STATUS = b"failed (timeout): deadline passed\n"
 
 
 def test_a_busy_loop_is_ended_with_the_envelope_and_exit_12(
@@ -476,3 +507,189 @@ def test_main_ends_a_command_blocked_on_a_silent_stdin(
     finally:
         os.close(w)
     assert (p.returncode, out, err) == (12, stdout, STATUS)
+
+
+def test_a_pending_sigalrm_inherited_across_exec_does_not_fire_the_deadline(
+    tmp_path: Path, launched: list[subprocess.Popen[bytes]]
+) -> None:
+    """The parent blocks SIGALRM, raises it and execs: the new process starts with it pending
+    and blocked. Arming a 30 s deadline must not fire it at once."""
+    child = _program('import time\ntime.sleep(0.5)\nd.disarm()\ngw.write_out("done\\n")')
+    launcher = (
+        "import os, signal, sys\n"
+        "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})\n"
+        "os.kill(os.getpid(), signal.SIGALRM)\n"
+        "os.execv(sys.executable, [sys.executable, '-I', '-c', sys.argv[1], 'json', '30'])\n"
+    )
+    p = subprocess.Popen(
+        [sys.executable, "-I", "-c", launcher, child],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_env(tmp_path),
+        cwd=tmp_path,
+    )
+    launched.append(p)
+    out, err = p.communicate(timeout=60)
+    assert (p.returncode, out, err) == (0, b"done\n", b"")
+
+
+# -- the handler's writes are bounded ------------------------------------------------------
+
+
+def _full_pipe() -> tuple[int, int]:
+    """A pipe with no room left. The reader end must stay open (else the write is EPIPE)."""
+    r, w = os.pipe()
+    os.set_blocking(w, False)
+    try:
+        while True:
+            os.write(w, b"x" * 4096)
+    except BlockingIOError:
+        pass
+    os.set_blocking(w, True)  # the child shares the description: leave it blocking
+    return r, w
+
+
+def test_a_full_stdout_pipe_does_not_keep_the_process_from_exiting_12(
+    tmp_path: Path, launched: list[subprocess.Popen[bytes]]
+) -> None:
+    code = _program("while True: pass")
+    r, w = _full_pipe()
+    try:
+        p = subprocess.Popen(
+            [sys.executable, "-I", "-c", code, "json", "0.3"],
+            stdin=subprocess.DEVNULL,
+            stdout=w,
+            stderr=w,
+            env=_env(tmp_path),
+            cwd=tmp_path,
+        )
+        launched.append(p)
+        assert p.wait(timeout=30) == 12  # a blocking write would hang until the kill
+    finally:
+        os.close(r)
+        os.close(w)
+
+
+def test_a_bounded_write_to_a_pipe_with_room_writes_everything() -> None:
+    r, w = os.pipe()
+    try:
+        text = "failed (timeout): deadline passed\n" * 40  # more than one chunk
+        gateway_module._write_fd(w, text, 5.0)  # pyright: ignore[reportPrivateUsage]
+        os.close(w)
+        w = -1
+        assert os.read(r, 100_000).decode() == text
+    finally:
+        os.close(r)
+        if w >= 0:
+            os.close(w)
+
+
+def test_a_bounded_write_to_a_full_pipe_gives_up_after_the_bound() -> None:
+    r, w = _full_pipe()
+    try:
+        start = time.monotonic()
+        gateway_module._write_fd(w, "x\n", 0.1)  # pyright: ignore[reportPrivateUsage]
+        assert time.monotonic() - start < 10  # generous: it must not block for good
+    finally:
+        os.close(r)
+        os.close(w)
+
+
+def test_a_bounded_write_to_a_closed_descriptor_is_ignored() -> None:
+    r, w = os.pipe()
+    os.close(r)
+    os.close(w)
+    gateway_module._write_fd(w, "x\n", 0.1)  # pyright: ignore[reportPrivateUsage]
+
+
+# -- a child started while the alarm can fire ----------------------------------------------
+
+
+def test_a_child_is_registered_before_an_alarm_that_ran_out_at_its_start_can_run(
+    gw: RealGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline runs out right after the child started (Popen returned, not yet
+    registered): the handler must see the child in the registry so exit_now kills it."""
+    real_popen = subprocess.Popen
+
+    class RacyPopen(real_popen):  # type: ignore[type-arg,misc]
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # type: ignore[call-overload]
+            os.kill(os.getpid(), signal.SIGALRM)  # the timer ran out just now
+            time.sleep(0.1)  # a handler not held back would run here
+
+    seen: list[int] = []
+    alarm = gw.alarm_arm(30, lambda: seen.append(len(gateway_module._CHILDREN)))  # pyright: ignore[reportPrivateUsage]
+    try:
+        monkeypatch.setattr(gateway_module.subprocess, "Popen", RacyPopen)
+        assert gw.run(["true"]).returncode == 0
+    finally:
+        monkeypatch.undo()
+        alarm.release()
+    assert seen == [1]
+    assert not gateway_module._CHILDREN  # pyright: ignore[reportPrivateUsage]
+
+
+def test_the_child_does_not_inherit_a_blocked_sigalrm(gw: RealGateway) -> None:
+    alarm = gw.alarm_arm(30, lambda: None)
+    try:
+        result = gw.run(["grep", "SigBlk", "/proc/self/status"])
+    finally:
+        alarm.release()
+    assert result.stdout.split()[1] == "0000000000000000"
+
+
+def test_the_caller_mask_is_unchanged_by_a_run(gw: RealGateway) -> None:
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    gw.run(["true"])
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == before
+
+
+def test_a_failed_start_restores_the_mask_and_leaves_no_child(gw: RealGateway) -> None:
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    with pytest.raises(GatewayError):
+        gw.run(["/nonexistent/binary"])
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == before
+    assert not gateway_module._CHILDREN  # pyright: ignore[reportPrivateUsage]
+
+
+def test_the_child_stays_registered_until_it_is_reaped(
+    gw: RealGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """exit_now must still find a child that the Popen exit is waiting for."""
+    real_popen = subprocess.Popen
+    registered: list[bool] = []
+
+    class Watching(real_popen):  # type: ignore[type-arg,misc]
+        def __exit__(self, *exc: object) -> None:
+            registered.append(self in gateway_module._CHILDREN)  # pyright: ignore[reportPrivateUsage]
+            super().__exit__(*exc)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(gateway_module.subprocess, "Popen", Watching)
+    gw.run(["true"])
+    assert registered == [True]
+    assert not gateway_module._CHILDREN  # pyright: ignore[reportPrivateUsage]
+
+
+def test_no_child_is_orphaned_by_a_deadline_that_runs_out_as_it_starts(
+    tmp_path: Path, launched: list[subprocess.Popen[bytes]]
+) -> None:
+    """Random millisecond deadlines against a command start: whatever the timing, a child that
+    was started is killed with the process. Only the pids the children wrote are signalled."""
+    pidfile = tmp_path / "pids"
+    body = f"""gw.run(["sh", "-c", 'echo $$ >> {pidfile}; exec sleep 60'])"""
+    rng = random.Random(20260101)
+    for _ in range(12):
+        rc, _out, _err = run_harness(
+            tmp_path, launched, body, seconds=rng.uniform(0.001, 0.03), mode="plain"
+        )
+        assert rc == 12
+    time.sleep(0.5)  # an orphan has written its pid by now
+    pids = [int(x) for x in pidfile.read_text().split()] if pidfile.exists() else []
+    try:
+        assert wait_until(lambda: not any(_alive(pid) for pid in pids)), "an orphaned child"
+    finally:
+        for pid in pids:
+            if _alive(pid):
+                os.kill(pid, signal.SIGKILL)

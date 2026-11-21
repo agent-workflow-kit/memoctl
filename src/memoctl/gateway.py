@@ -27,6 +27,7 @@ import math
 import os
 import pwd
 import secrets
+import select
 import shutil
 import signal
 import stat
@@ -324,12 +325,21 @@ class Gateway(Protocol):
 
     def exit_now(self, code: int) -> NoReturn:
         """Leave the process at once (``os._exit``: no cleanup, no ``finally``, no flush), after
-        killing the child processes this gateway started and has not yet reaped."""
+        killing the direct child processes this gateway started and has not yet reaped (not their
+        own children)."""
         ...
 
     def stdin_read(self) -> str: ...
-    def write_out(self, text: str) -> None: ...
-    def write_err(self, text: str) -> None: ...
+    def write_out(self, text: str, *, bound: float | None = None) -> None:
+        """Write ``text`` to file descriptor 1. With ``bound`` (seconds) the write gives up once
+        the descriptor has not become writable for that long (a full pipe, a stopped terminal),
+        so the caller never waits on a reader that is not reading."""
+        ...
+
+    def write_err(self, text: str, *, bound: float | None = None) -> None:
+        """As :meth:`write_out`, for file descriptor 2."""
+        ...
+
     def isatty(self, fd: int) -> bool: ...
     def terminal_width(self) -> int: ...
 
@@ -372,7 +382,14 @@ def _exec(
     timeout: float | None,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run ``argv`` without a shell; any start failure or timeout becomes a ``GatewayError``."""
+    """Run ``argv`` without a shell; any start failure or timeout becomes a ``GatewayError``.
+
+    SIGALRM is blocked from before the child starts until it is in ``_CHILDREN``, so a deadline
+    that runs out in that window is delivered right after the registration and ``exit_now``
+    kills the child (otherwise it would be orphaned). The child itself starts with the caller's
+    mask restored, so it does not inherit a blocked SIGALRM."""
+    proc: subprocess.Popen[bytes] | None = None
+    caller_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
     try:
         with subprocess.Popen(
             argv,
@@ -380,20 +397,24 @@ def _exec(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
+            preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, caller_mask),
         ) as proc:
             _CHILDREN.add(proc)  # so exit_now can kill it when the deadline ends the process
             try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, caller_mask)  # a pending alarm runs now
                 out, err = proc.communicate(stdin, timeout=timeout)
             except BaseException:  # the same cleanup as subprocess.run
                 proc.kill()
                 raise
-            finally:
-                _CHILDREN.discard(proc)
             return subprocess.CompletedProcess(argv, proc.returncode, out, err)
     except subprocess.TimeoutExpired as exc:
         raise GatewayError(f"{argv!r} timed out after {timeout}s") from exc
     except (OSError, ValueError) as exc:
         raise GatewayError(f"{argv!r} could not run: {exc}") from exc
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, caller_mask)  # also when Popen failed
+        if proc is not None:
+            _CHILDREN.discard(proc)  # after the with block reaped it (exit_now never misses one)
 
 
 def _run(
@@ -415,7 +436,8 @@ _CHILDREN: set[subprocess.Popen[bytes]] = set()  # started by _exec, not yet rea
 def _check_alarm_seconds(seconds: float) -> float:
     if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
         raise ValueError("alarm seconds must be a number")
-    if not math.isfinite(seconds) or not 0 < seconds <= MAX_ALARM_SECONDS:
+    # The range test alone also rejects nan and inf, and compares a huge int without float().
+    if not 0 < seconds <= MAX_ALARM_SECONDS:
         raise ValueError("alarm seconds out of range")
     return float(seconds)
 
@@ -438,6 +460,9 @@ class _RealAlarm:
             handler = signal.getsignal(signal.SIGALRM)
             # None: installed outside Python and not restorable; the default is the best left.
             self._previous = signal.SIG_DFL if handler is None else handler
+            # A SIGALRM left pending while blocked (inherited across exec, or sent early)
+            # would hit our handler the moment it is unblocked: ignoring it discards it.
+            signal.signal(signal.SIGALRM, signal.SIG_IGN)
             self._host_left, self._host_interval = signal.setitimer(signal.ITIMER_REAL, 0)
             self._host_at = time.monotonic()
             signal.signal(signal.SIGALRM, self._handle)
@@ -485,13 +510,39 @@ class _RealAlarm:
             signal.pthread_sigmask(signal.SIG_SETMASK, self._mask)
 
 
-def _write_fd(fd: int, text: str) -> None:
+_BOUNDED_CHUNK = 512  # below PIPE_BUF: a writable pipe takes it whole, without blocking
+
+
+def _writable_before(fd: int, end: float) -> bool:
+    """Wait until ``fd`` can take a write or ``end`` (a ``time.monotonic`` value) passes. A
+    closed or broken descriptor counts as ready: the write then fails and is ignored."""
+    left_ms = math.ceil((end - time.monotonic()) * 1000)
+    if left_ms <= 0:
+        return False
+    poller = select.poll()
+    poller.register(fd, select.POLLOUT)
+    return bool(poller.poll(left_ms))
+
+
+def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
     """Write ``text`` to a standard descriptor as UTF-8 with errors replaced, never through the
-    locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says."""
+    locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says.
+
+    With ``bound`` the write is for a signal handler that must not hang: it waits for the
+    descriptor to be writable for at most ``bound`` seconds in all (``poll``, EINTR retried
+    with the time left) and writes in small chunks, then gives up silently. The descriptor is
+    left blocking (its open file description may be shared with other processes)."""
     view = memoryview(text.encode(ENCODING, "replace"))
+    end = None if bound is None else time.monotonic() + bound
     try:
         while view:
-            view = view[os.write(fd, view) :]
+            if end is None:
+                chunk = view
+            elif _writable_before(fd, end):
+                chunk = view[:_BOUNDED_CHUNK]
+            else:
+                return
+            view = view[os.write(fd, chunk) :]
     except OSError:
         pass
 
@@ -609,11 +660,11 @@ class RealGateway:
     def stdin_read(self) -> str:
         return sys.stdin.read()
 
-    def write_out(self, text: str) -> None:
-        _write_fd(1, text)
+    def write_out(self, text: str, *, bound: float | None = None) -> None:
+        _write_fd(1, text, bound)
 
-    def write_err(self, text: str) -> None:
-        _write_fd(2, text)
+    def write_err(self, text: str, *, bound: float | None = None) -> None:
+        _write_fd(2, text, bound)
 
     def isatty(self, fd: int) -> bool:
         try:

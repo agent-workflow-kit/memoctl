@@ -131,10 +131,16 @@ def translate(exc: sqlite3.Error) -> StoreError:
     return StoreError(DB_CORRUPT)
 
 
-def _failure(exc: sqlite3.Error) -> BaseException:
+def _failure(exc: sqlite3.Error, owner: Store | None = None) -> BaseException:
     """What to raise for a sqlite failure. A Python-side error that carries no result code (a
     wrong parameter count, say) is a bug in this tool's own call, not a damaged file: it
-    propagates unchanged (exit 1) instead of becoming ``db_corrupt``."""
+    propagates unchanged (exit 1) instead of becoming ``db_corrupt``. An interrupt caused by
+    the progress callback raising is that exception (an internal error), not a ``timeout``."""
+    if owner is not None and owner._callback_error is not None:  # pyright: ignore[reportPrivateUsage]
+        code = getattr(exc, "sqlite_errorcode", None)
+        if isinstance(code, int) and code & 0xFF == _INTERRUPT:
+            error, owner._callback_error = owner._callback_error, None  # pyright: ignore[reportPrivateUsage]
+            return error
     if getattr(exc, "sqlite_errorcode", None) is None and isinstance(
         exc, (sqlite3.ProgrammingError, sqlite3.InterfaceError)
     ):
@@ -318,28 +324,29 @@ class Cursor:
     """A result cursor whose fetches translate sqlite failures (a raw ``DataError`` for a
     value too big to hand to Python would otherwise carry sqlite's text out of the module)."""
 
-    __slots__ = ("_cursor",)
+    __slots__ = ("_cursor", "_owner")
 
-    def __init__(self, cursor: sqlite3.Cursor) -> None:
+    def __init__(self, cursor: sqlite3.Cursor, owner: Store | None = None) -> None:
         self._cursor = cursor
+        self._owner = owner
 
     def fetchone(self) -> Any:
         try:
             return self._cursor.fetchone()
         except sqlite3.Error as exc:
-            raise _failure(exc) from None
+            raise _failure(exc, self._owner) from None
 
     def fetchall(self) -> list[Any]:
         try:
             return self._cursor.fetchall()
         except sqlite3.Error as exc:
-            raise _failure(exc) from None
+            raise _failure(exc, self._owner) from None
 
     def fetchmany(self, size: int = 1) -> list[Any]:
         try:
             return self._cursor.fetchmany(size)
         except sqlite3.Error as exc:
-            raise _failure(exc) from None
+            raise _failure(exc, self._owner) from None
 
     def __iter__(self) -> Cursor:
         return self
@@ -376,6 +383,9 @@ class Store:
         self.mode = mode
         self.version = 0  # user_version after open (after migration for writers)
         self.bad_rows = 0  # rows :meth:`notes` skipped on this store
+        self._busy_ms = 0  # the configured busy timeout (set by open_store)
+        self._busy_cap: Callable[[], int | None] | None = None
+        self._callback_error: BaseException | None = None  # raised by the progress callback
 
     # -- lifecycle
     def close(self) -> None:
@@ -401,8 +411,34 @@ class Store:
         interrupts the running statement, which then raises ``StoreError("timeout")``."""
         if handler is None:
             self._conn.set_progress_handler(None, 0)
-        else:
-            self._conn.set_progress_handler(lambda: 1 if handler() else 0, PROGRESS_STEPS)
+            return
+
+        def callback() -> int:
+            try:
+                return 1 if handler() else 0
+            except BaseException as exc:  # noqa: BLE001 - re-raised by _failure, not a timeout
+                self._callback_error = exc
+                return 1
+
+        self._conn.set_progress_handler(callback, PROGRESS_STEPS)
+
+    def set_busy_cap(self, cap: Callable[[], int | None] | None) -> None:
+        """Cap every busy timeout to ``cap()`` milliseconds (``None``: no cap), asked again
+        before each wait that can block (the deadline's time left)."""
+        self._busy_cap = cap
+
+    def _budget(self, ms: int) -> int:
+        """``ms`` limited by the cap (never negative)."""
+        if self._busy_cap is None:
+            return ms
+        left = self._busy_cap()
+        return ms if left is None else max(0, min(ms, left))
+
+    def _apply_busy(self) -> None:
+        """Set the connection's busy timeout to the configured one, capped. Without a cap the
+        value set at open stays."""
+        if self._busy_cap is not None:
+            self._conn.execute(f"PRAGMA busy_timeout = {self._budget(self._busy_ms)}")
 
     # -- statements
     def execute(self, sql: LiteralString, params: Sequence[Any] = ()) -> Cursor:
@@ -412,9 +448,9 @@ class Store:
         comes back as ``str`` (or the undecodable marker), so rows read this way go through
         :func:`check_note_row`."""
         try:
-            return Cursor(self._conn.execute(sql, params))
+            return Cursor(self._conn.execute(sql, params), self)
         except sqlite3.Error as exc:
-            raise _failure(exc) from None
+            raise _failure(exc, self) from None
         except (UnicodeEncodeError, OverflowError):
             # a lone surrogate, or an integer beyond 64 bits; both messages echo the value
             raise ValueError("invalid parameter") from None
@@ -438,6 +474,10 @@ class Store:
     def _transaction(self, begin: LiteralString) -> Iterator[None]:
         if self._conn.in_transaction:
             raise RuntimeError("transaction already open")
+        try:
+            self._apply_busy()  # the lock wait of BEGIN IMMEDIATE ends with the deadline
+        except sqlite3.Error as exc:
+            raise _failure(exc, self) from None
         self.execute(begin)
         try:
             yield
@@ -445,12 +485,15 @@ class Store:
                 self.execute("COMMIT")
         except BaseException as exc:
             if self._conn.in_transaction:
+                # An interrupted COMMIT leaves the transaction open, and the progress handler
+                # would interrupt the ROLLBACK as well: take it off first so the rollback runs.
+                self._conn.set_progress_handler(None, 0)
                 try:
                     self._conn.execute("ROLLBACK")
                 except sqlite3.Error:
                     pass
             if isinstance(exc, sqlite3.Error):
-                raise _failure(exc) from None
+                raise _failure(exc, self) from None
             raise
 
     # -- rows
@@ -557,6 +600,7 @@ def _set_pragma(conn: sqlite3.Connection, name: str, value: str, expect: int) ->
 
 
 def _configure(conn: sqlite3.Connection, busy_ms: int) -> None:
+    """``busy_ms`` is the value to set (capped by the deadline when there is one)."""
     conn.text_factory = _text_factory
     conn.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
     conn.setconfig(sqlite3.SQLITE_DBCONFIG_ENABLE_TRIGGER, False)
@@ -659,7 +703,9 @@ def _check_labels_against_sequence(conn: sqlite3.Connection) -> None:
 WAL_ATTEMPTS = 5
 
 
-def _ensure_wal(conn: sqlite3.Connection, busy_ms: int) -> None:
+def _ensure_wal(
+    conn: sqlite3.Connection, busy_ms: int, budget: Callable[[int], int] = lambda ms: ms
+) -> None:
     """Switch to WAL (before the migration transaction). A mount that cannot hold it leaves
     another mode, or an error: both refuse with ``db_unreadable`` (interface.md does not allow
     a silent fallback to a rollback journal; ``validate`` warns about such mounts).
@@ -668,11 +714,11 @@ def _ensure_wal(conn: sqlite3.Connection, busy_ms: int) -> None:
     several first writers can see ``database is locked`` at once. A busy answer is retried
     (a mode another process already set is accepted); between attempts a ``BEGIN IMMEDIATE``
     waits out the other writer. Each wait uses ``busy_ms // WAL_ATTEMPTS`` so the total stays
-    within the documented timeout. Still busy after the attempts: the ``db_locked`` the caller
-    maps."""
-    conn.execute(f"PRAGMA busy_timeout = {max(busy_ms // WAL_ATTEMPTS, 1)}")
+    within the documented timeout; each wait is also capped to the deadline's time left. Still
+    busy after the attempts: the ``db_locked`` the caller maps."""
     try:
         for attempt in range(WAL_ATTEMPTS):
+            conn.execute(f"PRAGMA busy_timeout = {budget(max(busy_ms // WAL_ATTEMPTS, 1))}")
             try:
                 mode = _scalar(conn, "PRAGMA journal_mode = WAL")
             except sqlite3.OperationalError as exc:
@@ -685,7 +731,7 @@ def _ensure_wal(conn: sqlite3.Connection, busy_ms: int) -> None:
                 raise StoreError(DB_UNREADABLE)
             return
     finally:
-        conn.execute(f"PRAGMA busy_timeout = {busy_ms}")
+        conn.execute(f"PRAGMA busy_timeout = {budget(busy_ms)}")
 
 
 def _migrate(conn: sqlite3.Connection) -> int:
@@ -756,10 +802,11 @@ def open_store(
     except sqlite3.Error as exc:
         raise _failure(exc) from None
     store = Store(conn, mode)
+    store._busy_ms = busy_ms  # pyright: ignore[reportPrivateUsage]
     try:
         if configure is not None:
             configure(store)  # first: some pragmas below already parse the schema
-        _configure(conn, busy_ms)
+        _configure(conn, store._budget(busy_ms))  # pyright: ignore[reportPrivateUsage]
         snap = _inspect(conn)
         found = _classify(snap)
         if found == EMPTY and mode is not Mode.INIT:
@@ -768,14 +815,18 @@ def open_store(
         if mode is Mode.READ:
             store.version = snap.version  # the snapshot the checks ran on
             return store
-        _ensure_wal(conn, busy_ms)
+        _ensure_wal(conn, busy_ms, store._budget)  # pyright: ignore[reportPrivateUsage]
         if found != EMPTY:
             _check_labels_against_sequence(conn)
-        store.version = _migrate(conn) if found != CURRENT else supported_version()
+        if found != CURRENT:
+            store._apply_busy()  # pyright: ignore[reportPrivateUsage]
+            store.version = _migrate(conn)
+        else:
+            store.version = supported_version()
         return store
     except sqlite3.Error as exc:
         store.close()
-        raise _failure(exc) from None
+        raise _failure(exc, store) from None
     except BaseException:
         store.close()
         raise

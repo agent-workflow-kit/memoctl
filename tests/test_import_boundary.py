@@ -41,6 +41,12 @@ BANNED_MODULES = {
     "signal",
     "threading",
     "_thread",
+    "_signal",
+    "posix",
+    "faulthandler",
+    "concurrent",
+    "sched",
+    "resource",
 }
 # Module file name -> banned modules it alone may import (pinned by tests below).
 ALLOWED_IMPORTS = {"store.py": {"sqlite3"}}
@@ -75,7 +81,9 @@ BANNED_REFS = {
             "getlogin getcwd getcwdb listdir remove unlink rename replace mkdir makedirs rmdir "
             "stat lstat open scandir walk chmod chdir read write isatty kill killpg popen "
             "fork system fstat dup dup2 close pipe geteuid getgid getegid umask fsync "
-            "fchmod fchown chown link symlink truncate ftruncate utime mkfifo"
+            "fchmod fchown chown link symlink truncate ftruncate utime mkfifo "
+            "_exit abort pthread_sigmask sigwait sigwaitinfo sigtimedwait "
+            "wait wait3 wait4 waitid waitpid"
         ).split()
     },
     *{
@@ -97,7 +105,7 @@ BANNED_REFS = {
     "datetime.date.today",
 }
 # Families matched by prefix: os.exec*, os.spawn*, os.posix_spawn*.
-BANNED_PREFIXES = ("os.exec", "os.spawn", "os.posix_spawn")
+BANNED_PREFIXES = ("os.exec", "os.spawn", "os.posix_spawn", "os.sigwait", "os.wait")
 CLOCK_SUFFIXES = ("datetime.now", "datetime.utcnow", "datetime.today", "date.today")
 # Path-style methods with names no other common type uses, banned as attribute calls on any
 # receiver. The two gateway methods share names, so they are accepted on a receiver named
@@ -311,6 +319,30 @@ def test_module_reaches_outside_only_through_the_gateway(path: Path) -> None:
         "from signal import setitimer",
         "import threading",
         "import _thread",
+        "import _signal",
+        "import posix",
+        "from posix import _exit",
+        "import faulthandler",
+        "import concurrent.futures",
+        "from concurrent import futures",
+        "import sched",
+        "import resource",
+        "from resource import setrlimit",
+        "import os\nos._exit(1)",
+        "import os\nos.abort()",
+        "import os\nos.pthread_sigmask(0, set())",
+        "import os\nos.sigwait(set())",
+        "import os\nos.sigwaitinfo(set())",
+        "import os\nos.sigtimedwait(set(), 1)",
+        "import os\nos.waitpid(1, 0)",
+        "import os\nos.wait()",
+        "import os\nos.wait3(0)",
+        "import os\nos.wait4(1, 0)",
+        "import os\nos.waitid(0, 1, 0)",
+        "from os import _exit",
+        "from os import waitpid",
+        "from os import pthread_sigmask as m",
+        "import os as o\no._exit(1)",
         "import os\nos.urandom(3)",
         "from os import urandom",
         "import os\nos.fchmod(3, 0o600)",
