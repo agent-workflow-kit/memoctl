@@ -351,8 +351,24 @@ class _RealDirHandle:
                 return True
             finally:
                 os.close(ro)
-        os.chmod(component, mode, dir_fd=fd, follow_symlinks=False)
-        return True
+        try:
+            before = os.stat(component, dir_fd=fd, follow_symlinks=False)
+            os.chmod(component, mode, dir_fd=fd, follow_symlinks=False)
+            after = os.stat(component, dir_fd=fd, follow_symlinks=False)
+        except (ValueError, NotImplementedError):
+            # A symlink swapped in after the lstat makes chmod refuse the dir_fd and
+            # follow_symlinks combination (ValueError / NotImplementedError).
+            return False
+        # Post-condition: the name still is the same regular file of ours. The lstat -> chmod
+        # step is not atomic: a same-uid process that swaps the name in that window can still
+        # get one chmod applied to an inode it chose before this check notices (residual,
+        # accepted: it already runs as the same user).
+        return (
+            stat.S_ISREG(before.st_mode)
+            and stat.S_ISREG(after.st_mode)
+            and after.st_uid == uid
+            and (after.st_ino, after.st_dev) == (before.st_ino, before.st_dev)
+        )
 
     def size_of(self, name: str) -> int | None:
         try:

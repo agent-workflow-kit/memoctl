@@ -204,7 +204,7 @@ def _open_checked(state: StateDir, name: str) -> FileHandle:
             handle = state.handle.open_file_at(name, FILE_MODE, create=True)
     except LogError:
         raise
-    except OSError:
+    except (OSError, ValueError, NotImplementedError):
         raise LogError("open_failed") from None
     if handle is None:  # only without create; kept for the type
         raise LogError("open_failed")

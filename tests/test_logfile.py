@@ -697,6 +697,43 @@ def test_an_eacces_that_is_not_repairable_is_open_failed_without_a_path(
     assert str(sdir.path) not in str(exc.value)
 
 
+def test_a_symlink_swapped_in_before_the_chmod_fallback_is_a_log_error(
+    sdir: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = sdir.path / LOG_NAME
+    path.write_bytes(b"")
+    path.chmod(0o000)
+
+    def swapped(*a: Any, **k: Any) -> None:
+        raise ValueError("cannot use dir_fd and follow_symlinks together")
+
+    monkeypatch.setattr("memoctl.gateway.os.chmod", swapped)
+    with pytest.raises(LogError) as exc:
+        append_record(sdir, add_record(), NOW)
+    assert exc.value.reason in ("unsafe_file", "open_failed")
+    assert str(sdir.path) not in str(exc.value)
+
+
+def test_a_chmod_fallback_that_hits_a_different_inode_is_refused(
+    sdir: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = sdir.path / LOG_NAME
+    path.write_bytes(b"")
+    path.chmod(0o000)
+    real_chmod = os.chmod
+
+    def chmod_then_swap(*a: Any, **k: Any) -> None:
+        real_chmod(*a, **k)
+        other = path.with_name("other")
+        other.write_bytes(b"")
+        os.replace(other, path)
+
+    monkeypatch.setattr("memoctl.gateway.os.chmod", chmod_then_swap)
+    with pytest.raises(LogError) as exc:
+        append_record(sdir, add_record(), NOW)
+    assert exc.value.reason == "unsafe_file"
+
+
 # ---- the gateway pieces -------------------------------------------------------------------
 
 
