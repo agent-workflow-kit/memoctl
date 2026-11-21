@@ -66,7 +66,16 @@ def test_non_datetime_refused() -> None:
 
 @pytest.mark.parametrize(
     ("text", "seconds"),
-    [("60", 60), ("59.5s", 60), ("59.000000001s", 60), ("0.999m", 60), ("1m", 60), ("1h", 3600), ("0.000694445d", 61), ("2d", 2 * DAY)],
+    [
+        ("60", 60),
+        ("59.5s", 60),
+        ("59.000000001s", 60),
+        ("0.999m", 60),
+        ("1m", 60),
+        ("1h", 3600),
+        ("0.000694445d", 61),
+        ("2d", 2 * DAY),
+    ],
 )
 def test_parse_expires_accepts(text: str, seconds: int) -> None:
     assert parse_expires(text) == seconds
@@ -221,7 +230,7 @@ def test_parse_expires_matches_exact_fractions() -> None:
     rng = random.Random(1414)
     units = {"": 1, "s": 1, "m": 60, "h": 3600, "d": DAY}
     for _ in range(5000):
-        whole = str(rng.randrange(0, 10**rng.randrange(1, 11)))
+        whole = str(rng.randrange(0, 10 ** rng.randrange(1, 11)))
         text = whole
         if rng.random() < 0.7:
             digits = rng.randrange(1, 10)
