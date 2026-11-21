@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sqlite3
@@ -9,6 +10,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import jsonschema
 import pytest
 
 from memoctl.statedir import STATE_PARTS, open_state_dir
@@ -22,6 +24,21 @@ from memoctl.validation import (
 from tests.fake_gateway import FakeGateway
 
 SHA = "a" * 64
+
+# todo(#60): human-form goldens for validate (the rendered text) once render.py lands.
+GOLDEN_DIR = Path(__file__).parent / "golden" / "validate"
+SCHEMA = json.loads(
+    (Path(__file__).parent.parent / "schemas" / "cli" / "validate.json").read_text()
+)
+VALIDATOR = jsonschema.Draft202012Validator(SCHEMA)
+VALIDATOR.check_schema(SCHEMA)
+
+
+def checked(gateway: Any, **kw: Any) -> ValidateResult:
+    """``validate_store`` plus a schema check of its ``--json`` document."""
+    result = validate_store(gateway, **kw)
+    VALIDATOR.validate(result.document())
+    return result
 
 
 @pytest.fixture
@@ -97,7 +114,7 @@ def reasons(result: ValidateResult) -> list[str | None]:
 
 
 def test_missing_state_dir_passes_with_messages(gw: FakeGateway) -> None:
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.ok and r.exit_code == 0
     assert names(r) == list(CHECK_NAMES)
     messages = [c.message for c in r.checks][1:]
@@ -109,7 +126,7 @@ def test_missing_state_dir_passes_with_messages(gw: FakeGateway) -> None:
 
 def test_missing_database_passes(gw: FakeGateway) -> None:
     make_state(gw)
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.ok
     assert r.checks[2].message == r.checks[3].message == "no database yet"
     assert not (state_path(gw) / "state.db").exists()
@@ -119,7 +136,7 @@ def test_zero_length_database_is_empty_and_untouched(gw: FakeGateway) -> None:
     sd = make_state(gw)
     (sd / "state.db").touch(mode=0o600)
     before = snapshot(sd)
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.ok and r.checks[3].message == "no database yet"
     assert snapshot(sd) == before
 
@@ -132,7 +149,7 @@ def test_healthy_database_passes_and_is_read_only(gw: FakeGateway) -> None:
     c.close()
     sd = state_path(gw)
     before = snapshot(sd)
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.ok and r.exit_code == 0 and r.warnings == ()
     assert reasons(r) == [None] * 4
     assert snapshot(sd) == before
@@ -140,30 +157,13 @@ def test_healthy_database_passes_and_is_read_only(gw: FakeGateway) -> None:
 
 def test_wal_sidecars_left_by_a_read_open_are_private_and_empty(gw: FakeGateway) -> None:
     db = make_store(gw)
-    assert validate_store(gw).ok
+    assert checked(gw).ok
     for suffix in ("-shm", "-wal"):
         side = Path(str(db) + suffix)
         if side.exists():
             assert side.stat().st_mode & 0o077 == 0
     wal = Path(str(db) + "-wal")
     assert not wal.exists() or wal.stat().st_size == 0
-
-
-def test_document_matches_schema(gw: FakeGateway) -> None:
-    jsonschema = pytest.importorskip("jsonschema")
-    schema = json.loads(
-        (Path(__file__).parent.parent / "schemas" / "cli" / "validate.json").read_text()
-    )
-    make_store(gw)
-    jsonschema.validate(validate_store(gw).document(), schema)
-    gw2 = FakeGateway(gw.root / "other")
-    sd = make_state(gw2)
-    (sd / "state.db").write_bytes(b"x" * 5000)
-    os.chmod(sd / "state.db", 0o600)
-    doc = validate_store(gw2).document()
-    jsonschema.validate(doc, schema)
-    assert doc["ok"] is False
-    json.dumps(doc)
 
 
 # --- config ---------------------------------------------------------------------------------
@@ -180,7 +180,7 @@ def write_config(gw: FakeGateway, text: str) -> None:
 
 def test_invalid_config_fails_first_and_ends_the_run(gw: FakeGateway) -> None:
     write_config(gw, "limits:\n  total: 0\n")
-    r = validate_store(gw)
+    r = checked(gw)
     assert not r.ok and r.exit_code == 2
     assert names(r) == ["config"]
     assert r.checks[0].reason == "config_invalid"
@@ -190,12 +190,12 @@ def test_invalid_config_fails_first_and_ends_the_run(gw: FakeGateway) -> None:
 
 def test_config_garbage_is_reported_not_raised(gw: FakeGateway) -> None:
     write_config(gw, "\x00\xff: [unterminated")
-    assert validate_store(gw).exit_code == 2
+    assert checked(gw).exit_code == 2
 
 
 def test_bad_home_is_config_invalid(gw: FakeGateway) -> None:
     gw.home().rmdir()
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.exit_code == 2 and names(r) == ["config"]
 
 
@@ -205,7 +205,7 @@ def test_bad_home_is_config_invalid(gw: FakeGateway) -> None:
 def test_state_dir_wrong_mode_is_unsafe_state(gw: FakeGateway) -> None:
     sd = make_state(gw)
     sd.chmod(0o755)
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.exit_code == 20 and names(r) == ["config", "state_dir"]
     assert r.checks[1].reason == "unsafe_state"
     assert str(sd) not in r.checks[1].message
@@ -214,7 +214,7 @@ def test_state_dir_wrong_mode_is_unsafe_state(gw: FakeGateway) -> None:
 def test_state_dir_foreign_owner_is_unsafe_state(gw: FakeGateway) -> None:
     make_state(gw)
     gw.uid_value += 1
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.exit_code == 20 and r.checks[1].reason == "unsafe_state"
 
 
@@ -225,21 +225,21 @@ def test_state_dir_symlink_is_unsafe_state(gw: FakeGateway) -> None:
     target.mkdir(mode=0o700)
     sd.rmdir()
     sd.symlink_to(target)
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.exit_code == 20
     assert target.exists() and list(target.iterdir()) == []
 
 
 def test_parent_that_is_a_file_is_unsafe_state(gw: FakeGateway) -> None:
     (gw.home() / ".local").write_text("x")
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.exit_code == 20 and r.checks[1].reason == "unsafe_state"
     assert (gw.home() / ".local").read_text() == "x"
 
 
 def test_unwritable_ancestor_fails_when_state_dir_missing(gw: FakeGateway) -> None:
     gw.denied_access.add(gw.home().resolve())
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.exit_code == 20 and r.checks[1].reason == "unsafe_state"
     assert names(r) == ["config", "state_dir"]
 
@@ -247,16 +247,16 @@ def test_unwritable_ancestor_fails_when_state_dir_missing(gw: FakeGateway) -> No
 def test_nearest_ancestor_is_used_not_the_home(gw: FakeGateway) -> None:
     (gw.home() / ".local").mkdir(mode=0o700)
     gw.denied_access.add((gw.home() / ".local").resolve())
-    assert validate_store(gw).exit_code == 20
+    assert checked(gw).exit_code == 20
     gw.denied_access.clear()
     gw.denied_access.add(gw.home().resolve())  # home is not the nearest ancestor now
-    assert validate_store(gw).ok
+    assert checked(gw).ok
 
 
 def test_unwritable_ancestor_ignored_when_state_dir_exists(gw: FakeGateway) -> None:
     make_state(gw)
     gw.denied_access.add(state_path(gw).parent.resolve())
-    assert validate_store(gw).ok
+    assert checked(gw).ok
 
 
 @pytest.mark.skipif(os.getuid() == 0, reason="root passes os.access")
@@ -269,7 +269,7 @@ def test_real_access_check_with_unwritable_home(tmp_path: Path) -> None:
 
     (tmp_path / "h").mkdir(mode=0o500)
     try:
-        r = validate_store(Home())
+        r = checked(Home())
     finally:
         (tmp_path / "h").chmod(0o700)
     assert r.exit_code == 20
@@ -293,7 +293,6 @@ def corrupt_cases() -> list[str]:
         "orphan_label",
         "huge_sequence",
         "user_version_zero",
-        "quick_check",
     ]
 
 
@@ -331,35 +330,32 @@ def test_hostile_database_is_db_corrupt(gw: FakeGateway, case: str) -> None:
             c.execute("UPDATE sqlite_sequence SET seq = 999999999999999999")
         elif case == "user_version_zero":
             c.execute("PRAGMA user_version = 0")
-        elif case == "quick_check":
-            pass
         c.close()
-        if case == "quick_check":
-            # damage an index page: break the file's consistency after the header
-            c = raw(db)
-            for i in range(30):
-                insert(c, id=i + 1, topic=f"t{i}", body=f"b{i}", size=len(f"b{i}"))
-            c.close()
-            data = bytearray(db.read_bytes())
-            for off in range(4096 * 2, len(data), 97):
-                data[off] ^= 0xFF
-            db.write_bytes(bytes(data))
     db.chmod(0o600)
     before = snapshot(sd)
-    r = validate_store(gw)
+    r = checked(gw)
     assert not r.ok and r.exit_code == 12
     assert names(r) == ["config", "state_dir", "database"]
-    assert r.checks[2].reason in ("db_corrupt", "db_unreadable")
-    if case != "quick_check":
-        assert r.checks[2].reason == "db_corrupt"
+    assert r.checks[2].reason == "db_corrupt"
     assert str(sd) not in json.dumps(r.document())
     assert snapshot(sd) == before
+
+
+def test_failing_quick_check_is_db_corrupt(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_store(gw)
+    assert checked(gw).ok  # healthy: only the stub below changes the outcome
+    monkeypatch.setattr(Store, "quick_check", lambda self: False)
+    r = checked(gw)
+    assert r.exit_code == 12 and names(r) == ["config", "state_dir", "database"]
+    assert r.checks[2].reason == "db_corrupt"
 
 
 def test_database_with_unsafe_mode_is_unsafe_state(gw: FakeGateway) -> None:
     db = make_store(gw)
     db.chmod(0o644)
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.exit_code == 20 and r.checks[2].reason == "unsafe_state"
     assert names(r) == ["config", "state_dir", "database"]
 
@@ -369,7 +365,7 @@ def test_database_symlink_is_unsafe_state(gw: FakeGateway) -> None:
     other = db.parent / "other"
     db.rename(other)
     db.symlink_to(other)
-    assert validate_store(gw).exit_code == 20
+    assert checked(gw).exit_code == 20
 
 
 def test_unsafe_sidecar_is_unsafe_state(gw: FakeGateway) -> None:
@@ -377,7 +373,7 @@ def test_unsafe_sidecar_is_unsafe_state(gw: FakeGateway) -> None:
     wal = Path(str(db) + "-wal")
     wal.write_bytes(b"")
     wal.chmod(0o666)
-    assert validate_store(gw).exit_code == 20
+    assert checked(gw).exit_code == 20
 
 
 def test_locked_database_is_reported_within_the_busy_timeout(gw: FakeGateway) -> None:
@@ -386,7 +382,7 @@ def test_locked_database_is_reported_within_the_busy_timeout(gw: FakeGateway) ->
     c.execute("PRAGMA journal_mode = DELETE")
     c.execute("BEGIN EXCLUSIVE")
     try:
-        r = validate_store(gw)
+        r = checked(gw)
     finally:
         c.execute("ROLLBACK")
         c.close()
@@ -404,21 +400,21 @@ def test_deadline_propagates_instead_of_a_check(gw: FakeGateway) -> None:
         store.set_progress_handler(lambda: True)
 
     with pytest.raises(StoreError) as info:
-        validate_store(gw, configure=hook)
+        checked(gw, configure=hook)
     assert info.value.reason == "timeout"
 
 
 def test_configure_hook_is_called_once(gw: FakeGateway) -> None:
     make_store(gw)
     calls: list[Store] = []
-    assert validate_store(gw, configure=calls.append).ok
+    assert checked(gw, configure=calls.append).ok
     assert len(calls) == 1
 
 
 def test_old_sqlite_is_db_unreadable(gw: FakeGateway, monkeypatch: pytest.MonkeyPatch) -> None:
     make_store(gw)
     monkeypatch.setattr("memoctl.store.MIN_SQLITE", (99, 0, 0))
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.exit_code == 12 and r.checks[2].reason == "db_unreadable"
 
 
@@ -439,7 +435,7 @@ def test_concurrent_reader_does_not_block_validate(gw: FakeGateway) -> None:
     t.start()
     started.wait(5)
     try:
-        assert validate_store(gw).ok
+        assert checked(gw).ok
     finally:
         stop.set()
         t.join()
@@ -455,7 +451,7 @@ def test_newer_schema_fails_schema_check_only(gw: FakeGateway) -> None:
     c.close()
     sd = state_path(gw)
     before = snapshot(sd)
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.exit_code == 12
     assert names(r) == list(CHECK_NAMES)
     assert [c.ok for c in r.checks] == [True, True, True, False]
@@ -467,7 +463,7 @@ def test_newer_schema_fails_schema_check_only(gw: FakeGateway) -> None:
 def test_older_known_version_is_not_migrated(gw: FakeGateway) -> None:
     # only version 1 exists in 0.1, so "older" is the current one: the version stays as found
     db = make_store(gw)
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.ok
     c = raw(db)
     assert c.execute("PRAGMA user_version").fetchone() == (1,)
@@ -489,7 +485,7 @@ MOUNTINFO = (
 def test_unsafe_filesystem_warns_without_failing(gw: FakeGateway, fs: str) -> None:
     make_store(gw)
     gw.mountinfo = MOUNTINFO.format(mnt=gw.home().resolve(), fs=fs).encode()
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.ok and r.exit_code == 0
     assert r.warnings == ("unsafe_filesystem",)
     assert r.document()["warnings"] == ["unsafe_filesystem"]
@@ -497,7 +493,7 @@ def test_unsafe_filesystem_warns_without_failing(gw: FakeGateway, fs: str) -> No
 
 def test_warning_for_missing_state_dir_uses_nearest_parent(gw: FakeGateway) -> None:
     gw.mountinfo = MOUNTINFO.format(mnt=gw.home().resolve(), fs="9p").encode()
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.ok and r.warnings == ("unsafe_filesystem",)
 
 
@@ -506,17 +502,17 @@ def test_warning_survives_a_failed_database_check(gw: FakeGateway) -> None:
     db.write_bytes(b"not a database" * 100)
     db.chmod(0o600)
     gw.mountinfo = MOUNTINFO.format(mnt=gw.home().resolve(), fs="nfs4").encode()
-    r = validate_store(gw)
+    r = checked(gw)
     assert r.exit_code == 12 and r.warnings == ("unsafe_filesystem",)
 
 
 def test_safe_filesystems_and_missing_mountinfo_do_not_warn(gw: FakeGateway) -> None:
     make_store(gw)
-    assert validate_store(gw).warnings == ()  # no mountinfo
+    assert checked(gw).warnings == ()  # no mountinfo
     gw.mountinfo = MOUNTINFO.format(mnt=gw.home().resolve(), fs="ext4").encode()
-    assert validate_store(gw).warnings == ()
+    assert checked(gw).warnings == ()
     gw.mountinfo = b""
-    assert validate_store(gw).warnings == ()
+    assert checked(gw).warnings == ()
 
 
 def test_longest_mount_point_wins(gw: FakeGateway) -> None:
@@ -525,11 +521,11 @@ def test_longest_mount_point_wins(gw: FakeGateway) -> None:
     # an unsafe mount above, a safe one nearer the state dir: safe wins
     text = f"1 0 0:1 / {home.parent} rw - 9p x rw\n2 1 0:2 / {home} rw - ext4 y rw\n"
     gw.mountinfo = text.encode()
-    assert validate_store(gw).warnings == ()
+    assert checked(gw).warnings == ()
     # the reverse
     text = f"1 0 0:1 / / rw - ext4 x rw\n2 1 0:2 / {home} rw - cifs y rw\n"
     gw.mountinfo = text.encode()
-    assert validate_store(gw).warnings == ("unsafe_filesystem",)
+    assert checked(gw).warnings == ("unsafe_filesystem",)
 
 
 def test_mount_point_prefix_is_by_component() -> None:
@@ -569,7 +565,294 @@ def test_real_gateway_mountinfo_is_readable_or_none() -> None:
 
 def test_result_ordering_is_deterministic(gw: FakeGateway) -> None:
     make_store(gw)
-    docs = [json.dumps(validate_store(gw).document()) for _ in range(3)]
+    docs = [json.dumps(checked(gw).document()) for _ in range(3)]
     assert len(set(docs)) == 1
     assert list(json.loads(docs[0])) == ["ok", "checks", "warnings"]
     assert list(json.loads(docs[0])["checks"][0]) == ["name", "ok", "reason", "message"]
+
+
+# --- state_dir failures keep the warning, OSError paths, dangling parents -------------------
+
+
+def test_unsafe_state_dir_still_warns_on_unsafe_filesystem(gw: FakeGateway) -> None:
+    sd = make_state(gw)
+    sd.chmod(0o755)
+    gw.mountinfo = MOUNTINFO.format(mnt=gw.home().resolve(), fs="nfs").encode()
+    r = checked(gw)
+    assert r.exit_code == 20 and r.checks[1].reason == "unsafe_state"
+    assert r.warnings == ("unsafe_filesystem",)
+
+
+def test_config_failure_has_no_warning(gw: FakeGateway) -> None:
+    write_config(gw, "limits:\n  total: 0\n")
+    gw.mountinfo = MOUNTINFO.format(mnt=gw.home().resolve(), fs="nfs").encode()
+    assert checked(gw).warnings == ()
+
+
+def test_state_dir_open_error_is_unsafe_state(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_state(gw)
+
+    def boom(path: Path, *, follow: bool) -> None:
+        raise OSError(errno.EIO, "io")
+
+    monkeypatch.setattr(gw, "open_dir", boom)
+    r = checked(gw)
+    assert r.exit_code == 20 and names(r) == ["config", "state_dir"]
+    assert r.checks[1].reason == "unsafe_state"
+
+
+def test_state_dir_open_error_after_the_check_is_unsafe_state(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_store(gw)
+    real_open = gw.open_dir
+    calls: list[int] = []
+
+    def flaky(path: Path, *, follow: bool) -> Any:
+        calls.append(1)
+        if len(calls) > 1:  # the state_dir check opened it; the database check cannot
+            raise OSError(errno.EIO, "io")
+        return real_open(path, follow=follow)
+
+    monkeypatch.setattr(gw, "open_dir", flaky)
+    r = checked(gw)
+    assert r.exit_code == 20 and names(r) == ["config", "state_dir", "database"]
+    assert r.checks[2].reason == "unsafe_state"
+
+
+def test_database_lstat_error_is_unsafe_state(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memoctl import gateway as gateway_module
+
+    make_store(gw)
+    real_lstat = gateway_module._RealDirHandle.lstat
+
+    def lstat(self: Any, name: str) -> Any:
+        if name == "state.db":
+            raise OSError(errno.EIO, "io")
+        return real_lstat(self, name)
+
+    monkeypatch.setattr(gateway_module._RealDirHandle, "lstat", lstat)
+    r = checked(gw)
+    assert r.exit_code == 20 and names(r) == ["config", "state_dir", "database"]
+    assert r.checks[2].reason == "unsafe_state"
+    assert r.checks[2].message == "the database file is not safe to use"
+
+
+class _RealHome:
+    @staticmethod
+    def make(tmp_path: Path) -> Any:
+        from memoctl.gateway import RealGateway
+
+        class Home(RealGateway):
+            def home(self) -> Path:
+                return tmp_path / "h"
+
+        (tmp_path / "h").mkdir(mode=0o700)
+        return Home()
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root ignores directory permissions")
+def test_unsearchable_parent_of_existing_state_dir_is_unsafe_state(tmp_path: Path) -> None:
+    real = _RealHome.make(tmp_path)
+    sd = open_state_dir(real, create=True)
+    sd.close()
+    local = tmp_path / "h" / ".local"
+    local.chmod(0)
+    try:
+        r = checked(real)
+    finally:
+        local.chmod(0o700)
+    assert r.exit_code == 20 and r.checks[1].reason == "unsafe_state"
+    assert names(r) == ["config", "state_dir"]
+
+
+@pytest.mark.parametrize("level", [".local", ".local/state"])
+def test_dangling_symlink_parent_is_unsafe_state(gw: FakeGateway, level: str) -> None:
+    home = gw.home()
+    if level == ".local/state":
+        (home / ".local").mkdir(mode=0o700)
+    (home / level).symlink_to(home / "nowhere")
+    r = checked(gw)
+    assert r.exit_code == 20 and names(r) == ["config", "state_dir"]
+    assert r.checks[1].reason == "unsafe_state"
+    assert not (home / "nowhere").exists()
+
+
+def test_dangling_symlink_parent_matches_add_refusal(gw: FakeGateway) -> None:
+    from memoctl.statedir import UnsafeStateError
+
+    (gw.home() / ".local").symlink_to(gw.home() / "nowhere")
+    with pytest.raises(UnsafeStateError):
+        open_state_dir(gw, create=True)
+    assert checked(gw).exit_code == 20
+
+
+def test_symlink_parent_to_a_directory_is_fine(gw: FakeGateway) -> None:
+    (gw.home() / "real").mkdir(mode=0o700)
+    (gw.home() / ".local").symlink_to(gw.home() / "real")
+    assert checked(gw).ok
+
+
+# --- mountinfo cap --------------------------------------------------------------------------
+
+
+def test_cut_last_mountinfo_line_is_ignored(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_store(gw)
+    home = gw.home().resolve()
+    head = f"1 0 0:1 / / rw - ext4 x rw\n2 1 0:2 / {home} rw - nfs".encode()
+    gw.mountinfo = head + b"d x rw\n"  # the last field is nfsd, a type that is not unsafe
+    monkeypatch.setattr("memoctl.validation.MOUNTINFO_LIMIT", len(head))
+    assert len(gw.read_mountinfo(len(head)) or b"") == len(head)  # exactly the cap
+    assert checked(gw).warnings == ()
+    # a complete last line at exactly the cap is cut too, and the earlier lines still count
+    full = f"1 0 0:1 / / rw - ext4 x rw\n2 1 0:2 / {home} rw - nfs x rw\n".encode()
+    gw.mountinfo = full
+    monkeypatch.setattr("memoctl.validation.MOUNTINFO_LIMIT", len(full) + 1)
+    assert checked(gw).warnings == ("unsafe_filesystem",)
+
+
+# --- real gateway helpers -------------------------------------------------------------------
+
+
+def test_real_access_semantics(tmp_path: Path) -> None:
+    from memoctl.gateway import RealGateway
+
+    real = RealGateway()
+    assert real.access(tmp_path, write=True, search=True)
+    assert not real.access(tmp_path / "missing", write=False, search=False)
+    assert not real.access(tmp_path / "a\0b", write=True, search=True)
+    if os.getuid() != 0:
+        ro = tmp_path / "ro"
+        ro.mkdir(mode=0o500)
+        try:
+            assert real.access(ro, write=False, search=True)
+            assert not real.access(ro, write=True, search=True)
+        finally:
+            ro.chmod(0o700)
+
+
+def test_fake_access_is_not_more_permissive(tmp_path: Path) -> None:
+    fake = FakeGateway(tmp_path / "f")
+    assert not fake.access(fake.root / "missing", write=False, search=False)
+    from memoctl.gateway import GatewayError
+
+    with pytest.raises(GatewayError):  # stricter than real (False), never more permissive
+        fake.access(fake.root / "a\0b", write=True, search=True)
+
+
+def test_real_resolve_path(tmp_path: Path) -> None:
+    from memoctl.gateway import RealGateway
+
+    (tmp_path / "d").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "d")
+    real = RealGateway()
+    base = tmp_path.resolve()
+    assert real.resolve_path(tmp_path / "link") == base / "d"
+    assert real.resolve_path(tmp_path / "link" / "no" / "such") == base / "d" / "no" / "such"
+    fake = FakeGateway(tmp_path / "f")
+    (fake.root / "d").mkdir()
+    (fake.root / "link").symlink_to(fake.root / "d")
+    assert fake.resolve_path(fake.root / "link" / "no") == fake.root / "d" / "no"
+
+
+def test_real_read_mountinfo_limit_and_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from memoctl import gateway as gateway_module
+    from memoctl.gateway import RealGateway
+
+    real = RealGateway()
+    if real.read_mountinfo(1) is not None:
+        assert real.read_mountinfo(0) == b""
+        assert len(real.read_mountinfo(7) or b"") <= 7
+    orig = os.open
+
+    def no_proc(path: Any, *a: Any, **k: Any) -> int:
+        if str(path) == "/proc/self/mountinfo":
+            raise FileNotFoundError(path)
+        return orig(path, *a, **k)
+
+    monkeypatch.setattr(gateway_module.os, "open", no_proc)
+    assert real.read_mountinfo(100) is None
+    fake = FakeGateway(Path("/tmp") / "unused-fake-never-created")
+    assert fake.read_mountinfo(0) is None  # no mountinfo served
+
+
+# --- goldens (--json documents) -------------------------------------------------------------
+
+
+def _g_clean(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
+    make_store(gw)
+
+
+def _g_config_invalid(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
+    write_config(gw, "limits:\n  total: 0\n")
+
+
+def _g_unsafe_state(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
+    make_state(gw).chmod(0o755)
+
+
+def _g_db_unreadable(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
+    make_store(gw)
+    mp.setattr("memoctl.store.MIN_SQLITE", (99, 0, 0))
+
+
+def _g_db_corrupt(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
+    db = make_store(gw)
+    db.write_bytes(os.urandom(8192))
+    db.chmod(0o600)
+
+
+def _g_schema_newer(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
+    c = raw(make_store(gw))
+    c.execute("PRAGMA user_version = 99")
+    c.close()
+
+
+def _g_unsafe_filesystem(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
+    make_store(gw)
+    gw.mountinfo = MOUNTINFO.format(mnt=gw.home().resolve(), fs="nfs").encode()
+
+
+GOLDEN_CASES = {
+    "clean": _g_clean,
+    "config_invalid": _g_config_invalid,
+    "unsafe_state": _g_unsafe_state,
+    "db_unreadable": _g_db_unreadable,
+    "db_corrupt": _g_db_corrupt,
+    "schema_newer": _g_schema_newer,
+    "unsafe_filesystem": _g_unsafe_filesystem,
+}
+
+
+@pytest.mark.parametrize("case", sorted(GOLDEN_CASES))
+def test_golden_json_document(gw: FakeGateway, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    GOLDEN_CASES[case](gw, monkeypatch)
+    doc = checked(gw).document()
+    golden = json.loads((GOLDEN_DIR / f"{case}.json").read_text())
+    VALIDATOR.validate(golden)
+    assert doc == golden
+
+
+def test_golden_json_db_locked(gw: FakeGateway) -> None:
+    c = raw(make_store(gw))
+    c.execute("PRAGMA journal_mode = DELETE")
+    c.execute("BEGIN EXCLUSIVE")
+    try:
+        doc = checked(gw).document()
+    finally:
+        c.execute("ROLLBACK")
+        c.close()
+    golden = json.loads((GOLDEN_DIR / "db_locked.json").read_text())
+    VALIDATOR.validate(golden)
+    assert doc == golden
+
+
+def test_golden_files_are_all_used() -> None:
+    expected = {f"{c}.json" for c in GOLDEN_CASES} | {"db_locked.json"}
+    assert {p.name for p in GOLDEN_DIR.glob("*.json")} == expected

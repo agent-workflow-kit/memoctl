@@ -52,7 +52,6 @@ from memoctl.store import (
     Store,
     StoreError,
     open_store,
-    supported_version,
 )
 
 __all__ = [
@@ -163,6 +162,10 @@ def filesystem_warning(gateway: Gateway, path: Path) -> bool:
         data = gateway.read_mountinfo(MOUNTINFO_LIMIT)
         if data is None:
             return False
+        if len(data) >= MOUNTINFO_LIMIT:
+            # the read stopped at the cap: the last line may be cut mid-field (``nfsd`` read
+            # as ``nfs``), so only whole lines are used
+            data = data[: data.rfind(b"\n") + 1]
         fs = filesystem_type(data, gateway.resolve_path(path))
     except (OSError, GatewayError):
         return False
@@ -194,22 +197,60 @@ def _nearest_existing(gateway: Gateway, path: Path) -> Path | None:
             return current
 
 
+def _warning_base(gateway: Gateway, home: Path) -> Path | None:
+    """The directory the file system warning is judged on when ``state_dir`` fails: the state
+    directory when it exists, else its nearest existing ancestor; ``None`` when that cannot be
+    told."""
+    expected = home.joinpath(*STATE_PARTS)
+    try:
+        if gateway.stat_path(expected, follow=True) is not None:
+            return expected
+        return _nearest_existing(gateway, expected)
+    except (OSError, GatewayError):
+        return None
+
+
+def _unfollowable_parent(gateway: Gateway, home: Path) -> bool:
+    """True when ``.local`` or ``.local/state`` is a symlink that cannot be followed (dangling
+    or looping): ``add`` refuses it (``UnsafeStateError("parent")``), so it is not "missing"."""
+    level = home
+    for name in STATE_PARTS[:-1]:
+        level = level / name
+        info = gateway.stat_path(level, follow=False)
+        if info is None:
+            return False
+        if info.kind == "symlink" and gateway.stat_path(level, follow=True) is None:
+            return True
+    return False
+
+
 def _check_state_dir(gateway: Gateway) -> tuple[CheckResult, Path | None]:
-    """The result and the existing directory the file system warning is judged on."""
+    """The result and the existing directory the file system warning is judged on (also when
+    the check fails)."""
     try:
         home = resolve_home(gateway)
+    except ConfigError:
+        return _fail("state_dir", "config_invalid", "the home directory is not usable"), None
+    try:
         state = open_state_dir(gateway, create=False)
     except ConfigError:
         return _fail("state_dir", "config_invalid", "the home directory is not usable"), None
     except UnsafeStateError:
-        return _fail("state_dir", "unsafe_state", "the state directory is not safe to use"), None
+        return (
+            _fail("state_dir", "unsafe_state", "the state directory is not safe to use"),
+            _warning_base(gateway, home),
+        )
     except OSError:
         # an existing level that cannot be opened (no search permission, I/O error)
-        return _fail("state_dir", "unsafe_state", "the state directory cannot be opened"), None
+        return (
+            _fail("state_dir", "unsafe_state", "the state directory cannot be opened"),
+            _warning_base(gateway, home),
+        )
     if state is not None:
         with state:
             return _pass("state_dir", "state directory is private"), state.path
     expected = home.joinpath(*STATE_PARTS)
+    ancestor: Path | None = None
     try:
         ancestor = _nearest_existing(gateway, expected)
         info = None if ancestor is None else gateway.stat_path(ancestor, follow=True)
@@ -218,9 +259,13 @@ def _check_state_dir(gateway: Gateway) -> tuple[CheckResult, Path | None]:
             and info is not None
             and info.kind == "dir"
             and gateway.access(ancestor, write=True, search=True)
+            and not _unfollowable_parent(gateway, home)
         )
     except OSError:
-        return _fail("state_dir", "unsafe_state", "the state directory cannot be created"), None
+        return (
+            _fail("state_dir", "unsafe_state", "the state directory cannot be created"),
+            _warning_base(gateway, home),
+        )
     if not usable:
         return (
             _fail("state_dir", "unsafe_state", "the state directory cannot be created"),
@@ -245,7 +290,8 @@ def _check_store(gateway: Gateway, configure: Callable[[Store], None] | None) ->
 def _check_open(state: Any, configure: Callable[[Store], None] | None) -> list[CheckResult]:
     try:
         store = open_store(state, Mode.READ, configure=configure)
-    except UnsafeStateError:
+    except (UnsafeStateError, OSError):
+        # a refused file, or one whose lstat failed (I/O error): not safe to use either
         return [_fail("database", "unsafe_state", "the database file is not safe to use")]
     except SchemaNewerError:
         # application_id and identity were accepted before the version was refused; the rows
@@ -264,14 +310,8 @@ def _check_open(state: Any, configure: Callable[[Store], None] | None) -> list[C
                 store.check_rows()
                 if not store.quick_check():
                     raise StoreError(DB_CORRUPT)
-            version = store.version
     except StoreError as exc:
         return [_database_failure(exc)]
-    if version is None or not 1 <= version <= supported_version():
-        return [
-            _pass("database", "database is consistent"),
-            _fail("schema", "db_corrupt", "the schema version is not known"),
-        ]
     return [
         _pass("database", "database is consistent"),
         _pass("schema", "schema version is supported"),
