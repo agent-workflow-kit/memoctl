@@ -18,10 +18,13 @@ Status: 0.1.0-design, 2026-11-18. This plan implements [interface.md](interface.
 
 | Module | Stage | Responsibility |
 |---|---|---|
-| `gateway.py` | 0 | The only module that touches the clock, the home lookup, the terminal, descriptors, stdin, randomness and `crontab`; the test fake. |
+| `gateway.py` | 0 | The only module that touches the clock, the home lookup, the terminal, argv, descriptors, stdin, randomness and `crontab`; the test fake. |
 | `grammar.py` | 0 | Every grammar, duration parsing with integer arithmetic, `fullmatch` helpers. |
 | `config.py` | 0 | Home lookup, drop-in loading with the strict YAML loader, the Pydantic model, per-repo overrides, cross-key checks. |
-| `cli.py` | 0 | argparse, the `--json` pre-scan, the descriptor check, exit-code mapping, the error envelope, human and JSON output. |
+| `cli.py` | 0 | Entry point: the descriptor check, the `--json` pre-scan, dispatch, the last-resort handler. |
+| `cli_args.py` | 0 | argparse with its printing and exiting neutralized, global flags, the `Command` record, the pre-scan. |
+| `cli_commands.py` | 0 | The table of subcommands (one line per command). |
+| `cli_errors.py` | 0 | Exit codes, the error envelope (schema rules enforced), the exception-to-exit-code table. |
 | `statedir.py` | 1 | The state directory check on a descriptor, creation modes, `lstat` of `state.db`. |
 | `store.py` | 1 | Opening SQLite (modes, pragmas, the progress handler, `setlimit`), migrations, row checks, every query. |
 | `body.py` | 2 | The bounded reader, body validation (six classes, combining runs, NFKC bound), the secret check. |

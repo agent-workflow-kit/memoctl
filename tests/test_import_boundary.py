@@ -37,9 +37,10 @@ BANNED_MODULES = {
     "getpass",
     "shutil",
     "glob",
+    "fcntl",
 }
 # Canonical dotted names (after alias resolution) that reach the host, whether called or
-# merely referenced. todo(#6): sys.argv is not banned because the CLI needs it.
+# merely referenced.
 BANNED_REFS = {
     # builtins, also through the ``builtins`` module
     *{
@@ -52,6 +53,8 @@ BANNED_REFS = {
     "io.open_code",
     "codecs.open",
     "sys.modules",
+    "sys.argv",
+    "sys.orig_argv",
     # the process's descriptors
     "sys.stdin",
     "sys.stdout",
@@ -278,6 +281,9 @@ def test_module_reaches_outside_only_through_the_gateway(path: Path) -> None:
     [
         "import subprocess",
         "import subprocess as sp",
+        "import fcntl",
+        "from fcntl import flock",
+        "def f():\n    import fcntl",
         "from subprocess import run",
         "import time",
         "from time import time as t",
@@ -295,6 +301,9 @@ def test_module_reaches_outside_only_through_the_gateway(path: Path) -> None:
         "import sys\nsys.stdin.read()",
         "import sys\nsys.stderr.write('x')",
         "from sys import stdout",
+        "import sys\nsys.argv",
+        "import sys\nsys.orig_argv",
+        "from sys import orig_argv",
         "import os\nos.urandom(3)",
         "from os import urandom",
         "import os\nos.fchmod(3, 0o600)",
@@ -466,7 +475,7 @@ def test_scanner_flags_aliases_and_new_bans(source: str) -> None:
         "import os\nos.path.join('a', 'b')",
         "from os import path\npath.join('a', 'b')",
         "import os\nos.sep",
-        "import sys\nsys.argv[1:]",
+        "def f(gateway):\n    return gateway.argv(), gateway.fd_is_open(0)",
         "import sqlite3",
         "import signal\nimport threading\nimport io\nio.StringIO()",
         "from pathlib import Path as P\nP('x') / 'y'",

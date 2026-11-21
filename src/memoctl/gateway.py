@@ -20,6 +20,7 @@ The config loader never calls it: HOME and XDG_* are not read (interface.md, Con
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
 import pwd
 import secrets
@@ -125,7 +126,114 @@ class DirHandle(Protocol):
         with exactly ``mode`` (the umask does not apply). ``False`` when anything is there."""
         ...
 
+    def open_file_at(self, name: str, mode: int, *, create: bool) -> FileHandle | None:
+        """Open the file ``name`` for reading and appending: ``O_RDWR | O_APPEND | O_NOFOLLOW |
+        O_NONBLOCK | O_CLOEXEC`` (a final symlink is refused, a FIFO does not block). With
+        ``create`` a missing file is made with ``mode`` (the umask is not compensated: callers
+        call :meth:`FileHandle.set_mode`); without it ``None`` is returned for a missing file.
+        Any other failure raises ``OSError``. The kind and owner are the caller's to check
+        through :meth:`FileHandle.stat`."""
+        ...
+
+    def repair_file_mode(self, name: str, uid: int, mode: int) -> bool:
+        """Set ``name`` to exactly ``mode`` when it is a regular file owned by ``uid``, for a
+        file whose current mode denies the owner access (so :meth:`open_file_at` got ``EACCES``).
+        No symlink is followed and a FIFO is never opened. ``False`` when the file is missing or
+        is not an own regular file (nothing is changed); ``OSError`` as the filesystem reports."""
+        ...
+
+    def size_of(self, name: str) -> int | None:
+        """Size in bytes of the regular file ``name`` (no symlink followed); ``None`` when it is
+        missing, ``-1`` when it is not a regular file."""
+        ...
+
+    def rename(self, old: str, new: str) -> None:
+        """``renameat``: atomically move ``old`` onto ``new`` (replacing a file there) inside this
+        directory. Never follows a symlink; ``OSError`` as the filesystem reports."""
+        ...
+
     def close(self) -> None: ...
+
+
+class FileHandle(Protocol):
+    """An open regular-file descriptor opened by :meth:`DirHandle.open_file_at`. ``close`` is
+    idempotent; any other call on a closed handle raises ``OSError``."""
+
+    def stat(self) -> PathInfo:
+        """Kind, owner and mode of the opened file (``fstat``)."""
+        ...
+
+    def size(self) -> int:
+        """Size in bytes (``fstat``)."""
+        ...
+
+    def set_mode(self, mode: int) -> None:
+        """Set the permission bits exactly (``fchmod``; the umask does not apply)."""
+        ...
+
+    def read_at(self, offset: int, count: int) -> bytes:
+        """``pread``: up to ``count`` bytes at ``offset`` (empty past the end)."""
+        ...
+
+    def append(self, data: bytes) -> int:
+        """Exactly one ``write`` call; returns the number of bytes it wrote, which may be fewer
+        than ``len(data)`` (the caller decides). ``OSError`` as the filesystem reports."""
+        ...
+
+    def lock_exclusive(self, timeout: float) -> bool:
+        """Take an exclusive ``flock``, polling a non-blocking attempt for at most ``timeout``
+        seconds; ``False`` when it was not got in time. The lock is released by ``close``."""
+        ...
+
+    def close(self) -> None: ...
+
+
+LOCK_POLL_SECONDS = 0.01
+
+
+class _RealFileHandle:
+    def __init__(self, fd: int) -> None:
+        self._fd: int | None = fd
+
+    def _live(self) -> int:
+        if self._fd is None:
+            raise OSError(errno.EBADF, "file handle is closed")
+        return self._fd
+
+    def stat(self) -> PathInfo:
+        return _info(os.fstat(self._live()))
+
+    def size(self) -> int:
+        return os.fstat(self._live()).st_size
+
+    def set_mode(self, mode: int) -> None:
+        os.fchmod(self._live(), mode)
+
+    def read_at(self, offset: int, count: int) -> bytes:
+        return os.pread(self._live(), count, offset)
+
+    def append(self, data: bytes) -> int:
+        if not isinstance(data, bytes):
+            raise TypeError(f"append needs bytes, got {type(data).__name__}")
+        return os.write(self._live(), data)
+
+    def lock_exclusive(self, timeout: float) -> bool:
+        fd = self._live()
+        deadline = time.monotonic() + max(timeout, 0.0)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                pass
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(LOCK_POLL_SECONDS)
+
+    def close(self) -> None:
+        if self._fd is not None:
+            fd, self._fd = self._fd, None
+            os.close(fd)
 
 
 class _RealDirHandle:
@@ -209,6 +317,70 @@ class _RealDirHandle:
             os.close(fd)
         return True
 
+    def open_file_at(self, name: str, mode: int, *, create: bool) -> FileHandle | None:
+        flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        if create:
+            flags |= os.O_CREAT
+        try:
+            fd = os.open(_component(name), flags, mode, dir_fd=self._live())
+        except FileNotFoundError:
+            if create:
+                raise  # the directory itself is gone
+            return None
+        return _RealFileHandle(fd)
+
+    def repair_file_mode(self, name: str, uid: int, mode: int) -> bool:
+        fd = self._live()
+        component = _component(name)
+        info = self.lstat(name)
+        if info is None or info.kind != "file" or info.uid != uid:
+            return False
+        # Open it read-only, then write-only, to fchmod the verified inode. A mode that denies
+        # both (0000, 0100) leaves chmod by name, which never follows a symlink.
+        for access in (os.O_RDONLY, os.O_WRONLY):
+            flags = access | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            try:
+                ro = os.open(component, flags, dir_fd=fd)
+            except PermissionError:
+                continue
+            try:
+                st = os.fstat(ro)
+                if not stat.S_ISREG(st.st_mode) or st.st_uid != uid:
+                    return False
+                os.fchmod(ro, mode)
+                return True
+            finally:
+                os.close(ro)
+        try:
+            before = os.stat(component, dir_fd=fd, follow_symlinks=False)
+            os.chmod(component, mode, dir_fd=fd, follow_symlinks=False)
+            after = os.stat(component, dir_fd=fd, follow_symlinks=False)
+        except (ValueError, NotImplementedError):
+            # A symlink swapped in after the lstat makes chmod refuse the dir_fd and
+            # follow_symlinks combination (ValueError / NotImplementedError).
+            return False
+        # Post-condition: the name still is the same regular file of ours. The lstat -> chmod
+        # step is not atomic: a same-uid process that swaps the name in that window can still
+        # get one chmod applied to an inode it chose before this check notices (residual,
+        # accepted: it already runs as the same user).
+        return (
+            stat.S_ISREG(before.st_mode)
+            and stat.S_ISREG(after.st_mode)
+            and after.st_uid == uid
+            and (after.st_ino, after.st_dev) == (before.st_ino, before.st_dev)
+        )
+
+    def size_of(self, name: str) -> int | None:
+        try:
+            st = os.stat(_component(name), dir_fd=self._live(), follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        return st.st_size if stat.S_ISREG(st.st_mode) else -1
+
+    def rename(self, old: str, new: str) -> None:
+        fd = self._live()
+        os.rename(_component(old), _component(new), src_dir_fd=fd, dst_dir_fd=fd)
+
     def close(self) -> None:
         if self._fd is not None:
             fd, self._fd = self._fd, None
@@ -259,6 +431,28 @@ class Gateway(Protocol):
         ``follow``; symlinks in parent components are always followed). ``None`` when it or a
         parent is missing. A final symlink (not following), a non-directory (also as a parent)
         and a refusal raise ``OSError``."""
+        ...
+
+    def argv(self) -> list[str]:
+        """The command-line arguments after the program name, undecoded bytes kept as
+        ``surrogateescape`` characters."""
+        ...
+
+    def fd_is_open(self, fd: int) -> bool:
+        """``fstat`` on ``fd``: false only when the descriptor is closed (``EBADF``)."""
+        ...
+
+    def open_devnull(self, *, write: bool) -> int:
+        """Open ``/dev/null`` (write-only when ``write``, else read-only); the lowest free
+        descriptor is returned, inheritable. Raises ``OSError``."""
+        ...
+
+    def dup_onto(self, src: int, dst: int) -> None:
+        """``dup2(src, dst)``; ``dst`` is inheritable. Raises ``OSError``."""
+        ...
+
+    def release_fd(self, fd: int) -> None:
+        """Close ``fd``; an ``OSError`` is ignored."""
         ...
 
     def stdin_read(self) -> str: ...
@@ -417,6 +611,30 @@ class RealGateway:
         except FileNotFoundError:
             return None
         return _RealDirHandle(fd)
+
+    def argv(self) -> list[str]:
+        return list(sys.argv[1:])
+
+    def fd_is_open(self, fd: int) -> bool:
+        try:
+            os.fstat(fd)
+        except OSError as exc:
+            return exc.errno != errno.EBADF
+        return True
+
+    def open_devnull(self, *, write: bool) -> int:
+        fd = os.open(os.devnull, (os.O_WRONLY if write else os.O_RDONLY) | os.O_CLOEXEC)
+        os.set_inheritable(fd, True)
+        return fd
+
+    def dup_onto(self, src: int, dst: int) -> None:
+        os.dup2(src, dst, inheritable=True)
+
+    def release_fd(self, fd: int) -> None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
     def stdin_read(self) -> str:
         return sys.stdin.read()
