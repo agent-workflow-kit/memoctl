@@ -9,9 +9,9 @@ patterns run in table order, then the ``mask_env`` values. The first match raise
 value of a variable, never the text.
 
 Linear time: every pattern starts with a literal prefix, has no nested quantifier and no
-alternation of overlapping branches. Each repeated class run is bounded by a character that
-is not in the class (for example ``-`` after the ``[A-Z ]*`` of the private key header) and
-no two match starts share a run, so a search never backtracks over a position twice. The JWT
+alternation of overlapping branches. Each repeated class run is bounded by the first
+non-class character in the text, and every match start begins with ``-----BEGIN ``, so no
+two starts share a run and a search never backtracks over a position twice. The JWT
 pattern only starts after a non-token character, so one run of token characters is scanned
 once. ``mask_env`` values are compared with ``in`` (a linear substring search). There is no
 ``re.IGNORECASE`` and no logging, printing or warning in this module.
