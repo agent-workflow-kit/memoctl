@@ -22,6 +22,12 @@ input; the 1-based ``line`` counts LF in the text as written.
 
 Search text takes items 2 to 4 only (:func:`check_text`).
 
+The ``unassigned`` class is judged by the running interpreter's Unicode database: a body
+accepted by a newer interpreter may be stripped by an older one at read time; accepted.
+
+Traceback frames of a raised :class:`BodyTextError` hold the decoded text, so callers must
+never render tracebacks with locals (see todo(#6) for the error mapping).
+
 todo(#16): the refused-character classes are defined here from the spec, independently of
 ``memoctl.sanitize.refused_class`` (#24). The first issue that merges both branches (#16)
 may deduplicate them; until then both must follow Body rules item 3.
@@ -61,7 +67,7 @@ _MESSAGES = {
 }
 
 
-class BodyTextError(ValueError):
+class BodyTextError(Exception):
     """The text broke a body rule. ``reason`` is a key of the fixed messages.
 
     ``cls`` is the refused-text class (one of :data:`CLASSES`) or None; ``line`` is set for a

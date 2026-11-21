@@ -108,6 +108,8 @@ def test_utf8_bom_is_an_invisible_character_not_skipped() -> None:
 
 # ---------- item 3: the refused characters ----------
 
+# todo(#7): move these refusal cases into the golden harness
+
 CONTROL = [chr(c) for c in [*range(0, 9), *range(11, 32), 127, *range(0x80, 0xA0), 0x2028, 0x2029]]
 
 
@@ -220,6 +222,11 @@ def test_thirty_marks_are_accepted_and_thirty_one_refused() -> None:
     assert validate_body(("a" + "́" * 30).encode(), LIMIT)
     err = refusal(("a" + "́" * 31).encode())
     assert err.details == {"field": "body", "class": "combining", "line": 1}
+
+
+def test_four_thousand_marks_at_the_default_limit_are_refused_as_combining() -> None:
+    err = refusal(("a" + "\u0301" * 4000).encode(), 8192)
+    assert (err.cls, err.line) == ("combining", 1)
 
 
 def test_a_run_may_start_without_a_base_character() -> None:
@@ -366,10 +373,12 @@ def test_maximum_size_inputs_are_linear_and_fast() -> None:
     }
     for name, data in cases.items():
         data = data[:65536]
+        start = time.perf_counter()
         try:
-            elapsed = timed(lambda d=data: validate_body(d, 65536))
+            validate_body(data, 65536)
         except (BodyTextError, BodyError):
-            elapsed = 0.0
+            pass
+        elapsed = time.perf_counter() - start
         assert elapsed < 1.5, name
 
 
@@ -473,6 +482,13 @@ def test_field_is_configurable() -> None:
     with pytest.raises(BodyTextError) as info:
         validate_body(b"\x00", LIMIT, field="text")
     assert info.value.details == {"field": "text", "class": "control", "line": 1}
+
+
+def test_body_text_error_is_not_a_value_error() -> None:
+    assert not issubclass(BodyTextError, ValueError)
+    with pytest.raises(ValueError) as info:
+        validate_body(b"a", 0)
+    assert not isinstance(info.value, BodyTextError)
 
 
 def test_unknown_reason_is_a_programming_error() -> None:

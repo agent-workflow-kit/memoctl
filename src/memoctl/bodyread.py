@@ -2,7 +2,8 @@
 
 All file and descriptor access goes through the gateway. The reader returns raw bytes: the
 text rules (strict UTF-8, refused characters, whitespace-only, NFKC length) belong to the
-body validator, todo(#12). Refusals carry a fixed reason and never the path or the content.
+body validator (``memoctl.body``: ``validate_body``, ``check_text``).
+Refusals carry a fixed reason and never the path or the content.
 
 Source: a ``Path`` is a file (a file literally named ``-`` is passed as ``Path("./-")``);
 the string ``"-"`` is standard input.
