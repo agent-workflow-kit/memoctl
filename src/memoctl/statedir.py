@@ -7,12 +7,17 @@ user, no group or other permission); everything later goes through the same desc
 
 Missing parents ``.local`` and ``.local/state`` are created at 0700; existing parents are not
 checked and a symlinked parent is followed (the spec checks only the directory itself). The
-modes are set with ``fchmod`` on the opened descriptor, so the umask cannot weaken or break
-them; a directory that exists with the wrong mode is refused, never fixed. A refusal is an
-:class:`UnsafeStateError` whose message is fixed text.
+modes are set explicitly after creation (``mkdir`` then ``chmod`` by name, ``fchmod`` on the
+opened descriptor), so the umask cannot weaken or break them and is never changed; a directory
+that exists with the wrong mode is refused, never fixed. A refusal is an
+:class:`UnsafeStateError` whose message is fixed text. Only an existing final component is
+translated into a refusal; an error from creating a level (read-only file system, no
+permission on a parent, I/O error) propagates as the ``OSError`` it is.
 
 todo(#6): the CLI maps :class:`UnsafeStateError` to exit 20 ``unsafe_state`` and an ``OSError``
-from a failed creation (read-only parent, no permission on a parent) to its exit.
+from a failed creation (read-only parent, no permission on a parent, I/O error) to its exit.
+todo(#32): ``validate``'s check that the nearest existing ancestor of the state directory is
+writable and searchable is owned by #32, not done here.
 todo(#9): the store opens ``state.db`` by :attr:`StateDir.db_path` after :meth:`check_db`.
 todo(#15): ``log.jsonl`` and ``log.lock`` are opened relative to :attr:`StateDir.handle`.
 """
@@ -33,19 +38,23 @@ STATE_PARTS = (".local", "state", "memoctl")
 DB_NAME = "state.db"
 DIR_MODE = 0o700
 FILE_MODE = 0o600
+OWNER_USE = 0o500  # read and search, which opening a directory needs
 FORBIDDEN_BITS = 0o077
 ATTEMPTS = 3  # a rival may create or remove a level between our open and our mkdir
 
-# Errors that on the final component mean "there is something here we may not use"; a
-# foreign owner's 0700 directory shows up as EACCES.
-_REFUSED = {errno.ENOTDIR, errno.ELOOP, errno.EACCES, errno.EPERM, getattr(errno, "EMLINK", -1)}
+# Errors from opening an existing final component that mean "something here is not a directory
+# we may use": a symlink (ELOOP, or EMLINK on some systems) or a non-directory (ENOTDIR).
+_NOT_A_DIR = {errno.ENOTDIR, errno.ELOOP, getattr(errno, "EMLINK", -1)}
+# Permission errors on the final open: the reason is found by looking at the name.
+_DENIED = {errno.EACCES, errno.EPERM}
 
 
 class UnsafeStateError(Exception):
     """The state directory or ``state.db`` is not fit to use (exit 20 ``unsafe_state``).
 
-    ``reason`` is one of ``not_a_directory``, ``owner``, ``mode``, ``parent``, ``race``,
-    ``not_a_file``; the message never has a path or a value.
+    ``reason`` is one of ``not_a_directory`` (a symlink or other non-directory as the state
+    directory), ``owner``, ``mode``, ``parent`` (a non-directory or symlink where a parent
+    should be), ``race``, ``not_a_file`` (``state.db``); the message never has a path or a value.
     """
 
     code = "unsafe_state"
@@ -110,21 +119,47 @@ class StateDir:
         self.close()
 
 
-def _descend(
-    cur: DirHandle, name: str, *, follow: bool, create: bool
-) -> tuple[DirHandle | None, bool]:
-    """Open ``name`` under ``cur``; with ``create`` make it at 0700 when missing. Returns the
-    handle (``None`` only when missing and not creating) and whether this call created it."""
+def _open_final(cur: DirHandle, name: str, uid: int) -> DirHandle | None:
+    """Open the final component without following a symlink; a refusal becomes the reason
+    that explains it, an unexplained permission error propagates."""
+    try:
+        return cur.open_dir(name, follow=False)
+    except OSError as exc:
+        if exc.errno in _NOT_A_DIR:
+            raise UnsafeStateError("not_a_directory") from exc
+        if exc.errno not in _DENIED:
+            raise
+        info = cur.lstat(name)
+        if info is None:
+            raise
+        if info.kind != "dir":
+            raise UnsafeStateError("not_a_directory") from exc
+        if info.uid != uid:
+            raise UnsafeStateError("owner") from exc
+        if info.mode & FORBIDDEN_BITS or info.mode & OWNER_USE != OWNER_USE:
+            raise UnsafeStateError("mode") from exc
+        raise
+
+
+def _descend(cur: DirHandle, name: str, *, final: bool, create: bool, uid: int) -> DirHandle | None:
+    """Open ``name`` under ``cur`` (a parent follows a symlink, the final component does not);
+    with ``create`` make it at 0700 when missing. ``None`` only when it is missing and not
+    creating. Errors from making it propagate unchanged."""
     for _ in range(ATTEMPTS):
-        nxt = cur.open_dir(name, follow=follow)
+        nxt = _open_final(cur, name, uid) if final else cur.open_dir(name, follow=True)
         if nxt is not None:
-            return nxt, False
+            return nxt
         if not create:
-            return None, False
+            return None
         try:
             cur.make_dir(name, DIR_MODE)
         except FileExistsError:
-            continue  # a rival created it (or a dangling symlink sits there): look again
+            # A rival created it, or a dangling symlink sits there (a symlink never goes away
+            # by itself, so it is not a race).
+            info = cur.lstat(name)
+            if info is not None and info.kind == "symlink":
+                raise UnsafeStateError("not_a_directory" if final else "parent") from None
+            continue
         made = cur.open_dir(name, follow=False)
         if made is None:
             continue
@@ -133,7 +168,7 @@ def _descend(
         except BaseException:
             made.close()
             raise
-        return made, True
+        return made
     raise UnsafeStateError("race")
 
 
@@ -150,28 +185,24 @@ def open_state_dir(gateway: Gateway, *, create: bool) -> StateDir | None:
     if root is None:
         raise ConfigError("home")
     cur = root
+    uid = gateway.uid()
     opened = False
     try:
         for name in STATE_PARTS[:-1]:
             try:
-                nxt, _ = _descend(cur, name, follow=True, create=create)
+                nxt = _descend(cur, name, final=False, create=create, uid=uid)
             except NotADirectoryError as exc:
                 raise UnsafeStateError("parent") from exc
             if nxt is None:
                 return None
             cur.close()
             cur = nxt
-        try:
-            nxt, _ = _descend(cur, STATE_PARTS[-1], follow=False, create=create)
-        except OSError as exc:
-            if exc.errno in _REFUSED:
-                raise UnsafeStateError("not_a_directory") from exc
-            raise
+        nxt = _descend(cur, STATE_PARTS[-1], final=True, create=create, uid=uid)
         if nxt is None:
             return None
         cur.close()
         cur = nxt
-        _check(cur.stat(), gateway.uid(), "dir", "not_a_directory")
+        _check(cur.stat(), uid, "dir", "not_a_directory")
         result = StateDir(gateway, cur, home.joinpath(*STATE_PARTS))
         opened = True
         return result

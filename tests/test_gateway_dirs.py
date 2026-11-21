@@ -112,6 +112,38 @@ def test_mkdir_creates_with_exactly_the_mode_despite_the_umask(
     assert _mode(d / "child") == 0o700
 
 
+@pytest.mark.parametrize("mask", [0o777, 0o277, 0o077, 0])
+def test_mkdir_is_exact_0700_under_any_umask(gw_and_dir: tuple[Gateway, Path], mask: int) -> None:
+    gw, d = gw_and_dir
+    handle = gw.open_dir(d, follow=True)
+    assert handle is not None
+    old = os.umask(mask)
+    try:
+        handle.make_dir("child", 0o700)
+    finally:
+        os.umask(old)
+        handle.close()
+    assert _mode(d / "child") == 0o700
+
+
+def test_mkdir_never_touches_the_process_umask(
+    gw_and_dir: tuple[Gateway, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gw, d = gw_and_dir
+    handle = gw.open_dir(d, follow=True)
+    assert handle is not None
+
+    def boom(*_: object) -> int:
+        raise AssertionError("os.umask must not be called")
+
+    monkeypatch.setattr(os, "umask", boom)
+    try:
+        handle.make_dir("child", 0o700)
+    finally:
+        handle.close()
+    assert _mode(d / "child") == 0o700
+
+
 def test_mkdir_existing_raises_file_exists(gw_and_dir: tuple[Gateway, Path]) -> None:
     gw, d = gw_and_dir
     (d / "child").mkdir()
@@ -298,6 +330,16 @@ def test_write_bytes_replaces_a_symlink_instead_of_writing_through_it(
     assert (d / "victim").read_bytes() == b"untouched"
     assert not (d / "f").is_symlink()
     assert (d / "f").read_bytes() == b"new"
+
+
+def test_write_bytes_works_for_a_target_name_near_the_filename_limit(
+    gw_and_dir: tuple[Gateway, Path],
+) -> None:
+    gw, d = gw_and_dir
+    name = "n" * 240
+    gw.write_bytes(d / name, b"long")
+    assert (d / name).read_bytes() == b"long"
+    assert os.listdir(d) == [name]
 
 
 def test_write_bytes_does_not_create_parents(gw_and_dir: tuple[Gateway, Path]) -> None:

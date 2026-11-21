@@ -6,6 +6,7 @@ subclassed to point at a temp home, the fake covers a foreign owner.
 
 from __future__ import annotations
 
+import errno
 import os
 import pickle
 import stat
@@ -197,8 +198,9 @@ def test_a_dangling_symlink_as_a_parent_is_refused_on_create_and_missing_on_read
 ) -> None:
     (home / ".local").symlink_to(tmp_path / "nowhere")
     if create:
-        with pytest.raises(UnsafeStateError):
+        with pytest.raises(UnsafeStateError) as info:
             open_state_dir(gw, create=True)
+        assert info.value.reason == "parent"
         assert not (tmp_path / "nowhere").exists()
     else:
         assert open_state_dir(gw, create=False) is None
@@ -210,10 +212,10 @@ def test_a_foreign_owner_is_refused(tmp_path: Path) -> None:
     (h / ".local" / "state" / "memoctl").mkdir(parents=True, mode=0o700)
     (h / ".local" / "state" / "memoctl").chmod(0o700)
     fake.uid_value = os.getuid() + 1
-    with pytest.raises(UnsafeStateError):
-        open_state_dir(fake, create=False)
-    with pytest.raises(UnsafeStateError):
-        open_state_dir(fake, create=True)
+    for create in (False, True):
+        with pytest.raises(UnsafeStateError) as info:
+            open_state_dir(fake, create=create)
+        assert info.value.reason == "owner"
 
 
 def test_an_unreadable_own_dir_is_refused(gw: HomeGateway, home: Path) -> None:
@@ -222,8 +224,9 @@ def test_an_unreadable_own_dir_is_refused(gw: HomeGateway, home: Path) -> None:
     try:
         if os.access(_state(home), os.R_OK):
             pytest.skip("permissions are not enforced for this user")
-        with pytest.raises(UnsafeStateError):
+        with pytest.raises(UnsafeStateError) as info:
             open_state_dir(gw, create=False)
+        assert info.value.reason == "mode"
     finally:
         _state(home).chmod(0o700)
 
@@ -250,6 +253,94 @@ def test_the_reasons_are_a_fixed_vocabulary(gw: HomeGateway, home: Path) -> None
     with pytest.raises(UnsafeStateError) as info:
         open_state_dir(gw, create=False)
     assert info.value.reason == "not_a_directory"
+
+
+# --- creation errors keep their own mapping (R1) ----------------------------------------------
+
+
+def _unwritable(path: Path) -> bool:
+    return os.access(path, os.W_OK)
+
+
+@pytest.mark.parametrize("level", ["", ".local", ".local/state"])
+def test_a_read_only_directory_above_a_missing_level_raises_permission_error(
+    gw: HomeGateway, home: Path, level: str
+) -> None:
+    holder = home / level if level else home
+    holder.mkdir(parents=True, exist_ok=True)
+    before = sorted(p.relative_to(home).as_posix() for p in home.rglob("*"))
+    holder.chmod(0o500)
+    try:
+        if _unwritable(holder):
+            pytest.skip("permissions are not enforced for this user")
+        with pytest.raises(PermissionError):
+            open_state_dir(gw, create=True)
+        assert sorted(p.relative_to(home).as_posix() for p in home.rglob("*")) == before
+    finally:
+        holder.chmod(0o700)
+
+
+class _Failing:
+    """Wraps a handle so ``make_dir`` of one name fails with the given errno."""
+
+    def __init__(self, inner: DirHandle, name: str, err: int) -> None:
+        self._inner = inner
+        self._name = name
+        self._err = err
+
+    def make_dir(self, name: str, mode: int) -> None:
+        if name == self._name:
+            raise OSError(self._err, os.strerror(self._err))
+        self._inner.make_dir(name, mode)
+
+    def open_dir(self, name: str, *, follow: bool) -> Any:
+        sub = self._inner.open_dir(name, follow=follow)
+        return None if sub is None else _Failing(sub, self._name, self._err)
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(self._inner, attr)
+
+
+class FailingGateway(HomeGateway):
+    def __init__(self, home: Path, name: str, err: int) -> None:
+        super().__init__(home)
+        self.args = (name, err)
+
+    def open_dir(self, path: Path, *, follow: bool) -> Any:
+        handle = super().open_dir(path, follow=follow)
+        return None if handle is None else _Failing(handle, *self.args)
+
+
+@pytest.mark.parametrize("name", [".local", "state", "memoctl"])
+@pytest.mark.parametrize("err", [errno.EROFS, errno.EACCES, errno.EIO])
+def test_a_failed_mkdir_propagates_its_own_error_at_every_level(
+    home: Path, name: str, err: int
+) -> None:
+    g = FailingGateway(home, name, err)
+    with pytest.raises(OSError) as info:
+        open_state_dir(g, create=True)
+    assert info.value.errno == err
+    assert not isinstance(info.value, UnsafeStateError)
+
+
+def test_an_unexplained_eacces_on_the_final_open_propagates(home: Path) -> None:
+    class Denying(_Failing):
+        def open_dir(self, name: str, *, follow: bool) -> Any:
+            if name == "memoctl":
+                raise OSError(errno.EACCES, "denied")
+            sub = self._inner.open_dir(name, follow=follow)
+            return None if sub is None else Denying(sub, "", 0)
+
+    class G(HomeGateway):
+        def open_dir(self, path: Path, *, follow: bool) -> Any:
+            handle = super().open_dir(path, follow=follow)
+            return None if handle is None else Denying(handle, "", 0)
+
+    _state(home).mkdir(parents=True, mode=0o700)
+    with pytest.raises(OSError) as info:
+        open_state_dir(G(home), create=False)
+    assert info.value.errno == errno.EACCES
+    assert not isinstance(info.value, UnsafeStateError)
 
 
 # --- home -------------------------------------------------------------------------------------

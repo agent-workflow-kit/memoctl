@@ -9,7 +9,15 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from memoctl.gateway import DirHandle, FileRead, GatewayError, PathInfo, _info, _RealDirHandle
+from memoctl.gateway import (
+    TEMP_PREFIX,
+    DirHandle,
+    FileRead,
+    GatewayError,
+    PathInfo,
+    _info,
+    _RealDirHandle,
+)
 
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -158,8 +166,9 @@ class FakeGateway:
             return FileRead(info, handle.read(limit + 1))
 
     def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
-        # The handle works on a real descriptor inside ``root``; names relative to it are one
-        # component long, so it cannot leave ``root`` either.
+        # The path is confined to ``root`` when opened. The handle is a real descriptor and, as
+        # with the real gateway, its own ``open_dir(follow=True)`` can follow an absolute
+        # symlink out of ``root``; the fake does not prevent that.
         target = self._confined(path) if follow else self._confined_nofollow(path)
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
         if not follow:
@@ -177,7 +186,7 @@ class FakeGateway:
         if not isinstance(data, bytes):
             raise TypeError(f"write_bytes needs bytes, got {type(data).__name__}")
         target = self._confined_nofollow(path)
-        temp = target.with_name(f".{target.name}.{self._random.randbytes(8).hex()}.tmp")
+        temp = target.with_name(f"{TEMP_PREFIX}{self._random.randbytes(16).hex()}")
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
         try:
             try:

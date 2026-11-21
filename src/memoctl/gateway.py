@@ -27,7 +27,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -37,6 +36,7 @@ from typing import Protocol
 ENCODING = "utf-8"
 ERRORS = "surrogateescape"
 DEFAULT_TERMINAL_WIDTH = 80
+TEMP_PREFIX = ".tmp."
 
 
 class GatewayError(RuntimeError):
@@ -107,8 +107,9 @@ class DirHandle(Protocol):
 
     def make_dir(self, name: str, mode: int) -> None:
         """Create ``name`` (``mkdirat``; never follows a symlink). ``FileExistsError`` when
-        anything, even a dangling symlink, is there. The directory gets exactly
-        ``mode``: the umask is cleared for the call, so the mode is exact."""
+        anything, even a dangling symlink, is there. The directory gets exactly ``mode``
+        whatever the umask (``mkdirat``, then ``fchmodat`` by name; the process umask is never
+        touched)."""
         ...
 
     def set_mode(self, mode: int) -> None:
@@ -125,9 +126,6 @@ class DirHandle(Protocol):
         ...
 
     def close(self) -> None: ...
-
-
-_UMASK_LOCK = threading.Lock()
 
 
 class _RealDirHandle:
@@ -153,16 +151,12 @@ class _RealDirHandle:
         return _RealDirHandle(fd)
 
     def make_dir(self, name: str, mode: int) -> None:
-        # The umask is cleared for this one call so the directory is created with exactly
-        # ``mode``: a hostile umask (say 0o277) would otherwise leave a directory its owner
-        # cannot open. The umask is process-wide; the lock only orders our own callers, and
-        # every other file this tool creates sets its mode explicitly.
-        with _UMASK_LOCK:
-            old = os.umask(0)
-            try:
-                os.mkdir(_component(name), mode, dir_fd=self._live())
-            finally:
-                os.umask(old)
+        # mkdir applies the umask, so the mode is set again by name afterwards (not through an
+        # opened descriptor: a hostile umask such as 0o777 leaves a directory its owner cannot
+        # open yet). The process-wide umask is never changed, so no other thread is affected.
+        fd = self._live()
+        os.mkdir(_component(name), mode, dir_fd=fd)
+        os.chmod(name, mode, dir_fd=fd)
 
     def set_mode(self, mode: int) -> None:
         os.fchmod(self._live(), mode)
@@ -252,7 +246,9 @@ class Gateway(Protocol):
         """Replace ``path`` atomically with ``data`` at exactly ``mode`` (default 0600): a
         temporary file beside it is written, synced and renamed over it, so a reader sees the
         old or the new bytes, never a mix, and a symlink at ``path`` is replaced, not written
-        through. The parent is not created (``FileNotFoundError``)."""
+        through. The parent is not created (``FileNotFoundError``). A hard exit
+        (``os._exit``, SIGKILL) between creating the temporary file and the rename can leave
+        an orphan ``.tmp.<hex>`` file behind; nothing cleans it up."""
         ...
 
     def run(
@@ -424,7 +420,8 @@ class RealGateway:
             raise TypeError(f"write_bytes needs bytes, got {type(data).__name__}")
         target = Path(path)
         parent = os.fspath(target.parent)
-        temp = os.path.join(parent, f".{target.name}.{secrets.token_hex(8)}.tmp")
+        # A fixed-length name: one derived from the target would exceed NAME_MAX for a long one.
+        temp = os.path.join(parent, f"{TEMP_PREFIX}{secrets.token_hex(16)}")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
         fd = os.open(temp, flags, mode)
         try:
