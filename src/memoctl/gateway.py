@@ -23,6 +23,7 @@ import errno
 import os
 import pwd
 import secrets
+import select
 import shutil
 import stat
 import subprocess
@@ -206,14 +207,29 @@ def _run(
     )
 
 
+# Bound on the wait for a blocked output pipe, per ``_write_fd`` call (the deadline restarts on
+# each call); ``emit`` makes at most three (stdout, stderr, warnings), so the worst case is ~9 s.
+WRITE_WAIT_SECONDS = 3.0
+
+
 def _write_fd(fd: int, text: str) -> None:
     """Write ``text`` to a standard descriptor as UTF-8 with errors replaced, never through the
-    locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says."""
+    locale. On a non-blocking descriptor that is full (EAGAIN) it waits for writability, at most
+    ``WRITE_WAIT_SECONDS`` per call (the bound restarts on each call), and retries; partial
+    writes continue. Any other failure (closed descriptor, EPIPE) and the bound running out are
+    ignored, as the interface says ("a failure to write after the result was fixed is ignored")."""
     view = memoryview(text.encode(ENCODING, "replace"))
+    deadline = time.monotonic() + WRITE_WAIT_SECONDS
     try:
         while view:
-            view = view[os.write(fd, view) :]
-    except OSError:
+            try:
+                view = view[os.write(fd, view) :]
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                select.select([], [fd], [], remaining)
+    except (OSError, ValueError):
         pass
 
 
