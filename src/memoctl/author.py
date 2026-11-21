@@ -7,8 +7,9 @@ being echoed, stored, logged or printed: this module never puts a value into a m
 result that did not already pass its grammar.
 
 TODO(#16): ``add`` calls :func:`resolve_kind` at step 4 and :func:`kind_is_shown` for the
-``kind_not_shown`` warning; the secret check of the kind (exit 20, field ``kind``) is #17/#18
-and runs on the result. TODO(#6): map GrammarError to the exit 2 usage envelope.
+``kind_not_shown`` warning. TODO(#13): the secret check of the kind (exit 20 secret_detected,
+details.field kind, from --kind or the variable) runs on the resolved kind in add step 6.
+TODO(#6): map GrammarError to the exit 2 usage envelope.
 """
 
 from __future__ import annotations
@@ -94,6 +95,9 @@ def resolve_actor(gateway: Gateway, flag: str | None) -> ActorResult:
         return ActorResult(flag, ActorSource.FLAG)
     if not gateway.isatty(0):
         return ActorResult("auto:unknown", ActorSource.DEFAULT)
-    login = gateway.login_name()
+    try:
+        login = gateway.login_name()
+    except OSError:
+        login = None
     name = _LOGIN_UNSAFE.sub("_", login)[:_MAX_LOGIN_CHARS] if login else ""
     return ActorResult(f"human:{name or 'unknown'}", ActorSource.TTY)

@@ -5,7 +5,8 @@ from __future__ import annotations
 import ast
 import inspect
 import random
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from enum import IntEnum
 from fractions import Fraction
 from math import ceil
 
@@ -54,6 +55,53 @@ def test_before_epoch_refused() -> None:
 
 def test_year_9999_edge() -> None:
     assert seconds_since_epoch(datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)) == MAX_EPOCH
+
+
+def test_offset_overflow_is_clock_error() -> None:
+    late = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone(-timedelta(hours=5)))
+    early = datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=5)))
+    for moment in (late, early):
+        with pytest.raises(ClockError):
+            seconds_since_epoch(moment)
+
+
+class _NoOffset(tzinfo):
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        return None
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        return None
+
+
+def test_tzinfo_without_offset_is_clock_error() -> None:
+    with pytest.raises(ClockError):
+        seconds_since_epoch(datetime(2026, 1, 1, tzinfo=_NoOffset()))
+
+
+class _Count(int):
+    pass
+
+
+class _Kind(IntEnum):
+    ONE = 1000
+
+
+def test_int_subclasses_are_normalized() -> None:
+    result = compute_lifetime(_Kind.ONE, _Count(MAX_AGE), requested=_Count(3600))
+    assert type(result.expires) is int
+    assert result.expires == 4600
+    later = compute_lifetime(_Kind.ONE, MAX_AGE, requested=3600, target_expires=_Count(9000))
+    assert type(later.expires) is int
+    assert later.expires == 9000
+
+
+@pytest.mark.parametrize("max_age", [0, -1])
+def test_non_positive_max_age_is_value_error(max_age: int) -> None:
+    with pytest.raises(ValueError):
+        compute_lifetime(0, max_age)
 
 
 def test_non_datetime_refused() -> None:

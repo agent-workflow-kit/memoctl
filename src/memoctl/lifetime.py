@@ -63,11 +63,18 @@ class Lifetime:
 def seconds_since_epoch(moment: datetime) -> int:
     """The gateway clock reading as whole epoch seconds, floored, by timedelta division.
 
-    Raises :class:`ClockError` for a naive datetime, a non-datetime or a time before 1970.
+    Raises :class:`ClockError` for a naive datetime (including a tzinfo whose utcoffset is
+    None), a non-datetime, a time before 1970 or one whose conversion to UTC overflows.
+
+    TODO(#16): gateway.now() rounds through float; the single clock read must floor
+    time.time_ns().
     """
-    if not isinstance(moment, datetime) or moment.tzinfo is None:
+    if not isinstance(moment, datetime) or moment.utcoffset() is None:
         raise ClockError
-    seconds = (moment.astimezone(UTC) - _EPOCH) // _SECOND
+    try:
+        seconds = (moment.astimezone(UTC) - _EPOCH) // _SECOND
+    except (OverflowError, ValueError):
+        raise ClockError from None
     if seconds < 0:
         raise ClockError
     return seconds
@@ -88,7 +95,7 @@ def parse_expires(text: str) -> int:
 def _integer(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError("lifetime inputs are integers")
-    return value
+    return int(value)
 
 
 def _in_range(value: int) -> int:
@@ -110,6 +117,13 @@ def compute_lifetime(
     stored ``expires`` (omit it for a dry run). A request above ``max_age`` is cut to it
     (``capped``; equal is not capped). The result is the later of its own expiry and the
     target's (``extended`` only when the target's is strictly later).
+
+    Raises :class:`GrammarError` for a ``requested`` below the minimum and :class:`ClockError`
+    for ``now`` or the result outside 0..MAX_EPOCH; a ``target_expires`` outside that range can
+    only come from a corrupt row and is reported as :class:`ClockError`. A non-positive
+    ``max_age`` raises ValueError and non-integers raise TypeError: these are programming
+    errors, not GrammarError/ClockError, so callers (#6) must map only GrammarError and
+    ClockError.
     """
     now = _in_range(_integer(now))
     max_age = _integer(max_age)

@@ -190,6 +190,16 @@ def test_login_name_is_sanitized(gw: FakeGateway, login: str | None, expected: s
     assert resolve_actor(gw, None).actor == f"human:{expected}"
 
 
+def test_login_lookup_oserror_is_unknown(gw: FakeGateway) -> None:
+    def failing() -> str | None:
+        raise OSError("no passwd entry")
+
+    gw.terminal.tty[0] = True
+    gw.login_name = failing  # type: ignore[method-assign]
+    result = resolve_actor(gw, None)
+    assert (result.actor, result.source) == ("human:unknown", ActorSource.TTY)
+
+
 def test_flag_wins_over_terminal(gw: FakeGateway) -> None:
     gw.terminal.tty[0] = True
     assert resolve_actor(gw, "human:dash").source is ActorSource.FLAG
