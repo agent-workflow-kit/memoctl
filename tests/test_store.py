@@ -162,6 +162,21 @@ def test_reopen_is_idempotent_and_read_mode_is_read_only(state: StateDir) -> Non
         assert e.value.reason == "db_unreadable"  # SQLITE_READONLY
 
 
+def test_a_read_open_of_a_wal_store_adds_only_sidecars_and_keeps_the_file(
+    state: StateDir,
+) -> None:
+    init(state)
+    c = raw(state)
+    c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    c.close()
+    before = db(state).read_bytes()
+    with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
+        list(s.notes())
+        names = {p.name for p in state.path.iterdir()}
+        assert names <= {"state.db", "state.db-wal", "state.db-shm"}
+    assert db(state).read_bytes() == before
+
+
 def test_read_leaves_wal_sidecars_at_the_database_mode(state: StateDir) -> None:
     init(state)
     with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
@@ -197,7 +212,6 @@ def test_uninitialized_but_wal_header_is_still_empty(state: StateDir) -> None:
 
 def _fake_v2(monkeypatch: pytest.MonkeyPatch, *statements: str) -> None:
     monkeypatch.setitem(store_mod.MIGRATIONS, 2, statements)
-    monkeypatch.setitem(store_mod._OBJECTS, 2, store_mod._OBJECTS[1] | {("table", "extra")})
 
 
 def test_migrates_forward_in_one_transaction_for_writers(
@@ -292,13 +306,23 @@ def test_memo_id_with_version_zero_is_corrupt(state: StateDir) -> None:
     assert e.value.reason == "db_corrupt"
 
 
+@pytest.mark.parametrize("mode", list(Mode))
 def test_an_old_sqlite_library_is_refused_with_a_fixed_reason(
-    state: StateDir, monkeypatch: pytest.MonkeyPatch
+    state: StateDir, monkeypatch: pytest.MonkeyPatch, mode: Mode
 ) -> None:
+    init(state)
     monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 36, 9))
     with pytest.raises(StoreError) as e:
-        open_store(state, Mode.READ)
+        open_store(state, mode)
     assert e.value.reason == "db_unreadable"
+
+
+@pytest.mark.parametrize("mode", [Mode.READ, Mode.WRITE])
+def test_an_old_sqlite_library_does_not_hide_a_missing_store(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch, mode: Mode
+) -> None:
+    monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 36, 9))
+    assert open_store(state, mode) is None  # no file will be opened, so no refusal
 
 
 # --- hostile files --------------------------------------------------------------------------
@@ -490,6 +514,7 @@ def test_racing_initializers_all_succeed_once(state: StateDir, home: Path) -> No
         t.start()
     for t in threads:
         t.join(30)
+    assert not any(t.is_alive() for t in threads)
     assert errors == []
     c = raw(state)
     assert c.execute("SELECT count(*) FROM sqlite_schema WHERE name='notes'").fetchone()[0] == 1
@@ -647,7 +672,7 @@ def test_a_good_row_with_every_edge_value_passes() -> None:
     row = check_note_row(
         note_values(
             id=999_999_999_999_999_999, repo="a" + "/b" * 126, topic="a" * 64,
-            body="é\x00\n" * 3, size=65536, created=0, expires=253_402_300_799,
+            body="é\x00\n" * 3 + "a" * 65524, size=65536, created=0, expires=253_402_300_799,
             superseded_by=5,
         )
     )  # fmt: skip
@@ -678,6 +703,8 @@ def test_a_good_row_with_every_edge_value_passes() -> None:
         dict(expires=None),
         dict(size=0),
         dict(size=65537),
+        dict(size=4),  # not the body's UTF-8 length
+        dict(body="é", size=1),  # characters, not bytes
         dict(size="5"),
         dict(size=None),
         dict(repo="Example.com/a"),
@@ -743,27 +770,39 @@ def test_a_blank_database_row_is_checked_through_the_store(state: StateDir) -> N
             s.check_rows()
 
 
-def _loose_db(state: StateDir) -> sqlite3.Connection:
-    """A memoctl-looking store whose tables are not STRICT, so hostile types can be stored."""
+LOOSE_DDL = (
+    "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, repo, topic, kind, body,"
+    " body_sha256, size, created, expires, superseded_by)",
+    "CREATE INDEX notes_repo_id ON notes (repo, id)",
+    "CREATE INDEX notes_repo_topic ON notes (repo, topic)",
+    "CREATE INDEX notes_superseded_by ON notes (superseded_by)",
+    "CREATE TABLE note_labels (note_id, key, value, PRIMARY KEY (note_id, key, value))",
+    "CREATE TABLE rate (repo, at)",
+    "CREATE INDEX rate_at ON rate (at)",
+    "CREATE INDEX rate_repo_at ON rate (repo, at)",
+)
+
+
+def _loose_db(state: StateDir, monkeypatch: pytest.MonkeyPatch) -> sqlite3.Connection:
+    """A memoctl-looking store whose tables are not STRICT, so hostile types can be stored.
+    The version-1 migration is swapped for the loose DDL so the schema check accepts it."""
+    monkeypatch.setitem(
+        store_mod.MIGRATIONS,
+        1,
+        (f"PRAGMA application_id = {APPLICATION_ID}", *LOOSE_DDL),
+    )
     c = raw(state)
     c.execute(f"PRAGMA application_id = {APPLICATION_ID}")
     c.execute("PRAGMA user_version = 1")
-    c.execute(
-        "CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, repo, topic, kind, body,"
-        " body_sha256, size, created, expires, superseded_by)"
-    )
-    c.execute("CREATE INDEX notes_repo_id ON notes (repo, id)")
-    c.execute("CREATE INDEX notes_repo_topic ON notes (repo, topic)")
-    c.execute("CREATE INDEX notes_superseded_by ON notes (superseded_by)")
-    c.execute("CREATE TABLE note_labels (note_id, key, value, PRIMARY KEY (note_id, key, value))")
-    c.execute("CREATE TABLE rate (repo, at)")
-    c.execute("CREATE INDEX rate_at ON rate (at)")
-    c.execute("CREATE INDEX rate_repo_at ON rate (repo, at)")
+    for ddl in LOOSE_DDL:
+        c.execute(ddl)
     return c
 
 
-def test_hostile_values_in_a_loose_table_are_skipped_not_crashed(state: StateDir) -> None:
-    c = _loose_db(state)
+def test_hostile_values_in_a_loose_table_are_skipped_not_crashed(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = _loose_db(state, monkeypatch)
     insert(c, id=1)  # good
     insert(c, id=2, body=b"\xff\xfe blob")  # BLOB where text belongs
     insert(c, id=3, created="yesterday")
@@ -779,7 +818,7 @@ def test_hostile_values_in_a_loose_table_are_skipped_not_crashed(state: StateDir
         " ?, 1, 1, 2, NULL)",
         (SHA,),
     )
-    insert(c, id=8, body="with\x00nul")  # text with NUL is text
+    insert(c, id=8, body="with\x00nul", size=8)  # text with NUL is text
     c.close()
     with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
         got = [n.id for n in s.notes()]
@@ -787,8 +826,10 @@ def test_hostile_values_in_a_loose_table_are_skipped_not_crashed(state: StateDir
         assert s.bad_rows == 6
 
 
-def test_a_body_over_one_mebibyte_fails_the_statement_as_corrupt(state: StateDir) -> None:
-    c = _loose_db(state)
+def test_a_body_over_one_mebibyte_fails_the_statement_as_corrupt(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = _loose_db(state, monkeypatch)
     insert(c, id=1, body="x" * 2_000_000)
     c.close()
     with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
@@ -816,8 +857,10 @@ def test_labels_are_checked_and_capped(state: StateDir) -> None:
         assert [n.id for n in s.notes()] == [1, 2, 3, 4]  # without labels they are not looked at
 
 
-def test_labels_with_loose_types_fail_the_note(state: StateDir) -> None:
-    c = _loose_db(state)
+def test_labels_with_loose_types_fail_the_note(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = _loose_db(state, monkeypatch)
     insert(c, id=1)
     c.execute("INSERT INTO note_labels VALUES (1, 'k', 5)")
     c.close()
@@ -858,3 +901,270 @@ def test_quick_check_and_check_rows_on_a_good_store(state: StateDir) -> None:
     with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
         assert s.quick_check()
         s.check_rows()
+
+
+# --- review round 1 -------------------------------------------------------------------------
+
+_BUSY_CODE = sqlite3.SQLITE_BUSY
+
+
+class _BusyWalConnection(sqlite3.Connection):
+    """Answers ``journal_mode = WAL`` with BUSY ``fail_times`` times, then really runs it."""
+
+    fail_times = 0
+    wal_calls = 0
+
+    def execute(self, sql: str, *a: Any) -> sqlite3.Cursor:
+        if sql.replace(" ", "").upper() == "PRAGMAJOURNAL_MODE=WAL":
+            type(self).wal_calls += 1
+            if type(self).wal_calls <= type(self).fail_times:
+                err = sqlite3.OperationalError("database is locked")
+                err.sqlite_errorcode = _BUSY_CODE  # type: ignore[attr-defined]
+                raise err
+        return super().execute(sql, *a)
+
+
+def _busy_conn(path: Path, fail_times: int) -> sqlite3.Connection:
+    class Conn(_BusyWalConnection):
+        pass
+
+    Conn.fail_times, Conn.wal_calls = fail_times, 0
+    return sqlite3.connect(str(path), isolation_level=None, factory=Conn)
+
+
+def test_ensure_wal_retries_busy_until_it_succeeds(tmp_path: Path) -> None:
+    conn = _busy_conn(tmp_path / "x.db", store_mod.WAL_ATTEMPTS - 1)
+    store_mod._ensure_wal(conn, 500)
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 500  # restored
+    conn.close()
+
+
+def test_ensure_wal_gives_up_with_db_locked(tmp_path: Path) -> None:
+    conn = _busy_conn(tmp_path / "x.db", store_mod.WAL_ATTEMPTS)
+    with pytest.raises(sqlite3.OperationalError) as e:
+        store_mod._ensure_wal(conn, 500)
+    assert store_mod.translate(e.value).reason == "db_locked"
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 500  # restored on failure too
+    conn.close()
+
+
+def test_wal_wait_stays_within_the_documented_timeout(state: StateDir) -> None:
+    import time
+
+    init(state)
+    c = raw(state)
+    c.execute("PRAGMA journal_mode = DELETE")
+    c.close()
+    holder = raw(state)
+    holder.execute("BEGIN")
+    holder.execute("SELECT count(*) FROM notes").fetchall()  # a SHARED lock in rollback mode
+    try:
+        start = time.monotonic()
+        with pytest.raises(StoreError) as e:
+            open_store(state, Mode.WRITE, busy_timeout_ms=400)
+        elapsed = time.monotonic() - start
+        assert e.value.reason == "db_locked"
+        assert elapsed < 0.8  # the timeout once, not once per attempt
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+
+
+def test_a_read_returns_the_version_of_the_inspected_snapshot(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    init(state)
+    c = raw(state)
+    c.execute("PRAGMA user_version = 1")
+    c.close()
+    real = store_mod._inspect
+
+    def inspect_then_bump(conn: sqlite3.Connection) -> Any:
+        snap = real(conn)
+        other = raw(state)
+        other.execute("PRAGMA user_version = 9")  # a writer moves on after the snapshot
+        other.close()
+        return snap
+
+    monkeypatch.setattr(store_mod, "_inspect", inspect_then_bump)
+    with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
+        assert s.version == 1
+
+
+# schema drift (R7): each variant of the version-1 DDL is not what this version creates
+
+_DRIFT = {
+    "generated-column": ("size INTEGER NOT NULL", "size INTEGER GENERATED ALWAYS AS (5) VIRTUAL"),
+    "no-autoincrement": (" AUTOINCREMENT", ""),
+    "on-delete": ("ON DELETE CASCADE", "ON DELETE NO ACTION"),
+    "check": ("body TEXT NOT NULL,", "body TEXT NOT NULL CHECK (length(body) > 0),"),
+    "unique-index": ("CREATE INDEX notes_repo_id", "CREATE UNIQUE INDEX notes_repo_id"),
+    "not-strict": (") STRICT", ")"),
+    "body-blob": ("body TEXT NOT NULL", "body BLOB NOT NULL"),
+    "partial-index": ("ON rate (at)", "ON rate (at) WHERE at > 0"),
+}
+
+
+@pytest.mark.parametrize("mode", list(Mode))
+@pytest.mark.parametrize("variant", list(_DRIFT))
+def test_a_schema_that_differs_from_the_migration_is_db_corrupt(
+    state: StateDir, variant: str, mode: Mode
+) -> None:
+    old, new = _DRIFT[variant]
+    c = raw(state)
+    changed = False
+    for statement in store_mod.MIGRATIONS[1]:
+        edited = statement.replace(old, new)
+        changed = changed or edited != statement
+        c.execute(edited)
+    assert changed
+    c.execute("PRAGMA user_version = 1")
+    c.close()
+    with pytest.raises(StoreError) as e:
+        open_store(state, mode)
+    assert e.value.reason == "db_corrupt"
+
+
+def test_whitespace_in_the_stored_ddl_does_not_matter(state: StateDir) -> None:
+    c = raw(state)
+    for statement in store_mod.MIGRATIONS[1]:
+        c.execute(statement.replace("\n            ", "\n\t\t ").replace(", ", ",   "))
+    c.execute("PRAGMA user_version = 1")
+    c.close()
+    with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
+        assert s.version == 1
+
+
+@pytest.mark.parametrize("mode", list(Mode))
+def test_an_older_version_is_compared_with_its_own_reference(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch, mode: Mode
+) -> None:
+    init(state)
+    monkeypatch.setitem(store_mod.MIGRATIONS, 2, ("CREATE TABLE extra (a INTEGER) STRICT",))
+    if mode is Mode.READ:  # a version-1 store is still read as version 1
+        with open_store(state, mode) as s:  # type: ignore[union-attr]
+            assert s.version == 1
+    c = raw(state)
+    c.execute("CREATE INDEX stray ON rate (repo)")
+    c.close()
+    with pytest.raises(StoreError) as e:
+        open_store(state, mode)
+    assert e.value.reason == "db_corrupt"
+
+
+@pytest.mark.parametrize("seq", [10**18 - 1, 10**18, 2**63 - 1])
+@pytest.mark.parametrize("mode", list(Mode))
+def test_a_planted_sequence_at_the_top_of_the_id_range_is_db_corrupt(
+    state: StateDir, seq: int, mode: Mode
+) -> None:
+    init(state)
+    c = raw(state)
+    insert(c, id=1)
+    c.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'notes'", (seq,))
+    c.close()
+    with pytest.raises(StoreError) as e:
+        open_store(state, mode)
+    assert e.value.reason == "db_corrupt"
+
+
+def test_check_rows_finds_labels_of_no_note(state: StateDir) -> None:
+    init(state)
+    c = raw(state)  # foreign keys are off here, so the cascade does not run
+    insert(c, id=1)
+    insert(c, id=2)
+    c.execute("INSERT INTO note_labels VALUES (2, 'k', 'v')")
+    c.execute("DELETE FROM notes WHERE id = 2")
+    c.close()
+    with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
+        with pytest.raises(StoreError) as e:
+            s.check_rows()
+        assert e.value.reason == "db_corrupt"
+    with open_store(state, Mode.WRITE) as w:  # the cheap writer check passes: 2 <= seq  # type: ignore[union-attr]
+        assert w is not None
+
+
+@pytest.mark.parametrize("mode", [Mode.WRITE, Mode.INIT])
+def test_a_label_above_the_sequence_is_db_corrupt_for_writers(state: StateDir, mode: Mode) -> None:
+    init(state)
+    c = raw(state)
+    insert(c, id=1)
+    c.execute("INSERT INTO note_labels VALUES (5, 'k', 'v')")  # no note, never issued
+    c.close()
+    with pytest.raises(StoreError) as e:
+        open_store(state, mode)
+    assert e.value.reason == "db_corrupt"
+    with open_store(state, Mode.READ) as r:  # type: ignore[union-attr]
+        assert r is not None  # readers only find it through check_rows
+
+
+def test_a_label_with_no_sequence_row_is_db_corrupt_for_writers(state: StateDir) -> None:
+    init(state)
+    c = raw(state)
+    c.execute("INSERT INTO note_labels VALUES (1, 'k', 'v')")  # nothing was ever issued
+    c.close()
+    with pytest.raises(StoreError) as e:
+        open_store(state, Mode.INIT)
+    assert e.value.reason == "db_corrupt"
+
+
+# execute and where (R6, R12, R13)
+
+
+def test_where_must_be_a_plain_where_clause(state: StateDir) -> None:
+    init(state)
+    with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
+        assert list(s.notes("WHERE id = ?", (1,))) == []
+        for bad in (
+            "id = 1",
+            "WHERE id = 1; DELETE FROM notes",
+            "WHERE id = 1 -- x",
+            "WHERE id = 1 /* x */",
+            "WHERE repo = 'a'",
+            'WHERE repo = "a"',
+        ):
+            with pytest.raises(ValueError) as e:
+                list(s.notes(bad))  # type: ignore[arg-type]
+            assert str(e.value) == "where must be a plain WHERE clause"
+
+
+def test_a_python_side_error_in_our_own_sql_is_not_db_corrupt(state: StateDir) -> None:
+    init(state)
+    with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
+        with pytest.raises(sqlite3.ProgrammingError):
+            s.execute("SELECT ?", ())  # wrong number of bindings: a bug, exit 1
+
+
+class _TooBigCursor:
+    def fetchone(self) -> Any:
+        raise sqlite3.DataError("string or blob too big: secret")
+
+    fetchall = fetchone
+
+    def fetchmany(self, size: int = 1) -> Any:
+        return self.fetchone()
+
+
+class _StubConn:
+    def execute(self, sql: str, params: Any = ()) -> Any:
+        return _TooBigCursor()
+
+
+@pytest.mark.parametrize("fetch", ["fetchone", "fetchall", "fetchmany", "iterate"])
+def test_a_fetch_failure_becomes_db_corrupt(fetch: str) -> None:
+    s = store_mod.Store(_StubConn(), Mode.READ)  # type: ignore[arg-type]
+    cursor = s.execute("SELECT 1")
+    with pytest.raises(StoreError) as e:
+        list(cursor) if fetch == "iterate" else getattr(cursor, fetch)()
+    assert e.value.reason == "db_corrupt"
+    assert "secret" not in str(e.value)
+
+
+@pytest.mark.parametrize("value", ["\ud800 lone", 2**63, -(2**63) - 1])
+def test_unbindable_parameters_raise_a_fixed_value_error(state: StateDir, value: Any) -> None:
+    init(state)
+    with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
+        with pytest.raises(ValueError) as e:
+            s.execute("SELECT ?", (value,))
+        assert str(e.value) == "invalid parameter"
+        assert e.value.__suppress_context__

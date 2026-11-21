@@ -46,7 +46,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import Any, Final, LiteralString, NamedTuple
 
 from memoctl.grammar import matches
 from memoctl.statedir import StateDir, UnsafeStateError
@@ -133,6 +133,17 @@ def translate(exc: sqlite3.Error) -> StoreError:
     return StoreError(DB_CORRUPT)
 
 
+def _failure(exc: sqlite3.Error) -> BaseException:
+    """What to raise for a sqlite failure. A Python-side error that carries no result code (a
+    wrong parameter count, say) is a bug in this tool's own call, not a damaged file: it
+    propagates unchanged (exit 1) instead of becoming ``db_corrupt``."""
+    if getattr(exc, "sqlite_errorcode", None) is None and isinstance(
+        exc, (sqlite3.ProgrammingError, sqlite3.InterfaceError)
+    ):
+        return exc
+    return translate(exc)
+
+
 class Mode(Enum):
     READ = "read"
     WRITE = "write"
@@ -177,24 +188,25 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     ),
 }
 
-# Version -> every (type, name) its schema holds. A store with anything else (a trigger, a
-# view, a virtual table, an extra table or index) is not ours: db_corrupt.
-_OBJECTS: dict[int, frozenset[tuple[str, str]]] = {
-    1: frozenset(
-        {
-            ("table", "notes"),
-            ("table", "sqlite_sequence"),
-            ("index", "notes_repo_id"),
-            ("index", "notes_repo_topic"),
-            ("index", "notes_superseded_by"),
-            ("table", "note_labels"),
-            ("index", "sqlite_autoindex_note_labels_1"),
-            ("table", "rate"),
-            ("index", "rate_at"),
-            ("index", "rate_repo_at"),
-        }
-    ),
-}
+
+def _normalize(sql: object) -> object:
+    return " ".join(sql.split()) if isinstance(sql, str) else sql
+
+
+def _reference(version: int) -> frozenset[tuple[object, ...]]:
+    """What ``sqlite_schema`` holds for ``version``: ``(type, name, tbl_name, normalized sql)``
+    of every object, built by running migrations 1..version on an in-memory database, so the
+    DDL is written once. Anything in a store that differs (a column, a constraint, an index,
+    STRICT, an extra object) is not what this version creates: ``db_corrupt``."""
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    try:
+        for target in range(1, version + 1):
+            for statement in MIGRATIONS[target]:
+                conn.execute(statement)
+        rows = conn.execute("SELECT type, name, tbl_name, sql FROM sqlite_schema").fetchall()
+    finally:
+        conn.close()
+    return frozenset((t, n, tb, _normalize(q)) for t, n, tb, q in rows)
 
 
 def supported_version() -> int:
@@ -242,7 +254,9 @@ class NoteRow:
     labels: tuple[tuple[str, str], ...] = ()
 
 
-NOTE_COLUMNS = "id, repo, topic, kind, body, body_sha256, size, created, expires, superseded_by"
+NOTE_COLUMNS: Final = (
+    "id, repo, topic, kind, body, body_sha256, size, created, expires, superseded_by"
+)
 _HEX64 = frozenset("0123456789abcdef")
 
 
@@ -253,27 +267,38 @@ def check_label_row(key: object, value: object) -> tuple[str, str] | None:
     return None
 
 
+def _as_int(value: object, low: int, high: int) -> int | None:
+    """``value`` when it is an ``int`` (not a ``bool``) within ``low`` to ``high``."""
+    if type(value) is int and low <= value <= high:
+        return value
+    return None
+
+
 def check_note_row(values: Sequence[object]) -> NoteRow | None:
     """The row as a :class:`NoteRow`, or ``None`` when any column fails its rule.
 
     Beyond the interface's list (integers, grammars, text), the bounds of the output schemas
     apply, so nothing a command prints can be invalid: timestamps through year 9999, ``size``
-    1 to 65536, a body of 1 to 65536 UTF-8 bytes, a repo of at most 255 characters and a
-    64-character lowercase hex ``body_sha256``. A ``bool``, a float, a blob or a text that is
-    not valid UTF-8 where an integer or text belongs fails. The hash is not recomputed.
+    1 to 65536 and equal to the body's UTF-8 length, a body of 1 to 65536 UTF-8 bytes, a repo
+    of at most 255 characters and a 64-character lowercase hex ``body_sha256``. A ``bool``, a
+    float, a blob or a text that is not valid UTF-8 where an integer or text belongs fails. The
+    hash is not recomputed.
     """
     if len(values) != 10:
         return None
     id_, repo, topic, kind, body, sha, size, created, expires, superseded = values
-    if not _is_int(id_, 1, MAX_ID):
+    note_id = _as_int(id_, 1, MAX_ID)
+    created_at = _as_int(created, 0, MAX_TIMESTAMP)
+    expires_at = _as_int(expires, 0, MAX_TIMESTAMP)
+    size_bytes = _as_int(size, 1, MAX_SIZE)
+    if note_id is None or created_at is None or expires_at is None or size_bytes is None:
         return None
-    if superseded is not None and not _is_int(superseded, 1, MAX_ID):
-        return None
-    if not (_is_int(created, 0, MAX_TIMESTAMP) and _is_int(expires, 0, MAX_TIMESTAMP)):
-        return None
-    if not _is_int(size, 1, MAX_SIZE):
-        return None
-    if not (type(repo) is str and type(topic) is str and type(kind) is str):
+    by = None
+    if superseded is not None:
+        by = _as_int(superseded, 1, MAX_ID)
+        if by is None:
+            return None
+    if type(repo) is not str or type(topic) is not str or type(kind) is not str:
         return None
     if type(body) is not str or type(sha) is not str:
         return None
@@ -281,12 +306,68 @@ def check_note_row(values: Sequence[object]) -> NoteRow | None:
         return None
     if not (matches("repo", repo) and matches("topic", topic) and matches("kind", kind)):
         return None
-    if not 1 <= len(body) <= MAX_BODY_BYTES or len(body.encode("utf-8")) > MAX_BODY_BYTES:
+    if not 1 <= len(body) <= MAX_BODY_BYTES:
         return None
-    return NoteRow(id_, repo, topic, kind, body, sha, size, created, expires, superseded)  # type: ignore[arg-type]
+    if len(body.encode("utf-8")) != size_bytes:  # also bounds the body to MAX_BODY_BYTES
+        return None
+    return NoteRow(note_id, repo, topic, kind, body, sha, size_bytes, created_at, expires_at, by)
 
 
 # --- the connection -------------------------------------------------------------------------
+
+
+class Cursor:
+    """A result cursor whose fetches translate sqlite failures (a raw ``DataError`` for a
+    value too big to hand to Python would otherwise carry sqlite's text out of the module)."""
+
+    __slots__ = ("_cursor",)
+
+    def __init__(self, cursor: sqlite3.Cursor) -> None:
+        self._cursor = cursor
+
+    def fetchone(self) -> Any:
+        try:
+            return self._cursor.fetchone()
+        except sqlite3.Error as exc:
+            raise _failure(exc) from None
+
+    def fetchall(self) -> list[Any]:
+        try:
+            return self._cursor.fetchall()
+        except sqlite3.Error as exc:
+            raise _failure(exc) from None
+
+    def fetchmany(self, size: int = 1) -> list[Any]:
+        try:
+            return self._cursor.fetchmany(size)
+        except sqlite3.Error as exc:
+            raise _failure(exc) from None
+
+    def __iter__(self) -> Cursor:
+        return self
+
+    def __next__(self) -> Any:
+        row = self.fetchone()
+        if row is None:
+            raise StopIteration
+        return row
+
+    @property
+    def rowcount(self) -> int:
+        return self._cursor.rowcount
+
+    @property
+    def lastrowid(self) -> int | None:
+        return self._cursor.lastrowid
+
+    def close(self) -> None:
+        try:
+            self._cursor.close()
+        except sqlite3.Error:
+            pass
+
+
+_UNSAFE_FRAGMENT = (";", "--", "/*", "'", '"')
 
 
 class Store:
@@ -326,14 +407,19 @@ class Store:
             self._conn.set_progress_handler(lambda: 1 if handler() else 0, PROGRESS_STEPS)
 
     # -- statements
-    def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
+    def execute(self, sql: LiteralString, params: Sequence[Any] = ()) -> Cursor:
         """Run one statement; a sqlite failure becomes :class:`StoreError`. ``sql`` is code,
-        never input: values go in ``params``. TEXT comes back as ``str`` (or the undecodable
-        marker), so rows read this way go through :func:`check_note_row`."""
+        never input (the type is ``LiteralString``): values go in ``params``, and a value
+        sqlite cannot bind raises ``ValueError("invalid parameter")`` without the value. TEXT
+        comes back as ``str`` (or the undecodable marker), so rows read this way go through
+        :func:`check_note_row`."""
         try:
-            return self._conn.execute(sql, params)
+            return Cursor(self._conn.execute(sql, params))
         except sqlite3.Error as exc:
-            raise translate(exc) from None
+            raise _failure(exc) from None
+        except (UnicodeEncodeError, OverflowError):
+            # a lone surrogate, or an integer beyond 64 bits; both messages echo the value
+            raise ValueError("invalid parameter") from None
 
     @contextmanager
     def write(self) -> Iterator[None]:
@@ -351,7 +437,7 @@ class Store:
             yield
 
     @contextmanager
-    def _transaction(self, begin: str) -> Iterator[None]:
+    def _transaction(self, begin: LiteralString) -> Iterator[None]:
         if self._conn.in_transaction:
             raise RuntimeError("transaction already open")
         self.execute(begin)
@@ -366,13 +452,13 @@ class Store:
                 except sqlite3.Error:
                     pass
             if isinstance(exc, sqlite3.Error):
-                raise translate(exc) from None
+                raise _failure(exc) from None
             raise
 
     # -- rows
     def notes(
         self,
-        where: str = "",
+        where: LiteralString = "",
         params: Sequence[Any] = (),
         *,
         labels: bool = False,
@@ -381,8 +467,10 @@ class Store:
         """The ``notes`` rows (ordered by id) that pass the row checks.
 
         ``where`` is a fixed SQL fragment such as ``"WHERE repo = ?"`` (never input; values go
-        in ``params``). With ``labels`` each row's labels are read and checked too (a note with
-        more than 8 labels or a bad one fails). A failing row is skipped and counted in
+        in ``params``; the type is ``LiteralString`` and a fragment that does not start with
+        ``WHERE `` or holds ``;``, ``--``, ``/*`` or a quote raises ``ValueError``). With
+        ``labels`` each row's labels are read and checked too (a note with more than 8 labels
+        or a bad one fails). A failing row is skipped and counted in
         :attr:`bad_rows` (``on_bad="skip"``, for ``context``, ``list`` and ``search``) or
         raises ``StoreError("db_corrupt")`` (``on_bad="raise"``, for ``show`` and
         ``validate``). A value over the 1 MiB length limit fails the statement:
@@ -390,6 +478,8 @@ class Store:
         """
         if on_bad not in ("skip", "raise"):
             raise ValueError("on_bad must be skip or raise")
+        if where and (not where.startswith("WHERE ") or any(t in where for t in _UNSAFE_FRAGMENT)):
+            raise ValueError("where must be a plain WHERE clause")
         cursor = self.execute(f"SELECT {NOTE_COLUMNS} FROM notes {where} ORDER BY id", params)
         try:
             for raw in self._rows(cursor):
@@ -407,12 +497,9 @@ class Store:
             cursor.close()
 
     @staticmethod
-    def _rows(cursor: sqlite3.Cursor) -> Iterator[tuple[Any, ...]]:
+    def _rows(cursor: Cursor) -> Iterator[tuple[Any, ...]]:
         while True:
-            try:
-                raw = cursor.fetchone()
-            except sqlite3.Error as exc:
-                raise translate(exc) from None
+            raw = cursor.fetchone()
             if raw is None:
                 return
             yield raw
@@ -431,10 +518,17 @@ class Store:
         return None if len(out) > MAX_LABELS else tuple(out)
 
     def check_rows(self) -> None:
-        """Run every row check over every note and label (``validate``); raises
+        """Run every row check over every note and label, and look for labels of no note
+        (``validate``); raises
         ``StoreError("db_corrupt")`` for the first failure."""
         for _ in self.notes(labels=True, on_bad="raise"):
             pass
+        orphan = self.execute(
+            "SELECT 1 FROM note_labels l"
+            " WHERE NOT EXISTS (SELECT 1 FROM notes n WHERE n.id = l.note_id) LIMIT 1"
+        ).fetchone()
+        if orphan is not None:  # a label of no note: a new note could inherit it
+            raise StoreError(DB_CORRUPT)
 
     def quick_check(self) -> bool:
         """``PRAGMA quick_check``: true when SQLite finds the file consistent."""
@@ -485,10 +579,20 @@ def _configure(conn: sqlite3.Connection, busy_ms: int) -> None:
     _set_pragma(conn, "busy_timeout", str(busy_ms), busy_ms)
 
 
-def _inspect(conn: sqlite3.Connection) -> tuple[int, int, set[object]]:
-    """``(application_id, user_version, schema objects)`` read in one snapshot (a migration
-    committing between separate reads would otherwise show a half-set identity). The first
-    query reads the file, so a file that is not a database fails here (``db_corrupt``)."""
+class _Snapshot(NamedTuple):
+    app: int
+    version: int
+    schema: frozenset[tuple[object, ...]]  # (type, name, tbl_name, normalized sql)
+    sequences: tuple[object, ...]  # sqlite_sequence.seq of "notes" (empty: no such row)
+
+
+def _inspect(conn: sqlite3.Connection) -> _Snapshot:
+    """The identity, schema and id sequence read in one snapshot (a migration committing
+    between separate reads would otherwise show a half-set identity). The first query reads the
+    file, so a file that is not a database fails here (``db_corrupt``).
+
+    todo(#10): bound the schema parse (the first read parses sqlite_schema before any handler
+    fires; consider a file-size or page_count cap)."""
     own = not conn.in_transaction
     if own:
         conn.execute("BEGIN")
@@ -496,40 +600,65 @@ def _inspect(conn: sqlite3.Connection) -> tuple[int, int, set[object]]:
         app = _pragma_int(conn, "application_id")
         version = _pragma_int(conn, "user_version")
         rows = conn.execute(
-            "SELECT type, name FROM sqlite_schema LIMIT ?", (MAX_SCHEMA_OBJECTS + 1,)
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema LIMIT ?", (MAX_SCHEMA_OBJECTS + 1,)
         ).fetchall()
+        sequences: tuple[object, ...] = ()
+        has_sequence = any(r[0] == "table" and r[1] == "sqlite_sequence" for r in rows)
+        if app == APPLICATION_ID and has_sequence:
+            found = conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'notes' LIMIT 8"
+            ).fetchall()
+            sequences = tuple(r[0] for r in found)
     finally:
         if own and conn.in_transaction:
             conn.execute("ROLLBACK")
     if len(rows) > MAX_SCHEMA_OBJECTS:
         raise StoreError(DB_CORRUPT)
-    return app, version, {(t, n) for t, n in rows}
+    schema = frozenset((t, n, tb, _normalize(q)) for t, n, tb, q in rows)
+    return _Snapshot(app, version, schema, sequences)
 
 
 EMPTY, OLD, CURRENT = "empty", "old", "current"
 
 
-def _classify(app: int, version: int, objects: set[object]) -> str:
+def _classify(snap: _Snapshot) -> str:
     """The state of what was found, or the refusal. Uninitialized is exactly application_id 0,
     user_version 0 and nothing in the schema; any other ``application_id`` than ``memo`` is not
     ours (a foreign database, or application_id 0 with objects) and is refused before the
-    version is looked at."""
+    version is looked at. The schema must equal what that version's migrations create."""
     latest = supported_version()
-    if app == 0 and version == 0 and not objects:
+    if snap.app == 0 and snap.version == 0 and not snap.schema:
         return EMPTY
-    if app != APPLICATION_ID:
+    if snap.app != APPLICATION_ID:
         raise StoreError(DB_CORRUPT)
-    if version > latest:
-        raise SchemaNewerError(version, latest)
-    if version < 1 or objects != _OBJECTS.get(version):
+    if snap.version > latest:
+        raise SchemaNewerError(snap.version, latest)
+    if snap.version < 1 or snap.version not in MIGRATIONS:
         raise StoreError(DB_CORRUPT)
-    return CURRENT if version == latest else OLD
+    if snap.schema != _reference(snap.version):
+        raise StoreError(DB_CORRUPT)
+    # a planted sequence at the top of the id range would make ``add`` write an id the output
+    # cannot hold, or fail for good
+    if any(type(q) is not int or q >= MAX_ID for q in snap.sequences):
+        raise StoreError(DB_CORRUPT)
+    return CURRENT if snap.version == latest else OLD
+
+
+def _check_labels_against_sequence(conn: sqlite3.Connection) -> None:
+    """No label may name a note id the sequence has not issued: otherwise the next note would
+    inherit planted labels. ``note_id > seq``, or any label when there is no sequence row."""
+    seq = _scalar(conn, "SELECT max(seq) FROM sqlite_sequence WHERE name = 'notes'")
+    top = _scalar(conn, "SELECT max(note_id) FROM note_labels")
+    if top is None:
+        return
+    if type(seq) is not int or type(top) is not int or top > seq:
+        raise StoreError(DB_CORRUPT)
 
 
 WAL_ATTEMPTS = 5
 
 
-def _ensure_wal(conn: sqlite3.Connection) -> None:
+def _ensure_wal(conn: sqlite3.Connection, busy_ms: int) -> None:
     """Switch to WAL (before the migration transaction). A mount that cannot hold it leaves
     another mode, or an error: both refuse with ``db_unreadable`` (interface.md does not allow
     a silent fallback to a rollback journal; ``validate`` warns about such mounts).
@@ -537,20 +666,25 @@ def _ensure_wal(conn: sqlite3.Connection) -> None:
     Changing the journal mode needs a lock that the busy timeout does not always wait for, so
     several first writers can see ``database is locked`` at once. A busy answer is retried
     (a mode another process already set is accepted); between attempts a ``BEGIN IMMEDIATE``
-    waits out the other writer with the busy timeout. Still busy after the attempts: the
-    ``db_locked`` the caller maps."""
-    for attempt in range(WAL_ATTEMPTS):
-        try:
-            mode = _scalar(conn, "PRAGMA journal_mode = WAL")
-        except sqlite3.OperationalError as exc:
-            if translate(exc).reason != DB_LOCKED or attempt == WAL_ATTEMPTS - 1:
-                raise
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("ROLLBACK")
-            continue
-        if mode != "wal":
-            raise StoreError(DB_UNREADABLE)
-        return
+    waits out the other writer. Each wait uses ``busy_ms // WAL_ATTEMPTS`` so the total stays
+    within the documented timeout. Still busy after the attempts: the ``db_locked`` the caller
+    maps."""
+    conn.execute(f"PRAGMA busy_timeout = {max(busy_ms // WAL_ATTEMPTS, 1)}")
+    try:
+        for attempt in range(WAL_ATTEMPTS):
+            try:
+                mode = _scalar(conn, "PRAGMA journal_mode = WAL")
+            except sqlite3.OperationalError as exc:
+                if translate(exc).reason != DB_LOCKED or attempt == WAL_ATTEMPTS - 1:
+                    raise
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("ROLLBACK")
+                continue
+            if mode != "wal":
+                raise StoreError(DB_UNREADABLE)
+            return
+    finally:
+        conn.execute(f"PRAGMA busy_timeout = {busy_ms}")
 
 
 def _migrate(conn: sqlite3.Connection) -> int:
@@ -558,14 +692,14 @@ def _migrate(conn: sqlite3.Connection) -> int:
     under the lock because another process may have migrated since. Returns the version."""
     conn.execute("BEGIN IMMEDIATE")
     try:
-        state = _classify(*_inspect(conn))
+        state = _classify(_inspect(conn))
         version = _pragma_int(conn, "user_version")
         if state != CURRENT:
             for target in range(version + 1, supported_version() + 1):
                 for statement in MIGRATIONS[target]:
                     conn.execute(statement)
                 conn.execute(f"PRAGMA user_version = {target}")
-            _classify(*_inspect(conn))  # what we built is what we expect
+            _classify(_inspect(conn))  # what we built is what we expect
             version = supported_version()
         conn.execute("COMMIT")
         return version
@@ -602,11 +736,12 @@ def open_store(
     ``configure`` is called with the :class:`Store` before the first read of the file (the
     deadline installs its progress handler there). ``connect`` is for tests.
     """
-    if sqlite3.sqlite_version_info < MIN_SQLITE:
-        raise StoreError(DB_UNREADABLE)  # fixed message; the minimum is in the interface
-    if not state.check_db():
-        if mode is not Mode.INIT:
-            return None
+    exists = state.check_db()
+    if not exists and mode is not Mode.INIT:
+        return None
+    if sqlite3.sqlite_version_info < MIN_SQLITE:  # only when a database file will be opened
+        raise StoreError(DB_UNREADABLE)
+    if not exists:
         state.create_db()  # False: another process created it first, which is fine
         if not state.check_db():
             raise UnsafeStateError("race")  # created, then gone again
@@ -618,25 +753,28 @@ def open_store(
     try:
         conn = connect(uri, busy_ms)
     except sqlite3.Error as exc:
-        raise translate(exc) from None
+        raise _failure(exc) from None
     store = Store(conn, mode)
     try:
         _configure(conn, busy_ms)
         if configure is not None:
             configure(store)
-        found = _classify(*_inspect(conn))
+        snap = _inspect(conn)
+        found = _classify(snap)
         if found == EMPTY and mode is not Mode.INIT:
             store.close()
             return None
         if mode is Mode.READ:
-            store.version = _pragma_int(conn, "user_version")
+            store.version = snap.version  # the snapshot the checks ran on
             return store
-        _ensure_wal(conn)
+        _ensure_wal(conn, busy_ms)
+        if found != EMPTY:
+            _check_labels_against_sequence(conn)
         store.version = _migrate(conn) if found != CURRENT else supported_version()
         return store
     except sqlite3.Error as exc:
         store.close()
-        raise translate(exc) from None
+        raise _failure(exc) from None
     except BaseException:
         store.close()
         raise
