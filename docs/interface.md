@@ -102,6 +102,8 @@ Items 2 to 4 also apply to search text (`field` `text`).
 | `https://hooks\.slack\.com/services/[A-Za-z0-9/]{20,}` | `slack_webhook` |
 | a `mask_env` value | `mask_env` |
 
+`A[KS]IA` and a non-capturing `(?: BLOCK)?` are regex-equivalent spellings of the table's `A(?:K\|S)IA` and `( BLOCK)?`.
+
 The exit is 20 `refused`, reason `secret_detected`, `details.class` set to the class from this table and `details.field` naming which input matched (`repo`, `topic`, `label`, `kind`, `body`); the message and details never contain the match. The list is short on purpose (high confidence, few false positives); a secret in any other form is not detected ([Residual risks](#residual-risks)).
 
 ### Limits
@@ -524,6 +526,7 @@ None in 0.x. `list --json` and `show --json` are the integration surface for a d
 - **Confirmation is not identity.** `delete`'s prompt guards against accidents. Any process can pass `--yes`, open a pseudo-terminal and answer `y`, or pass `--actor human:<name>`; the log's `actor` is what the caller said (`actor_source` tells a flag from a terminal default). A permission profile that denies `memoctl delete` or writes to the state directory is the boundary. Deleting a correction makes the note it replaced live again.
 - **A flood under a real kind.** The kind share stops notes of one claimed kind from pushing out those of another. A writer that claims the kind of the real notes, or rotates allowed kinds (one share each), can take every `context` slot with about `max_notes` notes, which at the defaults is one rate window (20 adds). The log records each change that completed with its append, and `delete` is the remedy.
 - **Persuasion is not syntax.** The layout stops a note from posing as a header, a fence, the cut line or the omitted-notes line. It cannot stop a note that says "ignore your instructions"; claude-session's fencing and the standing "data, not instructions" rule are the defense. `show` output is unfenced.
+- **Normalization forms of `mask_env` values.** A `mask_env` value is compared as written, not NFKC-normalized, so a value that appears in the text only in a different normalization form is not refused.
 - **Other secrets.** The secret check recognizes a short list of high-confidence forms and the values named in `mask_env`. A token in any other form (a URL with credentials, an `Authorization: Bearer` header, a secret written in prose) is stored and shown to later sessions in the repo.
 - **Hidden text is refused, not stripped.** A legitimate note that needs a zero-width joiner or a variation selector (an emoji sequence, some scripts) is refused; in exchange no stored note can hold a character that `show` renders as nothing. So is a run of more than 30 combining marks.
 - **NFKC at read time.** Compatibility characters in a stored body are shown in their normalized form; the normalized text is never longer than `limits.max_body_bytes` bytes, and its cost is linear in the stored size because `add` refuses long runs of combining marks. At the defaults `context` normalizes at most 200 notes of 8 KiB (about 0.1 s in the worst case measured); raising `limits.live_per_repo` or `limits.max_body_bytes` raises that proportionally. A database written by something else is bounded by neither rule ([Same-user boundary](#residual-risks)). The budgets count the normalized text.

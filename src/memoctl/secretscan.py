@@ -9,19 +9,27 @@ patterns run in table order, then the ``mask_env`` values. The first match raise
 value of a variable, never the text.
 
 Linear time: every pattern starts with a literal prefix, has no nested quantifier and no
-alternation of overlapping branches, and each repeated class is followed by something that
-cannot be matched inside the class, so a search never backtracks over a position twice. The
-JWT pattern only starts after a non-token character, so one run of token characters is
-scanned once. ``mask_env`` values are compared with ``in`` (a linear substring search). There
-is no ``re.IGNORECASE`` and no logging, printing or warning in this module.
+alternation of overlapping branches. Each repeated class run is bounded by a character that
+is not in the class (for example ``-`` after the ``[A-Z ]*`` of the private key header) and
+no two match starts share a run, so a search never backtracks over a position twice. The JWT
+pattern only starts after a non-token character, so one run of token characters is scanned
+once. ``mask_env`` values are compared with ``in`` (a linear substring search). There is no
+``re.IGNORECASE`` and no logging, printing or warning in this module.
+
+Precondition for EVERY field (repo, topic, each label, kind, body): the text has already
+passed its grammar and length bounds and the combining-mark run bound of body validation
+(#12), because NFKC is unbounded in the input size (a topic of millions of U+FDFA takes
+seconds). This module does not bound any input; todo(#16): the ``add`` step order must run
+those checks on every field before calling :func:`check_secrets`.
 
 A ``mask_env`` value is compared as written (a code-point substring) against both forms of
 the text. A variable that is unset, empty or shorter than :data:`MIN_VALUE_LENGTH` code
 points is skipped; values are read through the gateway only.
 
-Traceback frames of the check hold the text, so callers must never render tracebacks with
-locals. todo(#16): the ``add`` step order calls this after body validation (a secret split
-by a zero-width or control character is refused there first). todo(#6): the CLI maps
+The frame that raises holds only the class and the field; env values live in a frame that
+has returned. Traceback frames of the callers hold the text, so callers must never render
+tracebacks with locals. todo(#16): the ``add`` step order calls this after body validation
+(a secret split by a zero-width or control character is refused there first). todo(#6): the CLI maps
 :class:`SecretDetected` to exit 20 ``refused``, reason ``secret_detected``, ``details``.
 """
 
@@ -124,6 +132,24 @@ def _find(text: str, values: Sequence[str]) -> str | None:
     return None if normalized == text else _scan(normalized, values)
 
 
+def _locate(
+    gateway: Gateway,
+    mask_env: Sequence[str],
+    inputs: Sequence[tuple[str, str]],
+) -> tuple[str, str] | None:
+    """The (class, field) of the first match, or None. Env values stay in this frame."""
+    values = _masked_values(gateway, mask_env)
+    for field, text in inputs:
+        cls = _find(text, values)
+        if cls is not None:
+            return cls, field
+    return None
+
+
+def _refuse(cls: str, field: str) -> None:
+    raise SecretDetected(cls, field)
+
+
 def check_secrets(
     gateway: Gateway,
     mask_env: Sequence[str],
@@ -136,13 +162,11 @@ def check_secrets(
 ) -> None:
     """Raise :class:`SecretDetected` when any input holds a secret; return None otherwise.
 
-    ``body`` must already have passed :func:`memoctl.body.validate_body`: this function does
-    not bound its size. ``mask_env`` holds the variable names of the effective config.
+    Every input must already be bounded (see the module docstring); ``mask_env`` holds the
+    variable names of the effective config.
     """
-    values = _masked_values(gateway, mask_env)
     inputs = [("repo", repo), ("topic", topic), *(("label", s) for s in labels)]
     inputs += [("kind", kind), ("body", body)]
-    for field, text in inputs:
-        cls = _find(text, values)
-        if cls is not None:
-            raise SecretDetected(cls, field)
+    found = _locate(gateway, mask_env, inputs)
+    if found is not None:
+        _refuse(*found)

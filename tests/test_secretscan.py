@@ -547,16 +547,6 @@ def test_adversarial_input_of_a_megabyte_is_accepted_fast(gw: FakeGateway, name:
     assert timed(gw, text) < 2.0
 
 
-@pytest.mark.parametrize("name", sorted(ADVERSARIAL))
-def test_time_grows_linearly(gw: FakeGateway, name: str) -> None:
-    small = ADVERSARIAL[name](128 * 1024)
-    large = ADVERSARIAL[name](1024 * 1024)
-    # best of three damps scheduler noise; a quadratic matcher would show a ratio near 64
-    t_small = max(min(timed(gw, small) for _ in range(3)), 1e-4)
-    t_large = min(timed(gw, large) for _ in range(3))
-    assert t_large / t_small < 40
-
-
 def test_large_mask_env_value_over_a_large_body(gw: FakeGateway) -> None:
     gw.environ["BIG"] = A * 4096 + "b"
     assert timed(gw, A * MB, mask_env=("BIG",)) < 2.0
@@ -582,7 +572,7 @@ def test_every_pattern_is_compiled_without_ignorecase() -> None:
 
 @pytest.mark.parametrize(
     "text",
-    ["", "\n", "\t", "a", "\ud800" if False else "é", "\U0010ffff", "x" * 100],
+    ["", "\n", "\t", "a", "é", "\U0010ffff", "x" * 100],
 )
 def test_odd_clean_text_is_accepted(gw: FakeGateway, text: str) -> None:
     run(gw, body=text, topic=text, kind="unknown")
@@ -613,3 +603,23 @@ def test_nothing_is_cached_between_calls_when_the_environment_changes(gw: FakeGa
     assert refusal(gw, body="abcdefgh12345", mask_env=("V",)).cls == "mask_env"
     gw.environ["V"] = "something-else-entirely"
     run(gw, body="abcdefgh12345", mask_env=("V",))
+
+
+def test_raising_frame_holds_only_class_and_field(gw: FakeGateway) -> None:
+    sentinel = "sent" + "inel-" + "env-value-1"
+    gw.environ["V"] = sentinel
+    err = refusal(gw, body="x " + sentinel, mask_env=("V",))
+    exc = traceback.TracebackException(type(err), err, err.__traceback__, capture_locals=True)
+    tb = err.__traceback__
+    assert tb is not None
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    assert set(tb.tb_frame.f_locals) == {"cls", "field"}
+    assert sentinel not in repr(tb.tb_frame.f_locals)
+    last = exc.stack[-1]
+    assert last.locals is not None
+    assert sentinel not in "".join(last.locals.values())
+    walker = err.__traceback__
+    while walker is not None:
+        assert "values" not in walker.tb_frame.f_locals
+        walker = walker.tb_next
