@@ -9,10 +9,13 @@ that are not control, format, private-use, unassigned, surrogate, line or paragr
 or default-ignorable (the set [Body rules] item 3 refuses, judged by ``unicodedata`` of the
 running interpreter, plus surrogates, which a ``str`` can hold but UTF-8 cannot).
 
-The escape works one code point at a time, so it is linear, it never splits an escape, and
+:func:`escape` works one code point at a time, so it is linear, it never splits an escape, and
 ``escape(a) + escape(b) == escape(a + b)``: text that is harmless in pieces cannot become
-dangerous once joined or cut. The output of :func:`escape` and :func:`escape_field` contains
-only safe characters, so applying either again changes nothing.
+dangerous once joined or cut. :func:`escape_field` additionally escapes spaces that could pass
+for the two-space column separator (see there), which depends on the neighbours, so only the
+safety of its pieces carries over, not the equation. The output of both contains only safe
+characters, so applying either again changes nothing. The output is lossy by design: a literal
+``\\u{001B}`` in a note looks like an escaped ESC.
 
 Public API (everything returns text; nothing here prints, :func:`emit` writes through the
 gateway). Record arguments are the mappings of the ``--json`` schemas, so a command passes the
@@ -21,8 +24,9 @@ same dict to both forms:
 - :func:`escape` and :func:`escape_field`: the escape for multi-line text and for one field.
 - :func:`format_list` (``list`` and ``search``), :func:`format_show`, :func:`format_add`,
   :func:`format_delete`, :func:`format_prune`, :func:`format_validate`, :func:`format_cron`:
-  each returns a :class:`Rendered` (stdout text, stderr text).
-- :func:`emit`: writes a :class:`Rendered` through the gateway, stdout first.
+  each returns a :class:`Rendered` (stdout text, stderr text, warning text).
+- :func:`emit`: writes a :class:`Rendered` through the gateway: stdout, then stderr, then the
+  warnings.
 
 Deliberately absent: width handling, truncation, color and tty detection. interface.md defines
 none for human output (the text is the same whether or not stdout is a terminal, lines are
@@ -88,44 +92,67 @@ def escape(text: str) -> str:
     return _NOT_PLAIN.sub(_body_repl, text)
 
 
+_SPACE_RUN = re.compile(r" {2,}|^ | $")
+
+
 def escape_field(text: str) -> str:
     """Escape text printed inside one line (a topic, a label, a column).
 
     As :func:`escape`, but LF and tab are escaped too (``\\u{000A}``, ``\\u{0009}``): a value
-    that holds a line break must not start a fake line, and a tab or four spaces must not pass
-    for the two-space column separator. Only a database written by something else can hold
-    either, because the grammars exclude them."""
-    return _NOT_PLAIN.sub(_field_repl, text)
+    that holds a line break must not start a fake line, and a tab must not pass for the
+    two-space column separator. For the same reason every space that is part of a run of two or
+    more, and every leading or trailing space, is shown as ``\\u{0020}``; single inner spaces
+    stay. Only a database written by something else can hold any of these, because the grammars
+    exclude them."""
+    escaped = _NOT_PLAIN.sub(_field_repl, text)
+    return _SPACE_RUN.sub(lambda m: "\\u{0020}" * len(m.group()), escaped)
 
 
 class Rendered(NamedTuple):
-    """The text a command prints: ``out`` on stdout, ``err`` on stderr (each empty or ending
-    in LF)."""
+    """The text a command prints, each part empty or ending in LF: ``out`` on stdout, ``err``
+    on stderr (notices that ``--quiet`` suppresses) and ``warnings`` on stderr too (lines that
+    ``--quiet`` must not suppress, such as the busy warning of ``prune``)."""
 
     out: str = ""
     err: str = ""
+    warnings: str = ""
 
 
 def emit(gateway: Gateway, rendered: Rendered) -> None:
-    """Write ``rendered`` through the gateway, stdout first. Nothing else prints."""
+    """Write ``rendered`` through the gateway: stdout, then err, then warnings. Nothing else
+    prints."""
     if rendered.out:
         gateway.write_out(rendered.out)
     if rendered.err:
         gateway.write_err(rendered.err)
+    if rendered.warnings:
+        gateway.write_err(rendered.warnings)
 
 
 def _value(value: Any) -> str:
-    """One scalar as a column value: ``-`` for a missing one, escaped text otherwise."""
-    return "-" if value is None else escape_field(str(value))
+    """One scalar as a column value: ``-`` for a missing (None or empty) one, escaped text of
+    ``str(value)`` otherwise."""
+    text = "" if value is None else str(value)
+    return escape_field(text) if text else "-"
 
 
-def _labels(labels: Sequence[str], sep: str) -> str:
-    return sep.join(escape_field(label) for label in labels) if labels else "-"
+def _labels(labels: Any, sep: str) -> str:
+    """Labels joined by ``sep`` (a comma, optionally with a space), ``-`` for none. A bare
+    string is one label; a separator inside a label is escaped so it cannot split it."""
+    if labels is None:
+        return "-"
+    items = [labels] if isinstance(labels, str) else list(labels)
+    if not items:
+        return "-"
+    comma = sep.strip()
+    return sep.join(
+        escape_field(str(label)).replace(comma, f"\\u{{{ord(comma):04X}}}") for label in items
+    )
 
 
-def _date(timestamp: str) -> str:
+def _date(timestamp: Any) -> str:
     """``YYYY-MM-DD`` of a ``YYYY-MM-DDTHH:MM:SSZ`` timestamp (the first ten characters)."""
-    return escape_field(timestamp[:10])
+    return _value(None if timestamp is None else str(timestamp)[:10])
 
 
 def format_note_line(note: Mapping[str, Any]) -> str:
@@ -178,7 +205,8 @@ def format_show(note: Mapping[str, Any]) -> Rendered:
         f"body_sha256: {_value(note['body_sha256'])}",
         "body:",
     ]
-    for line in escape(note["body"]).split("\n"):
+    body = "" if note["body"] is None else str(note["body"])
+    for line in escape(body).split("\n"):
         lines.append(f"| {line}" if line else "|")
     return Rendered("".join(f"{line}\n" for line in lines))
 
@@ -196,17 +224,24 @@ def format_add_dry_run() -> Rendered:
 
 
 def format_delete(
-    deleted: Sequence[int], reinstated: Mapping[int, Sequence[tuple[int, bool]]] | None = None
+    deleted: Sequence[int], reinstated: Mapping[int, tuple[int, bool]] | None = None
 ) -> Rendered:
     """One line per deleted id: ``deleted note <id>``, then ``; reinstated note <t>`` (with a
-    space and ``(expired)`` appended when ``expires`` <= now) for each note ``t`` that the
-    deletion of that id reinstated. ``reinstated`` maps a deleted id to ``(t, expired)`` pairs.
-    TODO(#30): the command decides which deleted note a reinstated note belongs to."""
+    space and ``(expired)`` appended when ``expires`` <= now) when the deletion of that id
+    reinstated a note. interface.md allows one reinstated note per deleted note, so
+    ``reinstated`` maps a deleted id to ``(t, expired)``; a key that is not in ``deleted``
+    raises ``ValueError``. The ``--json`` document (schemas/cli/delete.json) has a flat
+    ``reinstated`` list, so the command derives this association; this function only prints it.
+    TODO(#30): the command derives which deleted note each reinstated note belongs to."""
     reinstated = reinstated or {}
+    unknown = sorted(set(reinstated) - set(deleted))
+    if unknown:
+        raise ValueError(f"reinstated names notes that were not deleted: {unknown}")
     lines = []
     for note_id in deleted:
         line = f"deleted note {int(note_id)}"
-        for target, expired in reinstated.get(note_id, ()):
+        if note_id in reinstated:
+            target, expired = reinstated[note_id]
             line += f"; reinstated note {int(target)}" + (" (expired)" if expired else "")
         lines.append(line)
     return Rendered("".join(f"{line}\n" for line in lines))
@@ -219,7 +254,7 @@ def format_prune(result: Mapping[str, Any]) -> Rendered:
     """Human output of ``prune`` from its ``--json`` document (counts or ``{outcome: busy}``);
     the busy outcome adds the warning on stderr, which ``--quiet`` does not suppress."""
     if result.get("outcome") == "busy":
-        return Rendered("prune skipped: store busy\n", f"{BUSY_WARNING}\n")
+        return Rendered("prune skipped: store busy\n", warnings=f"{BUSY_WARNING}\n")
     expired, remaining = int(result["expired"]), int(result["remaining"])
     if result["dry_run"]:
         return Rendered(
@@ -242,7 +277,7 @@ def format_validate(result: Mapping[str, Any]) -> Rendered:
 
 def format_cron(outcome: str, *, dry_run: bool) -> Rendered:
     """``cron block <outcome>``; dry run ``dry run: cron block would be <outcome>``."""
-    outcome = escape_field(outcome)
+    outcome = _value(outcome)
     if dry_run:
         return Rendered(f"dry run: cron block would be {outcome}\n")
     return Rendered(f"cron block {outcome}\n")
