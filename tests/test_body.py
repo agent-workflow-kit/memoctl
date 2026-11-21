@@ -1,4 +1,4 @@
-"""Body validation (interface.md, Body rules items 1 to 6): classes, lines, limits, hostile input."""
+"""Body validation (interface.md, Body rules items 1 to 6): classes, lines, limits, hostile."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import copy
 import pickle
 import time
 import unicodedata
+from typing import Literal
 
 import pytest
 
@@ -205,7 +206,7 @@ def test_first_offender_in_text_order_wins_across_classes() -> None:
 
 
 def test_line_of_a_refused_character_counts_lf_only() -> None:
-    err = refusal("one\ntwo\nth\x00ree".encode())
+    err = refusal(b"one\ntwo\nth\x00ree")
     assert err.details == {"field": "body", "class": "control", "line": 3}
     # CR and U+2028 are not line breaks for the count
     assert refusal("a\r b c\x00".encode()).line == 1
@@ -378,7 +379,7 @@ def test_quadratic_mark_run_is_refused_before_any_normalization_of_it(
     calls: list[int] = []
     real = unicodedata.normalize
 
-    def spy(form: str, s: str) -> str:
+    def spy(form: Literal["NFC", "NFD", "NFKC", "NFKD"], s: str) -> str:
         calls.append(len(s))
         return real(form, s)
 
@@ -394,7 +395,7 @@ def test_nfkc_runs_only_on_text_that_passed_items_1_to_5(
     sizes: list[int] = []
     real = unicodedata.normalize
 
-    def spy(form: str, s: str) -> str:
+    def spy(form: Literal["NFC", "NFD", "NFKC", "NFKD"], s: str) -> str:
         if form == "NFKC":
             sizes.append(len(s))
         return real(form, s)
@@ -450,7 +451,10 @@ def test_encoding_error_does_not_chain_the_decoder_error() -> None:
     assert err.__context__ is None
 
 
-@pytest.mark.parametrize("clone", [copy.copy, copy.deepcopy, lambda e: pickle.loads(pickle.dumps(e))])
+CLONES = [copy.copy, copy.deepcopy, lambda e: pickle.loads(pickle.dumps(e))]
+
+
+@pytest.mark.parametrize("clone", CLONES)
 def test_error_keeps_its_fields_when_copied_or_pickled(clone) -> None:  # type: ignore[no-untyped-def]
     for data, limit in [(b"a\n\x00", LIMIT), (b" ", LIMIT), (("ﷺ" * 100).encode(), 400)]:
         err = refusal(data, limit)
