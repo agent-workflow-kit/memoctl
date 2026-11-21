@@ -247,3 +247,35 @@ def test_crontab_no_crontab_message_must_start_stderr(
         RealGateway(crontab_bin=script).crontab_read()
     monkeypatch.setenv("FAKE_CRONTAB_STDERR", "no crontab for")
     assert RealGateway(crontab_bin=script).crontab_read() is None
+
+
+def test_real_gateway_descriptor_primitives() -> None:
+    import os
+
+    gw = RealGateway()
+    fd = gw.open_devnull(write=True)
+    try:
+        assert gw.fd_is_open(fd)
+        assert os.get_inheritable(fd)
+        target = os.dup(fd)  # a free descriptor to overwrite
+        try:
+            gw.dup_onto(fd, target)
+            assert gw.fd_is_open(target)
+        finally:
+            gw.release_fd(target)
+        assert not gw.fd_is_open(target)
+    finally:
+        gw.release_fd(fd)
+    assert not gw.fd_is_open(fd)
+    gw.release_fd(fd)  # closing a closed descriptor is ignored
+    assert not gw.fd_is_open(10_000_000)
+
+
+def test_real_gateway_argv_is_a_copy_without_the_program(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setattr(sys, "argv", ["memoctl", "a", "--json"])
+    argv = RealGateway().argv()
+    assert argv == ["a", "--json"]
+    argv.append("x")
+    assert RealGateway().argv() == ["a", "--json"]
