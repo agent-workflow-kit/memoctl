@@ -16,7 +16,7 @@ GATEWAY = SRC / "gateway.py"
 
 # Whole modules that reach outside. sqlite3 opens files itself, so it is banned everywhere
 # except the one module in ALLOWED_IMPORTS (store.py, which checks the file through the state
-# directory first). todo(#10): signal and threading are left to the issue that needs them.
+# directory first). signal and threading are the gateway's (the deadline's alarm lives there).
 # io is not banned (StringIO is harmless); io.open is listed below.
 BANNED_MODULES = {
     "subprocess",
@@ -38,6 +38,9 @@ BANNED_MODULES = {
     "shutil",
     "glob",
     "sqlite3",
+    "signal",
+    "threading",
+    "_thread",
 }
 # Module file name -> banned modules it alone may import (pinned by tests below).
 ALLOWED_IMPORTS = {"store.py": {"sqlite3"}}
@@ -304,6 +307,10 @@ def test_module_reaches_outside_only_through_the_gateway(path: Path) -> None:
         "import sys\nsys.argv",
         "import sys\nsys.orig_argv",
         "from sys import orig_argv",
+        "import signal",
+        "from signal import setitimer",
+        "import threading",
+        "import _thread",
         "import os\nos.urandom(3)",
         "from os import urandom",
         "import os\nos.fchmod(3, 0o600)",
@@ -477,7 +484,7 @@ def test_scanner_flags_aliases_and_new_bans(source: str) -> None:
         "from os import path\npath.join('a', 'b')",
         "import os\nos.sep",
         "def f(gateway):\n    return gateway.argv(), gateway.fd_is_open(0)",
-        "import signal\nimport threading\nimport io\nio.StringIO()",
+        "import io\nio.StringIO()",
         "from pathlib import Path as P\nP('x') / 'y'",
         "from datetime import datetime as D, UTC\nD(2026, 1, 1, tzinfo=UTC)",
         "def f(args):\n    return getattr(args, 'json'), vars(args)",

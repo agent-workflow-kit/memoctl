@@ -27,11 +27,9 @@ disabled (the schema has none), no ATTACH, ``SQLITE_LIMIT_LENGTH`` 1 MiB, ``fore
 undecodable value cannot be returned as ``str``, so a row check rejects it instead of the
 driver raising with the value in its message).
 
-todo(#6): the CLI maps :class:`StoreError` (``reason``, ``retryable``) to exit 12 ``failed``
-and :class:`SchemaNewerError` to exit 12 ``schema_newer`` with ``details {found, supported}``.
-todo(#10): the deadline installs its handler through ``open_store(configure=...)`` calling
-:meth:`Store.set_progress_handler`; an interrupted statement already arrives as
-``StoreError("timeout")``.
+The CLI maps :class:`StoreError` and :class:`SchemaNewerError` to exit 12 (``cli_errors``). The
+deadline installs its progress handler through ``open_store(configure=deadline.configure_store)``;
+an interrupted statement arrives as ``StoreError("timeout")``.
 todo(#15): the change log is appended after :meth:`Store.write` returns (after the commit).
 todo(#16): ``add``'s queries (dedupe, limits, supersede, insert) are added here and run inside
 ``Store.write()``.
@@ -591,8 +589,9 @@ def _inspect(conn: sqlite3.Connection) -> _Snapshot:
     between separate reads would otherwise show a half-set identity). The first query reads the
     file, so a file that is not a database fails here (``db_corrupt``).
 
-    todo(#10): bound the schema parse (the first read parses sqlite_schema before any handler
-    fires; consider a file-size or page_count cap)."""
+    The schema parse runs under the progress handler the ``configure`` hook installed (a planted
+    schema with hundreds of thousands of objects is interrupted: ``StoreError("timeout")``), so
+    no size cap is needed."""
     own = not conn.in_transaction
     if own:
         conn.execute("BEGIN")
@@ -735,7 +734,7 @@ def open_store(
 
     Raises :class:`memoctl.statedir.UnsafeStateError` (``state.db`` or a sidecar is not a
     private regular file), :class:`StoreError` and :class:`SchemaNewerError`.
-    ``configure`` is called with the :class:`Store` before the first read of the file (the
+    ``configure`` is called with the :class:`Store` before anything touches the file (the
     deadline installs its progress handler there). ``connect`` is for tests.
     """
     exists = state.check_db()
@@ -758,9 +757,9 @@ def open_store(
         raise _failure(exc) from None
     store = Store(conn, mode)
     try:
-        _configure(conn, busy_ms)
         if configure is not None:
-            configure(store)
+            configure(store)  # first: some pragmas below already parse the schema
+        _configure(conn, busy_ms)
         snap = _inspect(conn)
         found = _classify(snap)
         if found == EMPTY and mode is not Mode.INIT:
