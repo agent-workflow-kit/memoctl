@@ -13,6 +13,8 @@ stdin or files, never in argv or the environment. Process output is decoded as U
 Signals are process-wide host state, so the wall-clock alarm (``alarm_arm``) and the immediate
 exit (``exit_now``) live here too; ``memoctl.deadline`` builds the command deadline on them.
 
+Body sources (``read_file_bounded``, ``read_stdin_bounded``) return raw bytes, never text.
+
 A command reads the clock once with ``now()`` and hands the value down as a parameter.
 todo(#16): enforce one clock read per command.
 
@@ -49,6 +51,22 @@ TEMP_PREFIX = ".tmp."
 
 class GatewayError(RuntimeError):
     """An outside call failed; the message names what was attempted and how it failed."""
+
+
+# Why a body source was refused; fixed strings, never the path or the content.
+SOURCE_REASONS = ("symlink", "not_regular", "terminal", "unreadable")
+READ_CHUNK = 65536
+
+
+class BodySourceError(GatewayError):
+    """A file or standard input cannot be used as a body source. ``reason`` is one of
+    ``SOURCE_REASONS``; the message never contains the path or any content."""
+
+    def __init__(self, reason: str) -> None:
+        if reason not in SOURCE_REASONS:
+            raise ValueError(f"unknown body source reason {reason!r}")
+        super().__init__(f"body source refused ({reason})")
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -258,6 +276,16 @@ class Gateway(Protocol):
         """The login name from the password database, or ``None`` when the lookup fails."""
         ...
 
+    def read_file_bounded(self, path: Path, nbytes: int) -> bytes:
+        """Read at most ``nbytes`` bytes of the regular file at ``path`` without following a
+        symlink in its last component. Raises ``BodySourceError``."""
+        ...
+
+    def read_stdin_bounded(self, nbytes: int) -> bytes:
+        """Read at most ``nbytes`` bytes from standard input (fewer at end of file). Raises
+        ``BodySourceError`` for a terminal, a directory or a descriptor that cannot be read."""
+        ...
+
     def uid(self) -> int:
         """The real user id of the process."""
         ...
@@ -329,7 +357,6 @@ class Gateway(Protocol):
         own children)."""
         ...
 
-    def stdin_read(self) -> str: ...
     def write_out(self, text: str, *, bound: float | None = None) -> None:
         """Write ``text`` to file descriptor 1. With ``bound`` (seconds) the write gives up once
         the descriptor has not become writable for that long (a full pipe, a stopped terminal),
@@ -524,6 +551,34 @@ def _writable_before(fd: int, end: float) -> bool:
     return bool(poller.poll(left_ms))
 
 
+def _read_fd(fd: int, nbytes: int) -> bytes:
+    """Read until end of file or ``nbytes`` bytes, whichever is first; never asks for more
+    than is still wanted, so a growing file or an endless source cannot exceed the bound."""
+    chunks: list[bytes] = []
+    remaining = nbytes
+    while remaining > 0:
+        try:
+            chunk = os.read(fd, min(READ_CHUNK, remaining))
+        except BlockingIOError:
+            # A non-blocking descriptor (the caller set O_NONBLOCK on the open file
+            # description) with no data yet: wait until it is readable, then retry.
+            # todo(#10): the deadline of the command interrupts this wait.
+            select.select([fd], [], [])
+            continue
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _is_symlink(path: Path) -> bool:
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
 def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
     """Write ``text`` to a standard descriptor as UTF-8 with errors replaced, never through the
     locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says.
@@ -568,6 +623,69 @@ class RealGateway:
             return pwd.getpwuid(os.getuid()).pw_name
         except KeyError:
             return None
+
+    def read_file_bounded(self, path: Path, nbytes: int) -> bytes:
+        """Open with ``O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | O_NOCTTY`` (a FIFO or device opens
+        at once instead of blocking), require a regular file on ``fstat`` of the open
+        descriptor (so there is no check-then-open race) and read at most ``nbytes``.
+
+        An ``lstat`` runs first so that a socket, FIFO or device is classified without
+        opening it (opening some special files has side effects, and a socket cannot be
+        opened at all). It is not a security boundary: the ``fstat`` after the open is the
+        authority.
+        """
+        try:
+            before = os.lstat(path)
+        except (TimeoutError, InterruptedError):
+            raise
+        except (OSError, ValueError):  # missing, denied, a loop, an embedded NUL
+            raise BodySourceError("unreadable") from None
+        if stat.S_ISLNK(before.st_mode):
+            raise BodySourceError("symlink")
+        if not stat.S_ISREG(before.st_mode):
+            raise BodySourceError("not_regular")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY
+        try:
+            fd = os.open(path, flags)
+        except (TimeoutError, InterruptedError):
+            raise
+        except OSError as exc:
+            # ELOOP (Linux, macOS) or EMLINK (BSD) also come from a loop in a parent
+            # component: it is a symlink refusal only when the last component is one.
+            if exc.errno in (errno.ELOOP, errno.EMLINK) and _is_symlink(path):
+                raise BodySourceError("symlink") from None
+            raise BodySourceError("unreadable") from None
+        except ValueError:  # an embedded NUL
+            raise BodySourceError("unreadable") from None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise BodySourceError("not_regular")
+            return _read_fd(fd, nbytes)
+        except (TimeoutError, InterruptedError):
+            raise
+        except OSError:
+            raise BodySourceError("unreadable") from None
+        finally:
+            os.close(fd)
+
+    def read_stdin_bounded(self, nbytes: int) -> bytes:
+        """Read descriptor 0 directly (no text layer, no locale). A terminal and a directory
+        are refused; a pipe, socket, file or device (``/dev/zero``) is read up to ``nbytes``.
+        The read blocks while a pipe stays open and silent: the deadline of the command is
+        what ends it.
+        todo(#10): the deadline timer that interrupts this read.
+        """
+        try:
+            mode = os.fstat(0).st_mode
+            if os.isatty(0):
+                raise BodySourceError("terminal")
+            if stat.S_ISDIR(mode):
+                raise BodySourceError("not_regular")
+            return _read_fd(0, nbytes)
+        except (TimeoutError, InterruptedError):
+            raise  # the deadline (todo(#10)) or a signal handler, not an unreadable source
+        except OSError:
+            raise BodySourceError("unreadable") from None
 
     def uid(self) -> int:
         return os.getuid()
@@ -656,9 +774,6 @@ class RealGateway:
             except Exception:  # noqa: BLE001 - leaving matters more than a failed kill
                 pass
         os._exit(code)
-
-    def stdin_read(self) -> str:
-        return sys.stdin.read()
 
     def write_out(self, text: str, *, bound: float | None = None) -> None:
         _write_fd(1, text, bound)

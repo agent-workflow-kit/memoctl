@@ -90,7 +90,9 @@ Package `src/memoctl/` (design guide section 15):
 | `cli_errors.py` | Exit codes, the error envelope, and the table mapping exception types to them. A clock fault (`ClockError`) is exit 1 `internal`: the interface has no clock code and the schema enums are closed. |
 | `config.py` | Home lookup, YAML loading, the Pydantic config model, per-repo overrides, the effective config for a repo. |
 | `grammar.py` | Every grammar, duration parsing, `fullmatch` helpers. |
-| `body.py` | Body reading and validation, the secret check. |
+| `bodyread.py` | The bounded reader for `--body-file` and standard input. |
+| `body.py` | Body validation (six classes, combining runs, NFKC bound). |
+| `secretscan.py` | The secret check: patterns and `mask_env` values over the repo id, topic, labels, kind and body (named so it never shadows the standard library `secrets`). |
 | `store.py` | SQLite open modes, migrations, the queries (all SQL lives here). |
 | `notes.py` | The rules of `add`, `delete`, `prune`: supersede, dedupe, limits, chain repointing and reinstatement on `delete`. |
 | `selection.py` | Context selection and fairness. |

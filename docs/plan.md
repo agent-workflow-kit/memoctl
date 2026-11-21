@@ -28,7 +28,9 @@ Status: 0.1.0-design, 2026-11-18. This plan implements [interface.md](interface.
 | `statedir.py` | 1 | The state directory check on a descriptor, creation modes, `lstat` of `state.db`. |
 | `deadline.py` | 1 | The command deadline: arm, re-arm and disarm points, the pre-built timeout report, the progress callback and busy-timeout cap for the store. |
 | `store.py` | 1 | Opening SQLite (modes, pragmas, the progress handler, `setlimit`), migrations, row checks, every query. |
-| `body.py` | 2 | The bounded reader, body validation (six classes, combining runs, NFKC bound), the secret check. |
+| `bodyread.py` | 2 | The bounded reader for `--body-file` and standard input (size cap, symlink and special-file refusals). |
+| `body.py` | 2 | Body validation (six classes, combining runs, NFKC bound). |
+| `secretscan.py` | 2 | The secret check (patterns, `mask_env`). |
 | `notes.py` | 3 and 6 | `add` (order, dedupe, supersede, lifetime, limits), `delete` (chain repointing), `prune`. |
 | `logfile.py` | 3 | `log.jsonl` append and rotation. |
 | `search.py` | 4 | Term parsing and streaming matching. |
