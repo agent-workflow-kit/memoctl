@@ -117,6 +117,28 @@ class Gateway(Protocol):
         ``OSError``."""
         ...
 
+    def argv(self) -> list[str]:
+        """The command-line arguments after the program name, undecoded bytes kept as
+        ``surrogateescape`` characters."""
+        ...
+
+    def fd_is_open(self, fd: int) -> bool:
+        """``fstat`` on ``fd``: false only when the descriptor is closed (``EBADF``)."""
+        ...
+
+    def open_devnull(self, *, write: bool) -> int:
+        """Open ``/dev/null`` (write-only when ``write``, else read-only); the lowest free
+        descriptor is returned, inheritable. Raises ``OSError``."""
+        ...
+
+    def dup_onto(self, src: int, dst: int) -> None:
+        """``dup2(src, dst)``; ``dst`` is inheritable. Raises ``OSError``."""
+        ...
+
+    def release_fd(self, fd: int) -> None:
+        """Close ``fd``; an ``OSError`` is ignored."""
+        ...
+
     def stdin_read(self) -> str: ...
     def write_out(self, text: str) -> None: ...
     def write_err(self, text: str) -> None: ...
@@ -256,6 +278,30 @@ class RealGateway:
             return FileRead(info, b"".join(chunks))
         finally:
             os.close(fd)
+
+    def argv(self) -> list[str]:
+        return list(sys.argv[1:])
+
+    def fd_is_open(self, fd: int) -> bool:
+        try:
+            os.fstat(fd)
+        except OSError as exc:
+            return exc.errno != errno.EBADF
+        return True
+
+    def open_devnull(self, *, write: bool) -> int:
+        fd = os.open(os.devnull, (os.O_WRONLY if write else os.O_RDONLY) | os.O_CLOEXEC)
+        os.set_inheritable(fd, True)
+        return fd
+
+    def dup_onto(self, src: int, dst: int) -> None:
+        os.dup2(src, dst, inheritable=True)
+
+    def release_fd(self, fd: int) -> None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
     def stdin_read(self) -> str:
         return sys.stdin.read()
