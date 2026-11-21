@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import random
 import subprocess
@@ -89,6 +90,12 @@ class FakeGateway:
         self.login: str | None = "tester"
         self.uid_value = os.getuid()  # tests set another value to simulate a foreign owner
         self.environ: dict[str, str] = {}
+        self.argv_value: list[str] = []
+        # Open descriptors by name ("r" or "w"); a test closes one with ``del gw.fds[1]``.
+        self.fds: dict[int, str] = {0: "r", 1: "w", 2: "w"}
+        self.next_free_fd = 0
+        self.devnull_fails = False
+        self.fd_calls: list[tuple[str, int] | tuple[str, int, int]] = []
         self.runs: list[tuple[list[str], str | bytes | None, float | None]] = []
         self._scripted: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {}
         self._random = random.Random(seed)
@@ -101,6 +108,31 @@ class FakeGateway:
 
     def login_name(self) -> str | None:
         return self.login
+
+    def argv(self) -> list[str]:
+        return list(self.argv_value)
+
+    def fd_is_open(self, fd: int) -> bool:
+        self.fd_calls.append(("fstat", fd))
+        return fd in self.fds
+
+    def open_devnull(self, *, write: bool) -> int:
+        if self.devnull_fails:
+            raise OSError(errno.EMFILE, "too many open files")
+        fd = self.next_free_fd
+        while fd in self.fds:
+            fd += 1
+        self.fds[fd] = "w" if write else "r"
+        self.fd_calls.append(("open", fd))
+        return fd
+
+    def dup_onto(self, src: int, dst: int) -> None:
+        self.fds[dst] = self.fds[src]
+        self.fd_calls.append(("dup2", src, dst))
+
+    def release_fd(self, fd: int) -> None:
+        self.fds.pop(fd, None)
+        self.fd_calls.append(("close", fd))
 
     def stdin_read(self) -> str:
         return self.terminal.stdin
