@@ -18,6 +18,10 @@ can run before an earlier refusal. The rules of the order:
 Seams owned by later issues are marked with ``TODO(#N)`` at the exact step: #17 (dedupe,
 ``--supersedes``), #18 (limits), #19 (``--dry-run`` and the warning lines), #20 (concurrency).
 
+A crash (or a signal) between the commit of step 13 and the log append of step 14 leaves a stored
+note with no log record, as the interface documents; the retry then finds the note (#17) and
+writes no record either.
+
 Nothing here renders an exception: failures leave as typed exceptions that ``cli_errors`` maps
 to fixed text, and no value from argv, stdin or the environment is put in a message.
 """
