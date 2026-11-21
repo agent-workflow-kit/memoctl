@@ -53,6 +53,7 @@ BANNED_REFS = {
     "codecs.open",
     "sys.modules",
     "sys.argv",
+    "sys.orig_argv",
     # the process's descriptors
     "sys.stdin",
     "sys.stdout",
@@ -296,6 +297,8 @@ def test_module_reaches_outside_only_through_the_gateway(path: Path) -> None:
         "import sys\nsys.stderr.write('x')",
         "from sys import stdout",
         "import sys\nsys.argv",
+        "import sys\nsys.orig_argv",
+        "from sys import orig_argv",
         "import os\nos.urandom(3)",
         "from os import urandom",
         "import os\nos.environ['HOME']",

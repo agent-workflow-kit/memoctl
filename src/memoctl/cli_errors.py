@@ -61,6 +61,71 @@ DETAIL_KEYS = frozenset(
     {"field", "id", "line", "class", "limit", "retry_after_s", "scope", "found", "supported"}
 )
 _USAGE_FIELD = re.compile(r"[a-z_]{1,32}", re.ASCII)
+MAX_MESSAGE = 2048
+MAX_FIELD = 4096
+MAX_NOTE_ID = 999999999999999999
+TEXT_CLASSES = frozenset(
+    {"encoding", "control", "invisible", "private_use", "unassigned", "combining"}
+)
+SECRET_CLASSES = frozenset(
+    {
+        "private_key", "github_token", "gitlab_token", "slack_token", "aws_key_id", "npm_token",
+        "anthropic_key", "google_api_key", "stripe_key", "openai_key", "jwt", "slack_webhook",
+        "mask_env",
+    }
+)  # fmt: skip
+SECRET_FIELDS = frozenset({"repo", "topic", "label", "kind", "body"})
+# Per code or reason (the reason wins when there is one): details must be null, or must carry
+# these keys (schemas/defs.json, ``error`` allOf).
+NULL_DETAILS = frozenset(
+    {
+        "internal", "needs_human", "db_unreadable", "db_locked", "db_corrupt", "timeout",
+        "crontab_failed", "supersede_mismatch", "already_superseded", "unsafe_state",
+        "cron_block_malformed",
+    }
+)  # fmt: skip
+REQUIRED_DETAILS: dict[str, frozenset[str]] = {
+    "usage": frozenset({"field"}),
+    "config_invalid": frozenset({"field"}),
+    "not_found": frozenset({"id"}),
+    "rate_limited": frozenset({"retry_after_s", "limit", "scope"}),
+    "secret_detected": frozenset({"class", "field"}),
+    "repo_full": frozenset({"limit"}),
+    "store_full": frozenset({"limit"}),
+    "schema_newer": frozenset({"found", "supported"}),
+}
+
+
+def _is_int(value: object, low: int, high: int | None = None) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and value >= low
+        and (high is None or value <= high)
+    )
+
+
+def _check_detail_values(details: object) -> None:
+    """Keys and value types of one ``error_details`` object."""
+    if not isinstance(details, dict):
+        raise ValueError("details must be an object")
+    if not set(details) <= DETAIL_KEYS:
+        raise ValueError("unknown details key")
+    checks: dict[str, Callable[[Any], bool]] = {
+        "field": lambda v: isinstance(v, str) and len(v) <= MAX_FIELD,
+        "id": lambda v: _is_int(v, 1, MAX_NOTE_ID),
+        "line": lambda v: _is_int(v, 1),
+        "class": lambda v: v in TEXT_CLASSES | SECRET_CLASSES,
+        "limit": lambda v: _is_int(v, 0),
+        "retry_after_s": lambda v: _is_int(v, 1),
+        "scope": lambda v: v in ("repo", "store"),
+        "found": lambda v: _is_int(v, 0),
+        "supported": lambda v: _is_int(v, 1),
+    }
+    for key, value in details.items():
+        if not checks[key](value):
+            raise ValueError("invalid details value")
+
 
 INTERNAL_MESSAGE = "internal error"
 
@@ -92,8 +157,34 @@ class Failure:
         allowed = FAILURE_REASONS if self.exit_code == FAILED else REFUSAL_REASONS
         if self.reason is not None and self.reason not in allowed:
             raise ValueError("unknown reason")
-        if self.details is not None and not set(self.details) <= DETAIL_KEYS:
-            raise ValueError("unknown details key")
+        if not isinstance(self.message, str) or len(self.message) > MAX_MESSAGE:
+            raise ValueError("message must be a string of at most 2048 characters")
+        self._check_details()
+
+    def _check_details(self) -> None:
+        """schemas/defs.json: ``error_details`` and the per-code and per-reason rules."""
+        details = self.details
+        key = self.reason if self.reason is not None else self.code
+        if key in NULL_DETAILS:
+            if details is not None:
+                raise ValueError("details must be null here")
+            return
+        required = REQUIRED_DETAILS.get(key)
+        if required is None:
+            if details is not None:
+                _check_detail_values(details)
+            return
+        if details is None:
+            raise ValueError("details are required here")
+        _check_detail_values(details)
+        if not required <= set(details):
+            raise ValueError("a required details key is missing")
+        if key == "usage" and not _USAGE_FIELD.fullmatch(details["field"]):
+            raise ValueError("a usage field is a [a-z_]{1,32} identifier")
+        if key == "secret_detected" and (
+            details["class"] not in SECRET_CLASSES or details["field"] not in SECRET_FIELDS
+        ):
+            raise ValueError("secret_detected needs a secret class and a note field")
 
     @property
     def retryable(self) -> bool:
@@ -164,13 +255,16 @@ def _register_defaults() -> None:
     register_error(
         ConfigError,
         lambda e: Failure(
-            USAGE, "config_invalid", "invalid configuration", details={"field": e.field}
+            USAGE,
+            "config_invalid",
+            "invalid configuration",
+            details={"field": e.field[:MAX_FIELD]},  # the schema caps a field at 4096
         ),
     )
     # Not on this base; each owner adds one register_error line here:
-    # todo(#11): bodyread.BodyError -> usage, details {field: "body"}, plus the fixed reason
-    #   (never the path or content).
-    # todo(#12): body.BodyTextError -> usage, details from .details (class, line, limit).
+    # todo(#11): bodyread.BodyError -> usage, details = e.details (field, plus limit on
+    #   too_long); no "reason" key (never the path or content).
+    # todo(#12): body.BodyTextError -> usage, details {field (body|text), class, line, limit}.
     # todo(#13): secretscan.SecretDetected -> exit 20 refused, reason secret_detected,
     #   details {class, field}. Never render a traceback: frames hold the caller's text.
     # todo(#8): statedir.UnsafeStateError -> exit 20 refused, reason unsafe_state; plain

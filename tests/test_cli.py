@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from memoctl import __version__
 from memoctl.cli import ensure_standard_descriptors, main
 from memoctl.cli_args import Command, add_global_flags, prescan_json
 from memoctl.cli_errors import UsageError
@@ -44,6 +45,18 @@ def _interrupt(args: argparse.Namespace, gw: Gateway) -> int:
     raise KeyboardInterrupt
 
 
+def _exit(args: argparse.Namespace, gw: Gateway) -> int:
+    raise SystemExit(0)
+
+
+def _label_type(text: str) -> str:
+    raise GrammarError("label")
+
+
+def _configure_typed(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--label", type=_label_type)
+
+
 def _configure_item(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--topic", default=None)
     parser.add_argument("id", nargs="?")
@@ -64,6 +77,8 @@ COMMANDS = (
     Command("config", "raises", _config),
     Command("gateway", "raises", _gateway),
     Command("interrupt", "raises", _interrupt),
+    Command("exit", "raises SystemExit", _exit),
+    Command("typed", "type converter raises", _echo, _configure_typed),
     Command("nested", "nested", _echo, _configure_nested, globals_on_command=False),
 )
 
@@ -86,7 +101,7 @@ def envelope(gw: FakeGateway) -> dict[str, Any]:
 
 def test_version_prints_on_stdout_through_the_gateway_and_exits_zero(tmp_path: Path) -> None:
     code, gw = run(tmp_path, ["--version"])
-    assert (code, gw.terminal.stdout, gw.terminal.stderr) == (0, "memoctl 0.0.0\n", "")
+    assert (code, gw.terminal.stdout, gw.terminal.stderr) == (0, f"memoctl {__version__}\n", "")
 
 
 def test_version_ignores_json_flag_after_it_is_refused_but_json_prescan_is_exempt(
@@ -351,3 +366,116 @@ def test_descriptor_check_runs_before_anything_else_and_failure_is_survivable(
     gw.devnull_fails = True
     assert main(["--version"], gw, COMMANDS) == 0
     assert gw.fd_calls[0] == ("fstat", 0)
+
+
+# --- review round 1 ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("argv", [["exit"], ["exit", "--json"]])
+def test_system_exit_from_a_command_is_internal_without_text(
+    tmp_path: Path, argv: list[str]
+) -> None:
+    code, gw = run(tmp_path, argv)
+    assert code == 1
+    assert gw.terminal.stderr == "internal: internal error\n"
+    if "--json" in argv:
+        assert envelope(gw)["code"] == "internal"
+    else:
+        assert gw.terminal.stdout == ""
+
+
+def test_keyboard_interrupt_before_dispatch_exits_130(tmp_path: Path) -> None:
+    class Interrupted(FakeGateway):
+        def argv(self) -> list[str]:
+            raise KeyboardInterrupt
+
+    gw = Interrupted(tmp_path)
+    assert main(None, gw, COMMANDS) == 130
+    assert (gw.terminal.stdout, gw.terminal.stderr) == ("", "")
+
+
+def test_keyboard_interrupt_in_the_descriptor_check_exits_130(tmp_path: Path) -> None:
+    class Interrupted(FakeGateway):
+        def fd_is_open(self, fd: int) -> bool:
+            raise KeyboardInterrupt
+
+    gw = Interrupted(tmp_path)
+    assert main(["--version"], gw, COMMANDS) == 130
+
+
+def test_a_type_converter_that_raises_grammar_error_keeps_its_field(tmp_path: Path) -> None:
+    code, gw = run(tmp_path, ["typed", "--json", "--label", "x"])
+    assert code == 2
+    assert envelope(gw)["details"] == {"field": "label"}
+    assert gw.terminal.stderr == "usage: invalid label\n"
+
+
+@pytest.mark.parametrize("columns", ["20", "200"])
+def test_help_layout_does_not_depend_on_the_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, columns: str
+) -> None:
+    monkeypatch.setenv("COLUMNS", "20")
+    _, narrow = run(tmp_path, ["--help"])
+    monkeypatch.setenv("COLUMNS", columns)
+    _, other = run(tmp_path, ["--help"])
+    assert narrow.terminal.stdout == other.terminal.stdout
+    assert max(len(line) for line in other.terminal.stdout.splitlines()) <= 80
+    _, sub_narrow = run(tmp_path, ["echo", "--help"])
+    monkeypatch.setenv("COLUMNS", "20")
+    _, sub_other = run(tmp_path, ["echo", "--help"])
+    assert sub_narrow.terminal.stdout == sub_other.terminal.stdout
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--help"],
+        ["--version"],
+        ["-h"],
+        ["@file"],
+        ["echo", "@file"],
+        ["echo", "-h"],
+        ["echo", "--help"],
+        ["ech"],
+        ["echo", "--top", "x"],
+        ["--he"],
+        ["echo", "--hel"],
+        ["--nosuch"],
+    ],
+)
+def test_argparse_itself_never_prints(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    from memoctl.cli_args import ParserExit, build_parser
+
+    try:
+        build_parser(COMMANDS).parse_args(argv)
+    except (ParserExit, UsageError):
+        pass
+    captured = capfd.readouterr()
+    assert (captured.out, captured.err) == ("", "")
+    run(tmp_path, argv)  # and through main, whose output goes only to the gateway
+    captured = capfd.readouterr()
+    assert (captured.out, captured.err) == ("", "")
+
+
+def test_the_argparse_seam_check_names_a_missing_member() -> None:
+    from memoctl.cli_args import check_argparse_seam
+
+    class Old:
+        def error(self) -> None: ...
+        def exit(self) -> None: ...
+
+    with pytest.raises(ImportError, match="_print_message"):
+        check_argparse_seam(Old)
+    check_argparse_seam(argparse.ArgumentParser)
+
+
+def test_version_matches_the_project_version() -> None:
+    import tomllib
+
+    import memoctl
+
+    root = Path(__file__).resolve().parent.parent
+    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    assert memoctl.__version__ == project

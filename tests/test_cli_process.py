@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from memoctl import __version__
+
 
 def _env(tmp_path: Path) -> dict[str, str]:
     home = tmp_path / "home"
@@ -29,9 +31,14 @@ def _env(tmp_path: Path) -> dict[str, str]:
 
 
 def _run(
-    tmp_path: Path, args: Sequence[bytes | str], *, shell_prefix: str = "", stdin: int | None = None
+    tmp_path: Path,
+    args: Sequence[bytes | str],
+    *,
+    shell_prefix: str = "",
+    stdin: int | None = None,
+    entry: Sequence[str] = (sys.executable, "-I", "-m", "memoctl"),
 ) -> subprocess.CompletedProcess[bytes]:
-    argv: list[bytes | str] = [sys.executable, "-I", "-m", "memoctl", *args]
+    argv: list[bytes | str] = [*entry, *args]
     cmd: list[bytes | str] = argv
     if shell_prefix:
         cmd = ["sh", "-c", f'exec "$0" "$@" {shell_prefix}', *argv]
@@ -54,7 +61,7 @@ def _run(
 
 def test_version_under_c_locale_is_ascii_and_exit_zero(tmp_path: Path) -> None:
     r = _run(tmp_path, ["--version"])
-    assert (r.returncode, r.stdout, r.stderr) == (0, b"memoctl 0.0.0\n", b"")
+    assert (r.returncode, r.stdout, r.stderr) == (0, f"memoctl {__version__}\n".encode(), b"")
 
 
 def test_json_usage_error_end_to_end(tmp_path: Path) -> None:
@@ -117,3 +124,42 @@ def test_broken_pipe_on_stdout_keeps_the_exit_code(tmp_path: Path) -> None:
 @pytest.mark.parametrize("args", [[], ["--help", "x"], ["-h"]])
 def test_refused_forms_exit_2(tmp_path: Path, args: list[str]) -> None:
     assert _run(tmp_path, args).returncode == 2
+
+
+PROBE = """\
+import os
+import sys
+
+from memoctl.cli import main
+from memoctl.cli_args import Command
+
+
+def run(args, gw):
+    fd = os.open(__file__, os.O_RDONLY)
+    if fd < 3:  # a closed standard descriptor was not refilled before this open
+        raise RuntimeError("descriptor %d" % fd)
+    gw.write_out("ok\\n")
+    return 0
+
+
+sys.exit(main(None, None, (Command("probe", "probe", run),)))
+"""
+
+
+@pytest.mark.parametrize(
+    "closed",
+    [(0,), (1,), (2,), (0, 1), (0, 2), (1, 2), (0, 1, 2)],
+    ids=lambda c: "closed-" + "".join(map(str, c)),
+)
+def test_a_command_never_gets_a_standard_descriptor_for_its_own_files(
+    tmp_path: Path, closed: tuple[int, ...]
+) -> None:
+    script = tmp_path / "probe.py"
+    script.write_text(PROBE)
+    prefix = " ".join({0: "<&-", 1: ">&-", 2: "2>&-"}[fd] for fd in closed)
+    r = _run(tmp_path, ["probe"], shell_prefix=prefix, entry=(sys.executable, "-I", str(script)))
+    assert r.returncode == 0
+    if 1 not in closed:
+        assert r.stdout == b"ok\n"
+    if 2 not in closed:
+        assert r.stderr == b""

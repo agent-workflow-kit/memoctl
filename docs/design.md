@@ -99,7 +99,7 @@ Package `src/memoctl/` (design guide section 15):
 | `statedir.py` | The state directory check and the `0600` creation. |
 | `logfile.py` | `log.jsonl` append and rotation. |
 | `crontab.py` | The managed block logic (pure; the calls are in the gateway). |
-| `gateway.py` | The only module that reads the clock, randomness, the password database, the terminal, the filesystem handles, stdin and `crontab`; tests replace it. |
+| `gateway.py` | The only module that reads the clock, randomness, the password database, the terminal, argv, the standard descriptors, the filesystem handles, stdin and `crontab`; tests replace it. |
 
 ## Data model
 

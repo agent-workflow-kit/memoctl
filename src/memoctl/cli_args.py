@@ -17,6 +17,7 @@ Rules enforced here:
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import NoReturn
@@ -24,6 +25,9 @@ from typing import NoReturn
 from memoctl import __version__
 from memoctl.cli_errors import UsageError
 from memoctl.gateway import Gateway
+from memoctl.grammar import GrammarError
+
+HELP_WIDTH = 80  # fixed: help must not depend on COLUMNS or the terminal
 
 Run = Callable[[argparse.Namespace, Gateway], int]
 
@@ -54,15 +58,48 @@ class ParserExit(Exception):
         self.text = text
 
 
+# The members of ``ArgumentParser`` that print or exit, which ``_Parser`` overrides.
+SEAM_MEMBERS = ("error", "exit", "_print_message")
+
+
+def check_argparse_seam(parser_class: type) -> None:
+    """Fail loudly when ``parser_class`` lacks a member that :class:`_Parser` overrides.
+
+    A Python that renames one (they are private in part) would let argparse print and exit
+    on its own, so the module refuses to import instead.
+    """
+    for name in SEAM_MEMBERS:
+        if not hasattr(parser_class, name):
+            raise ImportError(f"argparse.ArgumentParser has no {name}(): memoctl cannot mute it")
+
+
+check_argparse_seam(argparse.ArgumentParser)
+
+
+class _Formatter(argparse.HelpFormatter):
+    """The default help layout at a fixed width (the default reads the terminal)."""
+
+    def __init__(self, prog: str) -> None:
+        super().__init__(prog, width=HELP_WIDTH)
+
+
 class _Parser(argparse.ArgumentParser):
     """An ``ArgumentParser`` that never prints and never exits."""
 
     def __init__(self, *args: object, **kwargs: object) -> None:
+        kwargs.setdefault("formatter_class", _Formatter)
         super().__init__(*args, add_help=False, allow_abbrev=False, **kwargs)  # type: ignore[arg-type]
         self._printed: list[str] = []
         self.add_argument("--help", action="help", help="show this help and exit")
 
     def error(self, message: str) -> NoReturn:
+        # argparse wraps an exception of a ``type=`` converter in an ``ArgumentError`` (the
+        # converter's exception is its ``__context__``): keep ours, which carries the field.
+        cause = sys.exc_info()[1]
+        while cause is not None:
+            if isinstance(cause, (GrammarError, UsageError)):
+                raise cause
+            cause = cause.__context__
         raise UsageError("argv")
 
     def exit(self, status: int = 0, message: str | None = None) -> NoReturn:

@@ -2,7 +2,8 @@
 
 The order in :func:`main` is fixed by interface.md (Output): the standard descriptors are
 checked first, then the ``--json`` pre-scan, then parsing. Everything printed goes through the
-gateway as UTF-8; no ``print``, no traceback, no exception text ever reaches the user.
+gateway as UTF-8; no ``print`` is used and nothing of an exception (text, traceback, locals)
+is ever rendered: a failure is built from fixed strings and identifiers only.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from memoctl.cli_errors import (
     Failure,
     UsageError,
     failure_for,
+    internal_failure,
 )
 from memoctl.gateway import Gateway, RealGateway
 
@@ -61,21 +63,26 @@ def main(
     gateway: Gateway | None = None,
     commands: Sequence[Command] = COMMANDS,
 ) -> int:
-    gateway = gateway or RealGateway()
-    ensure_standard_descriptors(gateway)
-    args = list(gateway.argv() if argv is None else argv)
-    json_mode = prescan_json(args)
+    json_mode = False
     try:
+        gateway = gateway or RealGateway()
+        ensure_standard_descriptors(gateway)
+        args = list(gateway.argv() if argv is None else argv)
+        json_mode = prescan_json(args)
         return _run(args, gateway, commands)
     except ParserExit as done:
+        assert gateway is not None  # a ParserExit comes from _run
         gateway.write_out(done.text)
         return OK
     except KeyboardInterrupt:
         return SIGINT_EXIT  # 128 + SIGINT: no output
-    except Exception as exc:  # noqa: BLE001 - the last line of defence; nothing is rendered
-        failure = failure_for(exc)
-        # Drop the traceback (its frames hold locals such as a body) before anything else.
-        exc.__traceback__ = None
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - the last line of defence
+        # A SystemExit raised by a command is a bug (its text and status are not ours to
+        # render), so it is internal like any other unmapped failure. Nothing of ``exc`` is
+        # rendered: the failure carries fixed strings only.
+        failure = failure_for(exc) if isinstance(exc, Exception) else internal_failure()
+        if gateway is None:
+            return failure.exit_code  # no gateway to report through
         return report(gateway, failure, json_mode=json_mode)
 
 
