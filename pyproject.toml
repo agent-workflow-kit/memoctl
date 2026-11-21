@@ -29,6 +29,7 @@ dev = [
     "jsonschema>=4.26.0",
     "types-pyyaml>=6.0.12.20261113",
     "regress>=2026.9.1",
+    "referencing>=0.37.0",
 ]
 
 [tool.ruff]

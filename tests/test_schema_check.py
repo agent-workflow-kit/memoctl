@@ -9,12 +9,13 @@ from typing import Any
 
 import jsonschema
 import pytest
-import regress
+from referencing.exceptions import Unresolvable
 
 from tests.schema_check import (
     SCHEMA_ROOT,
     SchemaViolation,
     all_schemas,
+    compile_pattern,
     iter_patterns,
     iter_refs,
     load_schema,
@@ -79,12 +80,22 @@ def test_every_ref_resolves_offline(name: str, monkeypatch: pytest.MonkeyPatch) 
 @pytest.mark.parametrize("name", NAMES)
 def test_every_pattern_compiles_with_regress(name: str) -> None:
     for pattern in iter_patterns(load_schema(name)):
-        regress.Regex(pattern)
+        compile_pattern(pattern)
 
 
 def test_the_regress_engine_rejects_a_bad_pattern() -> None:
     with pytest.raises(Exception):  # noqa: B017 - regress raises its own error type
-        regress.Regex("(")
+        compile_pattern("(")
+
+
+@pytest.mark.parametrize("pattern", [r"^a\_b$", r"^\d+\.x{$"])
+def test_a_pattern_only_valid_without_the_unicode_flag_fails_the_helper(pattern: str) -> None:
+    # Accepted by regress without flags, rejected with check-jsonschema 0.38.2's "u" flag.
+    import regress
+
+    regress.Regex(pattern)
+    with pytest.raises(Exception):  # noqa: B017
+        compile_pattern(pattern)
 
 
 def test_iter_patterns_finds_nested_and_property_name_patterns() -> None:
@@ -174,9 +185,65 @@ def test_an_unresolvable_ref_does_not_go_to_the_network(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(socket.socket, "connect", no_network)
     v = validator_for_schema({"$ref": "https://example.invalid/x.json"})
-    with pytest.raises(Exception) as e:  # noqa: B017
+    with pytest.raises(Unresolvable) as e:
         list(v.iter_errors({}))
     assert "network" not in str(e.value)
+
+
+# --- patterns are matched by regress, as CI does ------------------------------------------------
+
+
+def test_a_pattern_does_not_accept_a_trailing_newline() -> None:
+    v = validator_for_schema({"type": "string", "pattern": "^[a-z]+$"})
+    assert list(v.iter_errors("abc")) == []
+    assert list(v.iter_errors("abc\n"))
+
+
+def test_pattern_properties_use_regress() -> None:
+    v = validator_for_schema(
+        {"type": "object", "patternProperties": {"^x[a-z]+$": {"type": "integer"}}}
+    )
+    assert list(v.iter_errors({"xab": 1})) == []
+    assert list(v.iter_errors({"xab": "s"}))
+    assert list(v.iter_errors({"xab\n": "s"})) == []  # the key does not match, so no rule
+
+
+def test_additional_properties_respects_pattern_properties_with_regress() -> None:
+    v = validator_for_schema(
+        {"patternProperties": {"^x[a-z]+$": {}}, "additionalProperties": False}
+    )
+    assert list(v.iter_errors({"xab": 1})) == []
+    assert list(v.iter_errors({"xab\n": 1}))
+
+
+def test_additional_properties_with_a_schema() -> None:
+    v = validator_for_schema({"properties": {"a": {}}, "additionalProperties": {"type": "integer"}})
+    assert list(v.iter_errors({"a": "s", "b": 1})) == []
+    assert list(v.iter_errors({"b": "s"}))
+
+
+# --- a schema is not a way to skip validation -------------------------------------------------
+
+
+def test_a_definitions_only_schema_is_refused_as_an_output_schema() -> None:
+    with pytest.raises(SchemaViolation, match="not an output schema"):
+        validate("defs", {})
+    with pytest.raises(SchemaViolation, match="not an output schema"):
+        validate_json_output("defs", b"{}\n")
+
+
+def test_load_schema_returns_a_private_copy() -> None:
+    first = load_schema("cli/error")
+    first["properties"]["error"] = {"type": "null"}
+    del first["$id"]
+    assert load_schema("cli/error")["$id"] == "memoctl/cli/error.json"
+    validate("cli/error", GOOD_ERROR)
+
+
+def test_all_schemas_returns_a_private_copy() -> None:
+    all_schemas()["cli/error"]["type"] = "null"
+    assert all_schemas()["cli/error"]["type"] == "object"
+    validate("cli/error", GOOD_ERROR)
 
 
 # --- parsing raw command output ---------------------------------------------------------------
@@ -209,15 +276,34 @@ def test_output_must_be_one_json_document_per_line_ending() -> None:
         validate_json_output("cli/error", b"{}{}")
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"{}",  # no LF
+        b"{}\n\n",  # two LFs
+        b"{}\r\n",  # CRLF
+        b"\n{}\n",  # leading LF
+        b" {}\n",  # leading space
+        b'{\n"a": 1}\n',  # a pretty-printed document
+        b'{"a":\r1}\n',
+    ],
+)
+def test_output_must_be_one_line_ending_in_one_lf(raw: bytes) -> None:
+    with pytest.raises(SchemaViolation, match="single-line"):
+        validate_json_output("cli/error", raw)
+
+
 def test_bytes_only() -> None:
     with pytest.raises(TypeError):
         validate_json_output("cli/error", "{}")  # type: ignore[arg-type]
 
 
-def test_a_broken_ref_is_caught_by_resolution() -> None:
-    from referencing.exceptions import Unresolvable
-
-    registry_schema = {"$id": "memoctl/cli/error.json", "$ref": "../defs.json#/$defs/nope"}
-    resolver = validator_for_schema(registry_schema)._resolver  # type: ignore[attr-defined]
+@pytest.mark.parametrize("ref", ["#/$defs/nope", "nope.json", "../defs.json#/$defs/nope"])
+def test_a_broken_ref_is_caught_by_resolution(ref: str) -> None:
+    broken = {"$id": "memoctl/cli/error.json", "$ref": ref}
     with pytest.raises(Unresolvable):
-        resolver.lookup("../defs.json#/$defs/nope")
+        resolve_all_refs("cli/error", broken)
+
+
+def test_a_good_ref_passes_resolution() -> None:
+    resolve_all_refs("cli/error", {"$id": "memoctl/cli/error.json", "$ref": "../defs.json"})

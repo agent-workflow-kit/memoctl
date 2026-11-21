@@ -15,6 +15,9 @@ from tests.golden_files import (
     normalize,
 )
 
+# Regeneration warns by design; the tests that regenerate need not show it.
+pytestmark = pytest.mark.filterwarnings("ignore:.*rewrote golden:UserWarning")
+
 ERR_ENVELOPE = (
     b'{"error": {"code": "usage", "message": "m", "reason": null,'
     b' "details": {"field": "limit"}, "retryable": false}}\n'
@@ -185,11 +188,38 @@ def test_regeneration_keeps_exact_bytes(root: Path) -> None:
     assert (root / "t" / "a.bin").read_bytes() == data
 
 
-@pytest.mark.parametrize("ci", ["CI", "GITHUB_ACTIONS", "BUILD_NUMBER", "TF_BUILD"])
+@pytest.mark.parametrize(
+    "ci",
+    [
+        "CI",
+        "GITHUB_ACTIONS",
+        "BUILD_NUMBER",
+        "TF_BUILD",
+        "BUILDKITE",
+        "GITLAB_CI",
+        "JENKINS_URL",
+        "TEAMCITY_VERSION",
+        "CIRCLECI",
+        "CODEBUILD_BUILD_ID",
+    ],
+)
 def test_regeneration_is_refused_in_ci(root: Path, ci: str) -> None:
     with pytest.raises(GoldenError, match="CI"):
         check_golden("t/a.txt", b"x", root=root, environ={UPDATE_ENV: "1", ci: "true"})
     assert not (root / "t").exists()
+
+
+def test_regeneration_warns_for_each_golden_it_rewrites(root: Path) -> None:
+    with pytest.warns(UserWarning, match=r"rewrote golden t/a\.txt"):
+        check_golden("t/a.txt", b"x", root=root, environ={UPDATE_ENV: "1"})
+    with pytest.warns(UserWarning, match=r"rewrote golden t/b\.txt"):
+        check_golden("t/b.txt", b"y", root=root, environ={UPDATE_ENV: "1"})
+
+
+def test_a_passing_comparison_does_not_warn(root: Path, recwarn: pytest.WarningsRecorder) -> None:
+    _seed(root, "t/a.txt", b"x")
+    check_golden("t/a.txt", b"x", root=root, environ={})
+    assert len(recwarn) == 0
 
 
 def test_regeneration_leaves_no_temporary_files(root: Path) -> None:
@@ -229,6 +259,25 @@ def test_a_schema_is_refused_for_a_non_json_golden(root: Path) -> None:
         check_golden("t/a.txt", b"x", schema="cli/error", root=root, environ={UPDATE_ENV: "1"})
 
 
+@pytest.mark.parametrize("name", ["t/a.txt", "t/a.bin"])
+@pytest.mark.parametrize("data", [b'{"a": 1}\n', b"[1]\n", b'{"error": {}}'])
+def test_json_output_in_a_non_json_golden_is_refused(root: Path, name: str, data: bytes) -> None:
+    with pytest.raises(GoldenError, match=r"needs a \.json golden and a schema"):
+        check_golden(name, data, root=root, environ={UPDATE_ENV: "1"})
+    assert not (root / "t").exists()
+
+
+@pytest.mark.parametrize("data", [b"3\n", b"true\n", b"not json {\n", b"\xff{}"])
+def test_plain_text_is_not_mistaken_for_json(root: Path, data: bytes) -> None:
+    check_golden("t/a.txt", data, root=root, environ={UPDATE_ENV: "1"})
+
+
+def test_a_definitions_only_schema_cannot_validate_a_json_golden(root: Path) -> None:
+    with pytest.raises(AssertionError, match="not an output schema"):
+        check_golden("t/a.json", b"{}\n", schema="defs", root=root, environ={UPDATE_ENV: "1"})
+    assert not (root / "t").exists()
+
+
 # --- volatile values --------------------------------------------------------------------------
 
 
@@ -263,6 +312,25 @@ def test_a_golden_with_a_volatile_path_is_refused(root: Path, tmp_path: Path) ->
     with pytest.raises(GoldenError, match="volatile"):
         check_golden("t/a.txt", b"/tmp/pytest-of-x/y", root=root, environ={UPDATE_ENV: "1"})
     assert not (root / "t").exists()
+
+
+def test_a_volatile_marker_inside_a_longer_name_is_not_a_leak(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/h")))
+    ok = b"/tmpfoo /var/tmp /help /hx x/h/y.sh /h-ok a/tmp\n"
+    check_golden("t/a.txt", ok, root=root, environ={UPDATE_ENV: "1"})
+
+
+@pytest.mark.parametrize(
+    "text", [b"/h/x\n", b"at /h\n", b"(/h)\n", b"/h:1\n", b"/tmp/x\n", b"in /tmp\n"]
+)
+def test_a_volatile_path_prefix_is_still_a_leak(
+    root: Path, monkeypatch: pytest.MonkeyPatch, text: bytes
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/h")))
+    with pytest.raises(GoldenError, match="volatile"):
+        check_golden("t/a.txt", text, root=root, environ={UPDATE_ENV: "1"})
 
 
 # --- the committed goldens --------------------------------------------------------------------

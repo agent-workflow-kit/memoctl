@@ -15,9 +15,11 @@ unvalidated ``--json`` output: ``check_golden`` refuses a ``.json`` name without
 from __future__ import annotations
 
 import difflib
+import json
 import os
 import re
 import tempfile
+import warnings
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
@@ -25,7 +27,18 @@ from tests.schema_check import validate_json_output
 
 GOLDEN_ROOT = Path(__file__).resolve().parent / "golden"
 UPDATE_ENV = "MEMOCTL_UPDATE_GOLDEN"
-CI_VARIABLES = ("CI", "GITHUB_ACTIONS", "BUILD_NUMBER", "TF_BUILD", "BUILDKITE", "GITLAB_CI")
+CI_VARIABLES = (
+    "CI",
+    "GITHUB_ACTIONS",
+    "BUILD_NUMBER",
+    "TF_BUILD",
+    "BUILDKITE",
+    "GITLAB_CI",
+    "JENKINS_URL",
+    "TEAMCITY_VERSION",
+    "CIRCLECI",
+    "CODEBUILD_BUILD_ID",
+)
 _PART = r"[a-z0-9][a-z0-9_-]*"
 NAME_RE = re.compile(rf"{_PART}(/{_PART})*\.(json|txt|bin)")
 
@@ -55,6 +68,15 @@ def _volatile_markers() -> list[str]:
     if home != "/":
         markers.append(home)
     return [m for m in markers if m and m != "/"]
+
+
+def _leaks(marker: str, data: bytes) -> bool:
+    """Whether ``marker`` occurs in ``data``. A path marker counts only as a whole path prefix
+    (not inside a longer name such as ``/tmpfoo`` or ``/var/tmp``); other markers anywhere."""
+    raw = re.escape(os.fsencode(marker))
+    if not marker.startswith("/"):
+        return re.search(raw, data) is not None
+    return re.search(rb"(?<![A-Za-z0-9_.-])" + raw + rb"(?![A-Za-z0-9_-])", data) is not None
 
 
 def normalize(
@@ -97,14 +119,17 @@ def check_golden(
         raise GoldenError(f"{name}: a schema applies only to a .json golden")
     if schema is not None:
         validate_json_output(schema, actual)
+    if not is_json and _is_json_document(actual):
+        raise GoldenError(f"{name}: JSON output needs a .json golden and a schema")
     for marker in _volatile_markers():
-        if os.fsencode(marker) in actual:
+        if _leaks(marker, actual):
             raise GoldenError(f"{name}: volatile value {marker!r} in the output; normalize() it")
 
     if env.get(UPDATE_ENV) == "1":
         if _in_ci(env):
             raise GoldenError(f"{name}: regeneration is refused in CI")
         _write(path, actual)
+        warnings.warn(f"{UPDATE_ENV}=1: rewrote golden {name}", UserWarning, stacklevel=2)
         return
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise GoldenError(f"{name}: the golden is a symlink or not a regular file")
@@ -117,6 +142,14 @@ def check_golden(
             f"{_diff(name, golden, actual)}"
             f"If the change is intended, regenerate with {UPDATE_ENV}=1 and review the diff."
         )
+
+
+def _is_json_document(data: bytes) -> bool:
+    """Whether ``data`` is one JSON object or array (a bare number or word is plain text)."""
+    try:
+        return isinstance(json.loads(data.decode("utf-8")), dict | list)
+    except ValueError:
+        return False
 
 
 def _write(path: Path, data: bytes) -> None:
