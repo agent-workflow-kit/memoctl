@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tracemalloc
 from collections.abc import Sequence
@@ -14,6 +15,7 @@ import pytest
 
 from memoctl import notes_read
 from memoctl.cli import main
+from memoctl.lifetime import format_timestamp
 from memoctl.statedir import open_state_dir
 from memoctl.store import Mode, open_store
 from tests.fake_gateway import EPOCH, FakeExit, FakeGateway
@@ -559,6 +561,53 @@ def test_hundred_thousand_notes_bounded_work_and_memory(gw: FakeGateway) -> None
 
 
 def test_timestamps_roundtrip() -> None:
-    assert notes_read.format_timestamp(0) == "1970-01-01T00:00:00Z"
-    assert notes_read.format_timestamp(253402300799) == "9999-12-31T23:59:59Z"
+    assert format_timestamp(0) == "1970-01-01T00:00:00Z"
+    assert format_timestamp(253402300799) == "9999-12-31T23:59:59Z"
     assert datetime.fromtimestamp(NOW, UTC) == EPOCH
+
+
+# --- state directory failures (exit 20 unsafe_state, exit 12 db_unreadable) -------------------
+
+READ_ARGVS = [("list",), ("show", "1")]
+READ_IDS = ["list", "show"]
+
+
+def state_dir(gw: FakeGateway) -> Path:
+    return db_path(gw).parent
+
+
+@pytest.mark.parametrize("argv", READ_ARGVS, ids=READ_IDS)
+def test_an_unsafe_state_directory_is_refused_20(gw: FakeGateway, argv: tuple[str, ...]) -> None:
+    state_dir(gw).mkdir(parents=True)
+    state_dir(gw).chmod(0o777)
+    assert run(gw, *argv, "--json") == 20
+    err = out_json(gw)["error"]
+    assert (err["code"], err["reason"], err["details"]) == ("refused", "unsafe_state", None)
+    assert gw.terminal.stderr == "refused (unsafe_state): state directory is not safe to use\n"
+
+
+@pytest.mark.parametrize("argv", READ_ARGVS, ids=READ_IDS)
+def test_an_unreachable_state_directory_is_exit_12(gw: FakeGateway, argv: tuple[str, ...]) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory modes")
+    seed(gw, [dict(id=1)]).close()
+    parent = state_dir(gw).parent
+    parent.chmod(0o000)  # the state directory cannot be reached
+    try:
+        code = run(gw, *argv, "--json")
+    finally:
+        parent.chmod(0o700)
+    assert code == 12
+    err = out_json(gw)["error"]
+    assert (err["code"], err["reason"]) == ("failed", "db_unreadable")
+
+
+@pytest.mark.parametrize("argv", READ_ARGVS, ids=READ_IDS)
+def test_json_output_is_one_compact_line_and_a_single_lf(
+    gw: FakeGateway, argv: tuple[str, ...]
+) -> None:
+    seed(gw, [dict(id=1, body="a b")], [(1, "k", "v")])
+    assert run(gw, *argv, "--json") == 0
+    out = gw.terminal.stdout
+    compact = json.dumps(json.loads(out), ensure_ascii=True, separators=(",", ":")) + "\n"
+    assert out == compact

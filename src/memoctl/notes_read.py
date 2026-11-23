@@ -18,11 +18,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
 from typing import Any, LiteralString
 
 from memoctl.deadline import current
 from memoctl.gateway import Gateway
+from memoctl.lifetime import format_timestamp
 from memoctl.statedir import open_state_dir
 from memoctl.store import (
     MAX_ID,
@@ -40,7 +40,6 @@ __all__ = [
     "Filters",
     "ListResult",
     "fetch_note",
-    "format_timestamp",
     "note_status",
     "open_read_store",
     "scan",
@@ -90,11 +89,6 @@ def open_read_store(gateway: Gateway) -> Store | None:
         return None
     with state:
         return open_store(state, Mode.READ, configure=current().configure_store)
-
-
-def format_timestamp(seconds: int) -> str:
-    """``YYYY-MM-DDTHH:MM:SSZ`` of a checked row timestamp (0 to 253402300799)."""
-    return datetime.fromtimestamp(seconds, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def note_status(row: NoteRow, now: int) -> str:

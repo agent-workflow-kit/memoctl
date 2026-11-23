@@ -145,6 +145,14 @@ class UsageError(Exception):
         self.limit = limit  # details.limit where one applies (the label count)
 
 
+class NoteNotFoundError(Exception):
+    """An id that names no note (exit 10 ``not_found``); carries the id only."""
+
+    def __init__(self, note_id: int) -> None:
+        super().__init__("note not found")
+        self.note_id = note_id
+
+
 @dataclass(frozen=True)
 class Failure:
     """One failed command, ready to render. Built only from fixed strings and identifiers."""
@@ -300,6 +308,10 @@ def _register_defaults() -> None:
     register_error(
         StateAccessError,
         lambda e: Failure(FAILED, "failed", "state cannot be accessed", "db_unreadable"),
+    )
+    register_error(
+        NoteNotFoundError,
+        lambda e: Failure(NOT_FOUND, "not_found", "note not found", details={"id": e.note_id}),
     )
     # A bad clock is an environment fault with no code of its own (interface.md, Exit codes).
     register_error(ClockError, lambda e: internal_failure())

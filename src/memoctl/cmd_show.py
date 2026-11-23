@@ -12,13 +12,11 @@ import json
 
 from memoctl import deadline
 from memoctl.cli_args import Command
-from memoctl.cli_errors import NOT_FOUND, Failure
+from memoctl.cli_errors import NoteNotFoundError
 from memoctl.gateway import Gateway
 from memoctl.grammar import GrammarError, matches
 from memoctl.notes_read import fetch_note, open_read_store
 from memoctl.render import Rendered, emit, format_show
-
-NOT_FOUND_MESSAGE = "note not found"
 
 
 def _id(text: str) -> int:
@@ -31,14 +29,6 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("id", type=_id, help="the note id")
 
 
-def _not_found(gateway: Gateway, note_id: int, *, json_mode: bool) -> int:
-    failure = Failure(NOT_FOUND, "not_found", NOT_FOUND_MESSAGE, details={"id": note_id})
-    if json_mode:
-        gateway.write_out(failure.envelope())
-    gateway.write_err(failure.status_line())
-    return failure.exit_code
-
-
 def run(args: argparse.Namespace, gateway: Gateway) -> int:
     now = int(gateway.now().timestamp())
     store = open_read_store(gateway)
@@ -48,9 +38,9 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
             document = fetch_note(store, args.id, now)
     deadline.current().disarm()
     if document is None:
-        return _not_found(gateway, args.id, json_mode=args.json)
+        raise NoteNotFoundError(args.id)
     if args.json:
-        gateway.write_out(json.dumps(document, ensure_ascii=True, separators=(", ", ": ")) + "\n")
+        gateway.write_out(json.dumps(document, ensure_ascii=True, separators=(",", ":")) + "\n")
         return 0
     rendered: Rendered = format_show(document)
     emit(gateway, rendered)

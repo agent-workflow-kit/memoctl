@@ -81,7 +81,7 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
     deadline.current().disarm()
     document = result.document()
     if args.json:
-        gateway.write_out(json.dumps(document, ensure_ascii=True, separators=(", ", ": ")) + "\n")
+        gateway.write_out(json.dumps(document, ensure_ascii=True, separators=(",", ":")) + "\n")
         if result.hidden > 0 and not args.quiet:
             gateway.write_err(HIDDEN_LINE.format(result.hidden))
         return 0
