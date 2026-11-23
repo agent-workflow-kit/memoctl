@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import io
 import os
 import pwd
 import sys
 import threading
+import time
 from datetime import UTC
 from pathlib import Path
 
@@ -33,6 +33,26 @@ def test_run_returns_nonzero_status_without_raising() -> None:
 
 def test_run_stdin_round_trips_surrogates() -> None:
     assert gateway._run(["/bin/cat"], stdin="\udcff").stdout == "\udcff"
+
+
+@pytest.mark.parametrize(
+    ("ns", "seconds", "micro"),
+    [
+        (1_999_999_999, 1, 999_999),  # 0.5 microsecond below the second: float() rounds up
+        (1_000_000_000_000_000_000 - 1, 999_999_999, 999_999),
+        (0, 0, 0),
+        (1_700_000_000_123_456_789, 1_700_000_000, 123_456),
+    ],
+)
+def test_now_floors_time_ns_exactly(
+    monkeypatch: pytest.MonkeyPatch, ns: int, seconds: int, micro: int
+) -> None:
+    """The clock is read as integer nanoseconds and floored; no float rounding to the next
+    second (interface.md, Log)."""
+    monkeypatch.setattr("memoctl.gateway.time.time_ns", lambda: ns)
+    now = RealGateway().now()
+    assert int(now.timestamp()) == seconds
+    assert now.microsecond == micro
 
 
 def test_now_is_timezone_aware_utc() -> None:
@@ -63,11 +83,6 @@ def test_files_round_trip_exact_bytes(tmp_path: Path) -> None:
     data = b"\x00\xff no newline"
     gw.write_bytes(tmp_path / "f", data)
     assert gw.read_bytes(tmp_path / "f") == data
-
-
-def test_stdin_comes_from_the_process_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "stdin", io.StringIO("in\n"))
-    assert RealGateway().stdin_read() == "in\n"
 
 
 def test_output_goes_to_descriptors_1_and_2(capfdbinary: pytest.CaptureFixture[bytes]) -> None:
@@ -273,7 +288,6 @@ def test_real_gateway_descriptor_primitives() -> None:
 
 
 def test_real_gateway_argv_is_a_copy_without_the_program(monkeypatch: pytest.MonkeyPatch) -> None:
-    import sys
 
     monkeypatch.setattr(sys, "argv", ["memoctl", "a", "--json"])
     argv = RealGateway().argv()
@@ -322,3 +336,62 @@ def test_a_pipe_that_never_drains_gives_up_after_the_bound(
     finally:
         os.close(reader)
         os.close(writer)
+
+
+def test_a_full_blocking_pipe_gives_up_after_the_bound_instead_of_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway, "WRITE_WAIT_SECONDS", 0.2)
+    reader, writer = os.pipe()
+    os.set_blocking(writer, False)
+    while True:  # fill it to capacity, then make the descriptor blocking again
+        try:
+            os.write(writer, b"\0" * 4096)
+        except BlockingIOError:
+            break
+    os.set_blocking(writer, True)
+    done = threading.Event()
+
+    def write() -> None:
+        gateway._write_fd(writer, "x" * 100_000)
+        done.set()
+
+    thread = threading.Thread(target=write, daemon=True)
+    thread.start()
+    finished = done.wait(timeout=10)
+    if not finished:  # unblock the stuck writer so the test can clean up
+        os.set_blocking(reader, False)
+        while True:
+            try:
+                if not os.read(reader, 65536):
+                    break
+            except BlockingIOError:
+                break
+        thread.join(timeout=5)
+    os.close(reader)
+    os.close(writer)
+    assert finished
+
+
+def test_a_slow_but_steady_reader_receives_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The budget is per stall: the whole transfer outlasts it, no single stall does.
+    monkeypatch.setattr(gateway, "WRITE_WAIT_SECONDS", 0.3)
+    reader, writer = os.pipe()
+    chunks: list[bytes] = []
+
+    def drain() -> None:
+        while chunk := os.read(reader, 4096):
+            chunks.append(chunk)
+            time.sleep(0.02)
+
+    thread = threading.Thread(target=drain)
+    thread.start()
+    payload = "x" * 300_000  # ~75 reads at 20 ms each: well over 0.3 s in all
+    try:
+        gateway._write_fd(writer, payload)
+    finally:
+        os.close(writer)
+        thread.join(timeout=20)
+        os.close(reader)
+    assert not thread.is_alive()
+    assert sum(len(c) for c in chunks) == len(payload)

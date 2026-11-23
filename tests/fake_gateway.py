@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import random
+import stat
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from typing import NoReturn
 
 from memoctl.gateway import (
     TEMP_PREFIX,
+    BodySourceError,
     DirHandle,
     FileRead,
     GatewayError,
@@ -81,11 +83,14 @@ class FakeAlarm:
 class FakeTerminal:
     """Scripted standard input and recorded output; not a tty unless the test says so."""
 
-    stdin: str = ""
+    stdin: str | bytes = ""
     stdout: str = ""
     stderr: str = ""
     width: int = 80
     tty: dict[int, bool] = field(default_factory=dict)
+    # A ``BodySourceError`` reason raised by ``read_stdin_bounded`` (terminal, not_regular,
+    # unreadable), to model a stdin the real gateway refuses.
+    stdin_error: str | None = None
 
 
 @dataclass
@@ -97,12 +102,33 @@ class FakeCrontab:
     fail_with: str | None = None
 
 
+def _stdin_bytes(data: str | bytes) -> bytes:
+    """UTF-8 with ``surrogateescape`` (the bytes a real stdin would carry); a lone surrogate
+    outside U+DC80 to U+DCFF is written as its three-byte form instead of raising."""
+    if isinstance(data, bytes):
+        return data
+    try:
+        return data.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        return b"".join(
+            bytes([ord(c) - 0xDC00])
+            if 0xDC80 <= ord(c) <= 0xDCFF
+            else c.encode("utf-8", "surrogatepass")
+            for c in data
+        )
+
+
 class FakeGateway:
     """Implements ``memoctl.gateway.Gateway`` with no real home, clock, terminal or crontab.
 
     Files live under ``root``: relative paths resolve against ``root`` (never the working
     directory) and every path is confined to it (symlinks resolved).
     ``run`` never starts a process: results are scripted with ``script_run``.
+
+    Known deviations of ``read_file_bounded`` from the real gateway: it is hermetic, so a
+    path that resolves outside ``root`` (an absolute path to a real file, say) answers
+    ``unreadable`` where the real gateway reads it; the type checks (symlink in the last
+    component, then not a regular file) run first, in the real order.
 
     Known deviations of the crontab fakes (this class and ``tests/fakebin/crontab``) from a
     real crontab: unknown or extra arguments exit 64 (real: 1 with a usage message); no
@@ -121,6 +147,8 @@ class FakeGateway:
         self.login: str | None = "tester"
         self.uid_value = os.getuid()  # tests set another value to simulate a foreign owner
         self.environ: dict[str, str] = {}
+        self.denied_access: set[Path] = set()  # resolved paths ``access`` answers False for
+        self.mountinfo: bytes | None = None  # the /proc/self/mountinfo the fake serves
         self.argv_value: list[str] = []
         # Open descriptors by name ("r" or "w"); a test closes one with ``del gw.fds[1]``.
         self.fds: dict[int, str] = {0: "r", 1: "w", 2: "w"}
@@ -133,8 +161,11 @@ class FakeGateway:
         self.mono = 1000.0
         self.alarms: list[FakeAlarm] = []
         self.exits: list[int] = []
+        self.now_calls = 0  # clock reads: a command reads the clock once
+        self.stdin_reads = 0  # read_stdin_bounded calls: a refusal before the body never reads
 
     def now(self) -> datetime:
+        self.now_calls += 1
         return self.clock.now()
 
     def home(self) -> Path:
@@ -168,6 +199,35 @@ class FakeGateway:
         self.fds.pop(fd, None)
         self.fd_calls.append(("close", fd))
 
+    def read_stdin_bounded(self, nbytes: int) -> bytes:
+        self.stdin_reads += 1
+        if self.terminal.stdin_error is not None:
+            raise BodySourceError(self.terminal.stdin_error)
+        if self.terminal.tty.get(0, False):
+            raise BodySourceError("terminal")
+        return _stdin_bytes(self.terminal.stdin)[:nbytes]
+
+    def read_file_bounded(self, path: Path, nbytes: int) -> bytes:
+        if "\0" in str(path):
+            raise BodySourceError("unreadable")
+        try:
+            mode = (self.root / path).lstat().st_mode
+        except OSError:
+            raise BodySourceError("unreadable") from None
+        if stat.S_ISLNK(mode):
+            raise BodySourceError("symlink")
+        if not stat.S_ISREG(mode):
+            raise BodySourceError("not_regular")
+        try:
+            target = self._confined(path)
+        except GatewayError:
+            raise BodySourceError("unreadable") from None
+        try:
+            with target.open("rb") as f:
+                return f.read(nbytes)
+        except OSError:
+            raise BodySourceError("unreadable") from None
+
     def monotonic(self) -> float:
         return self.mono
 
@@ -190,9 +250,6 @@ class FakeGateway:
     def exit_now(self, code: int) -> NoReturn:
         self.exits.append(code)
         raise FakeExit(code)
-
-    def stdin_read(self) -> str:
-        return self.terminal.stdin
 
     def write_out(self, text: str, *, bound: float | None = None) -> None:
         self.terminal.stdout += text
@@ -242,6 +299,19 @@ class FakeGateway:
 
     def list_dir(self, path: Path) -> list[str]:
         return os.listdir(self._confined(path))
+
+    def access(self, path: Path, *, write: bool, search: bool) -> bool:
+        target = self._confined(path)
+        if target in self.denied_access:
+            return False
+        mode = (os.W_OK if write else 0) | (os.X_OK if search else 0)
+        return os.access(target, mode or os.F_OK)
+
+    def resolve_path(self, path: Path) -> Path:
+        return self._confined(path)
+
+    def read_mountinfo(self, limit: int) -> bytes | None:
+        return None if self.mountinfo is None else self.mountinfo[:limit]
 
     def open_file(self, path: Path, limit: int) -> FileRead | None:
         target = self._confined_nofollow(path)

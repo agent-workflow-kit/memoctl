@@ -13,8 +13,11 @@ stdin or files, never in argv or the environment. Process output is decoded as U
 Signals are process-wide host state, so the wall-clock alarm (``alarm_arm``) and the immediate
 exit (``exit_now``) live here too; ``memoctl.deadline`` builds the command deadline on them.
 
-A command reads the clock once with ``now()`` and hands the value down as a parameter.
-todo(#16): enforce one clock read per command.
+Body sources (``read_file_bounded``, ``read_stdin_bounded``) return raw bytes, never text.
+
+A command reads the clock once with ``now()`` and hands the value down as a parameter; ``add``
+reads it once at its step 7 (``tests/test_cmd_add.py`` asserts a single read). ``now()`` floors
+``time.time_ns()``, so the seconds and milliseconds derived from it never round up.
 
 ``env`` is the only way to read an environment variable (``os.environ`` is banned elsewhere).
 The config loader never calls it: HOME and XDG_* are not read (interface.md, Config).
@@ -23,6 +26,7 @@ The config loader never calls it: HOME and XDG_* are not read (interface.md, Con
 from __future__ import annotations
 
 import errno
+import fcntl
 import math
 import os
 import pwd
@@ -37,7 +41,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn, Protocol
 
@@ -133,7 +137,114 @@ class DirHandle(Protocol):
         with exactly ``mode`` (the umask does not apply). ``False`` when anything is there."""
         ...
 
+    def open_file_at(self, name: str, mode: int, *, create: bool) -> FileHandle | None:
+        """Open the file ``name`` for reading and appending: ``O_RDWR | O_APPEND | O_NOFOLLOW |
+        O_NONBLOCK | O_CLOEXEC`` (a final symlink is refused, a FIFO does not block). With
+        ``create`` a missing file is made with ``mode`` (the umask is not compensated: callers
+        call :meth:`FileHandle.set_mode`); without it ``None`` is returned for a missing file.
+        Any other failure raises ``OSError``. The kind and owner are the caller's to check
+        through :meth:`FileHandle.stat`."""
+        ...
+
+    def repair_file_mode(self, name: str, uid: int, mode: int) -> bool:
+        """Set ``name`` to exactly ``mode`` when it is a regular file owned by ``uid``, for a
+        file whose current mode denies the owner access (so :meth:`open_file_at` got ``EACCES``).
+        No symlink is followed and a FIFO is never opened. ``False`` when the file is missing or
+        is not an own regular file (nothing is changed); ``OSError`` as the filesystem reports."""
+        ...
+
+    def size_of(self, name: str) -> int | None:
+        """Size in bytes of the regular file ``name`` (no symlink followed); ``None`` when it is
+        missing, ``-1`` when it is not a regular file."""
+        ...
+
+    def rename(self, old: str, new: str) -> None:
+        """``renameat``: atomically move ``old`` onto ``new`` (replacing a file there) inside this
+        directory. Never follows a symlink; ``OSError`` as the filesystem reports."""
+        ...
+
     def close(self) -> None: ...
+
+
+class FileHandle(Protocol):
+    """An open regular-file descriptor opened by :meth:`DirHandle.open_file_at`. ``close`` is
+    idempotent; any other call on a closed handle raises ``OSError``."""
+
+    def stat(self) -> PathInfo:
+        """Kind, owner and mode of the opened file (``fstat``)."""
+        ...
+
+    def size(self) -> int:
+        """Size in bytes (``fstat``)."""
+        ...
+
+    def set_mode(self, mode: int) -> None:
+        """Set the permission bits exactly (``fchmod``; the umask does not apply)."""
+        ...
+
+    def read_at(self, offset: int, count: int) -> bytes:
+        """``pread``: up to ``count`` bytes at ``offset`` (empty past the end)."""
+        ...
+
+    def append(self, data: bytes) -> int:
+        """Exactly one ``write`` call; returns the number of bytes it wrote, which may be fewer
+        than ``len(data)`` (the caller decides). ``OSError`` as the filesystem reports."""
+        ...
+
+    def lock_exclusive(self, timeout: float) -> bool:
+        """Take an exclusive ``flock``, polling a non-blocking attempt for at most ``timeout``
+        seconds; ``False`` when it was not got in time. The lock is released by ``close``."""
+        ...
+
+    def close(self) -> None: ...
+
+
+LOCK_POLL_SECONDS = 0.01
+
+
+class _RealFileHandle:
+    def __init__(self, fd: int) -> None:
+        self._fd: int | None = fd
+
+    def _live(self) -> int:
+        if self._fd is None:
+            raise OSError(errno.EBADF, "file handle is closed")
+        return self._fd
+
+    def stat(self) -> PathInfo:
+        return _info(os.fstat(self._live()))
+
+    def size(self) -> int:
+        return os.fstat(self._live()).st_size
+
+    def set_mode(self, mode: int) -> None:
+        os.fchmod(self._live(), mode)
+
+    def read_at(self, offset: int, count: int) -> bytes:
+        return os.pread(self._live(), count, offset)
+
+    def append(self, data: bytes) -> int:
+        if not isinstance(data, bytes):
+            raise TypeError(f"append needs bytes, got {type(data).__name__}")
+        return os.write(self._live(), data)
+
+    def lock_exclusive(self, timeout: float) -> bool:
+        fd = self._live()
+        deadline = time.monotonic() + max(timeout, 0.0)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                pass
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(LOCK_POLL_SECONDS)
+
+    def close(self) -> None:
+        if self._fd is not None:
+            fd, self._fd = self._fd, None
+            os.close(fd)
 
 
 class _RealDirHandle:
@@ -217,6 +328,70 @@ class _RealDirHandle:
             os.close(fd)
         return True
 
+    def open_file_at(self, name: str, mode: int, *, create: bool) -> FileHandle | None:
+        flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        if create:
+            flags |= os.O_CREAT
+        try:
+            fd = os.open(_component(name), flags, mode, dir_fd=self._live())
+        except FileNotFoundError:
+            if create:
+                raise  # the directory itself is gone
+            return None
+        return _RealFileHandle(fd)
+
+    def repair_file_mode(self, name: str, uid: int, mode: int) -> bool:
+        fd = self._live()
+        component = _component(name)
+        info = self.lstat(name)
+        if info is None or info.kind != "file" or info.uid != uid:
+            return False
+        # Open it read-only, then write-only, to fchmod the verified inode. A mode that denies
+        # both (0000, 0100) leaves chmod by name, which never follows a symlink.
+        for access in (os.O_RDONLY, os.O_WRONLY):
+            flags = access | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            try:
+                ro = os.open(component, flags, dir_fd=fd)
+            except PermissionError:
+                continue
+            try:
+                st = os.fstat(ro)
+                if not stat.S_ISREG(st.st_mode) or st.st_uid != uid:
+                    return False
+                os.fchmod(ro, mode)
+                return True
+            finally:
+                os.close(ro)
+        try:
+            before = os.stat(component, dir_fd=fd, follow_symlinks=False)
+            os.chmod(component, mode, dir_fd=fd, follow_symlinks=False)
+            after = os.stat(component, dir_fd=fd, follow_symlinks=False)
+        except (ValueError, NotImplementedError):
+            # A symlink swapped in after the lstat makes chmod refuse the dir_fd and
+            # follow_symlinks combination (ValueError / NotImplementedError).
+            return False
+        # Post-condition: the name still is the same regular file of ours. The lstat -> chmod
+        # step is not atomic: a same-uid process that swaps the name in that window can still
+        # get one chmod applied to an inode it chose before this check notices (residual,
+        # accepted: it already runs as the same user).
+        return (
+            stat.S_ISREG(before.st_mode)
+            and stat.S_ISREG(after.st_mode)
+            and after.st_uid == uid
+            and (after.st_ino, after.st_dev) == (before.st_ino, before.st_dev)
+        )
+
+    def size_of(self, name: str) -> int | None:
+        try:
+            st = os.stat(_component(name), dir_fd=self._live(), follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        return st.st_size if stat.S_ISREG(st.st_mode) else -1
+
+    def rename(self, old: str, new: str) -> None:
+        fd = self._live()
+        os.rename(_component(old), _component(new), src_dir_fd=fd, dst_dir_fd=fd)
+
     def close(self) -> None:
         if self._fd is not None:
             fd, self._fd = self._fd, None
@@ -241,6 +416,25 @@ class AlarmHandle(Protocol):
         True when the timer had already run out (the alarm fired or is pending). Idempotent:
         later calls do nothing and return False."""
         ...
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+# Why a body source was refused; fixed strings, never the path or the content.
+SOURCE_REASONS = ("symlink", "not_regular", "terminal", "unreadable")
+READ_CHUNK = 65536
+
+
+class BodySourceError(GatewayError):
+    """A file or standard input cannot be used as a body source. ``reason`` is one of
+    ``SOURCE_REASONS``; the message never contains the path or any content."""
+
+    def __init__(self, reason: str) -> None:
+        if reason not in SOURCE_REASONS:
+            raise ValueError(f"unknown body source reason {reason!r}")
+        super().__init__(f"body source refused ({reason})")
+        self.reason = reason
 
 
 class Gateway(Protocol):
@@ -275,18 +469,25 @@ class Gateway(Protocol):
         """The entry names of a directory, unordered. Raises ``OSError`` as the filesystem does."""
         ...
 
+    def access(self, path: Path, *, write: bool, search: bool) -> bool:
+        """``os.access`` for the real user id (``W_OK`` when ``write``, ``X_OK`` when
+        ``search``; both must hold). ``False`` when the path is missing or on any error."""
+        ...
+
+    def resolve_path(self, path: Path) -> Path:
+        """``path`` made absolute with every symlink resolved (a missing tail is kept as is)."""
+        ...
+
+    def read_mountinfo(self, limit: int) -> bytes | None:
+        """The first ``limit`` bytes of ``/proc/self/mountinfo``; ``None`` when it cannot be
+        read (not Linux, not mounted)."""
+        ...
+
     def open_file(self, path: Path, limit: int) -> FileRead | None:
         """Open ``path`` without following a symlink and without blocking, check the opened
         descriptor and read at most ``limit + 1`` bytes of a regular file. ``None`` when the
         file is missing; a symlink gives kind ``symlink`` (nothing read). Other errors raise
         ``OSError``."""
-        ...
-
-    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
-        """Open the directory ``path`` (``O_DIRECTORY``; a final symlink is followed only when
-        ``follow``; symlinks in parent components are always followed). ``None`` when it or a
-        parent is missing. A final symlink (not following), a non-directory (also as a parent)
-        and a refusal raise ``OSError``."""
         ...
 
     def argv(self) -> list[str]:
@@ -311,6 +512,23 @@ class Gateway(Protocol):
         """Close ``fd``; an ``OSError`` is ignored."""
         ...
 
+    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
+        """Open the directory ``path`` (``O_DIRECTORY``; a final symlink is followed only when
+        ``follow``; symlinks in parent components are always followed). ``None`` when it or a
+        parent is missing. A final symlink (not following), a non-directory (also as a parent)
+        and a refusal raise ``OSError``."""
+        ...
+
+    def read_file_bounded(self, path: Path, nbytes: int) -> bytes:
+        """Read at most ``nbytes`` bytes of the regular file at ``path`` without following a
+        symlink in its last component. Raises ``BodySourceError``."""
+        ...
+
+    def read_stdin_bounded(self, nbytes: int) -> bytes:
+        """Read at most ``nbytes`` bytes from standard input (fewer at end of file). Raises
+        ``BodySourceError`` for a terminal, a directory or a descriptor that cannot be read."""
+        ...
+
     def monotonic(self) -> float:
         """A monotonic clock in seconds, for measuring the deadline (never for a timestamp)."""
         ...
@@ -329,7 +547,6 @@ class Gateway(Protocol):
         own children)."""
         ...
 
-    def stdin_read(self) -> str: ...
     def write_out(self, text: str, *, bound: float | None = None) -> None:
         """Write ``text`` to file descriptor 1. With ``bound`` (seconds) the write gives up once
         the descriptor has not become writable for that long (a full pipe, a stopped terminal),
@@ -524,18 +741,48 @@ def _writable_before(fd: int, end: float) -> bool:
     return bool(poller.poll(left_ms))
 
 
-# Bound on the wait for a blocked output pipe, per ``_write_fd`` call (the deadline restarts on
-# each call); ``emit`` makes at most three (stdout, stderr, warnings), so the worst case is ~9 s.
+def _read_fd(fd: int, nbytes: int) -> bytes:
+    """Read until end of file or ``nbytes`` bytes, whichever is first; never asks for more
+    than is still wanted, so a growing file or an endless source cannot exceed the bound."""
+    chunks: list[bytes] = []
+    remaining = nbytes
+    while remaining > 0:
+        try:
+            chunk = os.read(fd, min(READ_CHUNK, remaining))
+        except BlockingIOError:
+            # A non-blocking descriptor (the caller set O_NONBLOCK on the open file
+            # description) with no data yet: wait until it is readable, then retry.
+            # todo(#10): the deadline of the command interrupts this wait.
+            select.select([fd], [], [])
+            continue
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _is_symlink(path: Path) -> bool:
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode)
+    except (OSError, ValueError):
+        return False
+
+
+# Bound on the wait for a blocked output pipe, per stall: the deadline restarts after every
+# successful write, so only a reader making no progress for this long is abandoned.
 WRITE_WAIT_SECONDS = 3.0
 
 
 def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
     """Write ``text`` to a standard descriptor as UTF-8 with errors replaced, never through the
-    locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says
-    ("a failure to write after the result was fixed is ignored").
+    locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says.
 
-    Without ``bound`` a full non-blocking descriptor (EAGAIN) is waited on for writability, at
-    most ``WRITE_WAIT_SECONDS`` per call, and partial writes continue.
+    Without ``bound`` the descriptor is waited on (``poll``) before each small write for at most
+    ``WRITE_WAIT_SECONDS`` per stall (restarted after each successful write), then it gives up
+    silently; this holds for a blocking pipe too (one ``write`` of a large chunk would block
+    until a reader drains it). A non-blocking descriptor that is full (EAGAIN) is waited on the
+    same way; partial writes continue.
 
     With ``bound`` the write is for a signal handler that must not hang: it waits for the
     descriptor to be writable for at most ``bound`` seconds in all (``poll``, EINTR retried
@@ -545,16 +792,19 @@ def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
     end = time.monotonic() + (WRITE_WAIT_SECONDS if bound is None else bound)
     try:
         while view:
-            if bound is not None:
-                if not _writable_before(fd, end):
-                    return
-                view = view[os.write(fd, view[:_BOUNDED_CHUNK]) :]
-                continue
+            if _writable_before(fd, end):
+                chunk = view[:_BOUNDED_CHUNK]
+            else:
+                return
             try:
-                view = view[os.write(fd, view) :]
+                view = view[os.write(fd, chunk) :]
+                if bound is None:  # the budget is per stall: progress restarts it
+                    end = time.monotonic() + WRITE_WAIT_SECONDS
             except BlockingIOError:
-                if not _writable_before(fd, end):
+                remaining = end - time.monotonic()
+                if remaining <= 0:
                     return
+                select.select([], [fd], [], remaining)
     except (OSError, ValueError):
         pass
 
@@ -567,7 +817,9 @@ class RealGateway:
         self._crontab_timeout = crontab_timeout
 
     def now(self) -> datetime:
-        return datetime.fromtimestamp(time.time(), UTC)
+        # Integer nanoseconds floored to microseconds (a datetime's resolution): a float
+        # would round a reading within 0.5 us below a second up to the next second.
+        return _EPOCH + timedelta(microseconds=time.time_ns() // 1000)
 
     def home(self) -> Path:
         try:
@@ -597,6 +849,36 @@ class RealGateway:
     def list_dir(self, path: Path) -> list[str]:
         return os.listdir(path)
 
+    def access(self, path: Path, *, write: bool, search: bool) -> bool:
+        mode = (os.W_OK if write else 0) | (os.X_OK if search else 0)
+        try:
+            return os.access(path, mode or os.F_OK)
+        except (OSError, ValueError):
+            return False
+
+    def resolve_path(self, path: Path) -> Path:
+        return Path(os.path.realpath(path))
+
+    def read_mountinfo(self, limit: int) -> bytes | None:
+        try:
+            fd = os.open("/proc/self/mountinfo", os.O_RDONLY | os.O_CLOEXEC)
+        except OSError:
+            return None
+        try:
+            chunks: list[bytes] = []
+            remaining = limit
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
+
     def open_file(self, path: Path, limit: int) -> FileRead | None:
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         try:
@@ -620,16 +902,6 @@ class RealGateway:
             return FileRead(info, b"".join(chunks))
         finally:
             os.close(fd)
-
-    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
-        if not follow:
-            flags |= os.O_NOFOLLOW
-        try:
-            fd = os.open(path, flags)
-        except FileNotFoundError:
-            return None
-        return _RealDirHandle(fd)
 
     def argv(self) -> list[str]:
         return list(sys.argv[1:])
@@ -655,6 +927,79 @@ class RealGateway:
         except OSError:
             pass
 
+    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        if not follow:
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            return None
+        return _RealDirHandle(fd)
+
+    def read_file_bounded(self, path: Path, nbytes: int) -> bytes:
+        """Open with ``O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | O_NOCTTY`` (a FIFO or device opens
+        at once instead of blocking), require a regular file on ``fstat`` of the open
+        descriptor (so there is no check-then-open race) and read at most ``nbytes``.
+
+        An ``lstat`` runs first so that a socket, FIFO or device is classified without
+        opening it (opening some special files has side effects, and a socket cannot be
+        opened at all). It is not a security boundary: the ``fstat`` after the open is the
+        authority.
+        """
+        try:
+            before = os.lstat(path)
+        except (TimeoutError, InterruptedError):
+            raise
+        except (OSError, ValueError):  # missing, denied, a loop, an embedded NUL
+            raise BodySourceError("unreadable") from None
+        if stat.S_ISLNK(before.st_mode):
+            raise BodySourceError("symlink")
+        if not stat.S_ISREG(before.st_mode):
+            raise BodySourceError("not_regular")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY
+        try:
+            fd = os.open(path, flags)
+        except (TimeoutError, InterruptedError):
+            raise
+        except OSError as exc:
+            # ELOOP (Linux, macOS) or EMLINK (BSD) also come from a loop in a parent
+            # component: it is a symlink refusal only when the last component is one.
+            if exc.errno in (errno.ELOOP, errno.EMLINK) and _is_symlink(path):
+                raise BodySourceError("symlink") from None
+            raise BodySourceError("unreadable") from None
+        except ValueError:  # an embedded NUL
+            raise BodySourceError("unreadable") from None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise BodySourceError("not_regular")
+            return _read_fd(fd, nbytes)
+        except (TimeoutError, InterruptedError):
+            raise
+        except OSError:
+            raise BodySourceError("unreadable") from None
+        finally:
+            os.close(fd)
+
+    def read_stdin_bounded(self, nbytes: int) -> bytes:
+        """Read descriptor 0 directly (no text layer, no locale). A terminal and a directory
+        are refused; a pipe, socket, file or device (``/dev/zero``) is read up to ``nbytes``.
+        The read blocks while a pipe stays open and silent: the deadline of the command is
+        what ends it.
+        todo(#10): the deadline timer that interrupts this read.
+        """
+        try:
+            mode = os.fstat(0).st_mode
+            if os.isatty(0):
+                raise BodySourceError("terminal")
+            if stat.S_ISDIR(mode):
+                raise BodySourceError("not_regular")
+            return _read_fd(0, nbytes)
+        except (TimeoutError, InterruptedError):
+            raise  # the deadline (todo(#10)) or a signal handler, not an unreadable source
+        except OSError:
+            raise BodySourceError("unreadable") from None
+
     def monotonic(self) -> float:
         return time.monotonic()
 
@@ -668,9 +1013,6 @@ class RealGateway:
             except Exception:  # noqa: BLE001 - leaving matters more than a failed kill
                 pass
         os._exit(code)
-
-    def stdin_read(self) -> str:
-        return sys.stdin.read()
 
     def write_out(self, text: str, *, bound: float | None = None) -> None:
         _write_fd(1, text, bound)

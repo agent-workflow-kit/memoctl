@@ -37,6 +37,7 @@ BANNED_MODULES = {
     "getpass",
     "shutil",
     "glob",
+    "fcntl",
     "sqlite3",
     "signal",
     "threading",
@@ -295,6 +296,9 @@ def test_module_reaches_outside_only_through_the_gateway(path: Path) -> None:
     [
         "import subprocess",
         "import subprocess as sp",
+        "import fcntl",
+        "from fcntl import flock",
+        "def f():\n    import fcntl",
         "from subprocess import run",
         "import time",
         "from time import time as t",
@@ -510,7 +514,7 @@ def test_scanner_flags_aliases_and_new_bans(source: str) -> None:
         "def f(gateway):\n    return gateway.home() / 'x', gateway.now()",
         "def f(gateway):\n    gateway.write_out('x')\n    return gateway.run(['ls'])",
         "def f(gateway):\n    return gateway.crontab_read()",
-        "def f(gateway):\n    return gateway.stdin_read(), gateway.random_hex(4)",
+        "def f(gateway):\n    return gateway.read_stdin_bounded(9), gateway.random_hex(4)",
         # harmless neighbours of the banned names
         "import os\nos.path.join('a', 'b')",
         "from os import path\npath.join('a', 'b')",

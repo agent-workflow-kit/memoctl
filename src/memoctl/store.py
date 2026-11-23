@@ -31,8 +31,9 @@ The CLI maps :class:`StoreError` and :class:`SchemaNewerError` to exit 12 (``cli
 deadline installs its progress handler through ``open_store(configure=deadline.configure_store)``;
 an interrupted statement arrives as ``StoreError("timeout")``.
 todo(#15): the change log is appended after :meth:`Store.write` returns (after the commit).
-todo(#16): ``add``'s queries (dedupe, limits, supersede, insert) are added here and run inside
-``Store.write()``.
+``add``'s write is :meth:`Store.insert_note` (the note, its labels and its rate row), run inside
+``Store.write()``. todo(#17): the dedupe and supersede queries and todo(#18): the limit queries
+are added here by their issues and run inside the same transaction.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import TracebackType
@@ -278,7 +279,9 @@ def _as_int(value: object, low: int, high: int) -> int | None:
     return None
 
 
-def check_note_row(values: Sequence[object]) -> NoteRow | None:
+def check_note_row(
+    values: Sequence[object], labels: tuple[tuple[str, str], ...] = ()
+) -> NoteRow | None:
     """The row as a :class:`NoteRow`, or ``None`` when any column fails its rule.
 
     Beyond the interface's list (integers, grammars, text), the bounds of the output schemas
@@ -286,7 +289,7 @@ def check_note_row(values: Sequence[object]) -> NoteRow | None:
     1 to 65536 and equal to the body's UTF-8 length, a body of 1 to 65536 UTF-8 bytes, a repo
     of at most 255 characters and a 64-character lowercase hex ``body_sha256``. A ``bool``, a
     float, a blob or a text that is not valid UTF-8 where an integer or text belongs fails. The
-    hash is not recomputed.
+    hash is not recomputed. ``labels`` (already checked by the caller) go into the row.
     """
     if len(values) != 10:
         return None
@@ -314,7 +317,42 @@ def check_note_row(values: Sequence[object]) -> NoteRow | None:
         return None
     if len(body.encode("utf-8")) != size_bytes:  # also bounds the body to MAX_BODY_BYTES
         return None
-    return NoteRow(note_id, repo, topic, kind, body, sha, size_bytes, created_at, expires_at, by)
+    return NoteRow(
+        note_id, repo, topic, kind, body, sha, size_bytes, created_at, expires_at, by, labels
+    )
+
+
+def _merge_labels(
+    note_id: Any,
+    pairs: Iterator[tuple[Any, ...]],
+    peeked: tuple[Any, ...] | None,
+    descending: bool,
+) -> tuple[tuple[tuple[str, str], ...] | None, tuple[Any, ...] | None]:
+    """The labels of ``note_id`` from ``pairs`` (ordered by ``note_id`` like the rows), sorted
+    by key then value, or ``None`` when one is bad or there are more than ``MAX_LABELS``; and
+    the first pair of a later note (consumed but not yet used). Pairs of an earlier id (only
+    possible outside one snapshot) are dropped."""
+    out: list[tuple[str, str]] = []
+    bad = False
+    count = 0
+    item = peeked if peeked is not None else next(pairs, None)
+    while item is not None:
+        nid = item[0]
+        if nid == note_id:
+            count += 1
+            if count <= MAX_LABELS + 1 and not bad:
+                pair = check_label_row(item[1], item[2])
+                if pair is None:
+                    bad = True
+                else:
+                    out.append(pair)
+        elif (nid > note_id) if descending else (nid < note_id):
+            pass  # an earlier note's pair: not ours
+        else:
+            break
+        item = next(pairs, None)
+    found = None if bad or count > MAX_LABELS else tuple(sorted(out))
+    return found, item
 
 
 # --- the connection -------------------------------------------------------------------------
@@ -459,6 +497,10 @@ class Store:
             # a lone surrogate, or an integer beyond 64 bits; both messages echo the value
             raise ValueError("invalid parameter") from None
 
+    @property
+    def in_transaction(self) -> bool:
+        return self._conn.in_transaction
+
     @contextmanager
     def write(self) -> Iterator[None]:
         """``BEGIN IMMEDIATE`` (the lock is taken at once, so the busy timeout applies), commit
@@ -466,7 +508,21 @@ class Store:
         if self.mode is Mode.READ:
             raise RuntimeError("write transaction on a read-only store")
         with self._transaction("BEGIN IMMEDIATE"):
+            self._recheck()
             yield
+
+    def _recheck(self) -> None:
+        """Under the write lock, read the identity and version again: another process may have
+        migrated or replaced the store since it was opened (a refusal rolls the transaction
+        back)."""
+        try:
+            found = _classify(_inspect(self._conn))
+        except sqlite3.Error as exc:
+            raise _failure(exc, self) from None
+        # Any non-CURRENT state after taking the lock (e.g. the file replaced by an empty,
+        # uninitialised db) is reported as db_corrupt, deliberately.
+        if found != CURRENT:
+            raise StoreError(DB_CORRUPT)
 
     @contextmanager
     def read(self) -> Iterator[None]:
@@ -505,6 +561,46 @@ class Store:
                 raise _failure(exc, self) from None
             raise
 
+    # -- add
+    def insert_note(
+        self,
+        *,
+        repo: str,
+        topic: str,
+        kind: str,
+        body: str,
+        body_sha256: str,
+        size: int,
+        created: int,
+        expires: int,
+        labels: Sequence[tuple[str, str]],
+    ) -> int:
+        """Insert one note, its labels and its rate row (``add`` step 13); the new id.
+
+        Call it inside :meth:`write` so that all three inserts commit or none does. Every value
+        is bound (never formatted into SQL). The id is checked against the output range (an id
+        above 999999999999999999 cannot be printed): ``StoreError("db_corrupt")``, which rolls
+        the transaction back, never a stored note the tool cannot show.
+        """
+        if self.mode is Mode.READ:
+            raise RuntimeError("insert on a read-only store")
+        cursor = self.execute(
+            "INSERT INTO notes (repo, topic, kind, body, body_sha256, size, created, expires)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (repo, topic, kind, body, body_sha256, size, created, expires),
+        )
+        note_id = cursor.lastrowid
+        cursor.close()
+        if type(note_id) is not int or not 1 <= note_id <= MAX_ID:
+            raise StoreError(DB_CORRUPT)
+        for key, value in labels:
+            self.execute(
+                "INSERT INTO note_labels (note_id, key, value) VALUES (?, ?, ?)",
+                (note_id, key, value),
+            ).close()
+        self.execute("INSERT INTO rate (repo, at) VALUES (?, ?)", (repo, created)).close()
+        return note_id
+
     # -- rows
     def notes(
         self,
@@ -513,8 +609,10 @@ class Store:
         *,
         labels: bool = False,
         on_bad: str = "skip",
+        descending: bool = False,
     ) -> Iterator[NoteRow]:
-        """The ``notes`` rows (ordered by id) that pass the row checks.
+        """The ``notes`` rows (ordered by id, highest first with ``descending``) that pass the
+        row checks. The rows stream: a caller that stops early never reads the rest.
 
         ``where`` is a fixed SQL fragment such as ``"WHERE repo = ?"`` (never input; values go
         in ``params``; the type is ``LiteralString`` and a fragment that does not start with
@@ -530,13 +628,26 @@ class Store:
             raise ValueError("on_bad must be skip or raise")
         if where and (not where.startswith("WHERE ") or any(t in where for t in _UNSAFE_FRAGMENT)):
             raise ValueError("where must be a plain WHERE clause")
-        cursor = self.execute(f"SELECT {NOTE_COLUMNS} FROM notes {where} ORDER BY id", params)
+        direction: LiteralString = "DESC" if descending else "ASC"
+        cursor = self.execute(
+            f"SELECT {NOTE_COLUMNS} FROM notes {where} ORDER BY id {direction}", params
+        )
+        pairs: Iterator[tuple[Any, ...]] | None = None
+        label_cursor = None
+        if labels:  # one statement for every label, merged with the rows (same id order)
+            label_cursor = self.execute(
+                "SELECT note_id, key, value FROM note_labels"
+                f" WHERE note_id IN (SELECT id FROM notes {where}) ORDER BY note_id {direction}",
+                tuple(params),
+            )
+            pairs = self._rows(label_cursor)
+        peeked: tuple[Any, ...] | None = None
         try:
             for raw in self._rows(cursor):
-                row = check_note_row(raw)
-                if row is not None and labels:
-                    found = self._labels(row.id)
-                    row = None if found is None else replace(row, labels=found)
+                found: tuple[tuple[str, str], ...] | None = ()
+                if pairs is not None:
+                    found, peeked = _merge_labels(raw[0], pairs, peeked, descending)
+                row = None if found is None else check_note_row(raw, found)
                 if row is None:
                     if on_bad == "raise":
                         raise StoreError(DB_CORRUPT)
@@ -545,6 +656,8 @@ class Store:
                 yield row
         finally:
             cursor.close()
+            if label_cursor is not None:
+                label_cursor.close()
 
     @staticmethod
     def _rows(cursor: Cursor) -> Iterator[tuple[Any, ...]]:
@@ -553,19 +666,6 @@ class Store:
             if raw is None:
                 return
             yield raw
-
-    def _labels(self, note_id: int) -> tuple[tuple[str, str], ...] | None:
-        cursor = self.execute(
-            "SELECT key, value FROM note_labels WHERE note_id = ? ORDER BY key, value LIMIT ?",
-            (note_id, MAX_LABELS + 1),
-        )
-        out: list[tuple[str, str]] = []
-        for key, value in self._rows(cursor):
-            pair = check_label_row(key, value)
-            if pair is None:
-                return None
-            out.append(pair)
-        return None if len(out) > MAX_LABELS else tuple(out)
 
     def check_rows(self) -> None:
         """Run every row check over every note and label, and look for labels of no note

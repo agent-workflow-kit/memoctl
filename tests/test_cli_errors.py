@@ -316,3 +316,69 @@ def test_a_mapper_that_builds_an_invalid_failure_is_internal() -> None:
 
     register_error(Bad, lambda e: Failure(NOT_FOUND, "not_found", "m"))
     assert failure_for(Bad()).exit_code == INTERNAL
+
+
+# -- the exceptions of the add path (#16) -----------------------------------------------------
+
+
+def _validated(failure: Failure) -> Failure:
+    from tests.schema_check import validate_json_output
+
+    validate_json_output("cli/error", failure.envelope().encode())
+    return failure
+
+
+def test_body_error_maps_to_usage_with_field_and_limit_only_on_too_long() -> None:
+    from memoctl.bodyread import BodyError
+
+    f = _validated(failure_for(BodyError("too_long", 8192)))
+    assert (f.exit_code, f.code, f.reason) == (USAGE, "usage", None)
+    assert f.details == {"field": "body", "limit": 8192}
+    f = _validated(failure_for(BodyError("symlink", 8192)))
+    assert f.details == {"field": "body"}
+
+
+def test_body_text_error_maps_to_usage_with_class_line_and_limit() -> None:
+    from memoctl.body import BodyTextError
+
+    f = _validated(failure_for(BodyTextError("control", line=3)))
+    assert (f.exit_code, f.code) == (USAGE, "usage")
+    assert f.details == {"field": "body", "class": "control", "line": 3}
+    f = _validated(failure_for(BodyTextError("nfkc_too_long", limit=8192)))
+    assert f.details == {"field": "body", "limit": 8192}
+    f = _validated(failure_for(BodyTextError("whitespace_only")))
+    assert f.details == {"field": "body"}
+
+
+def test_secret_detected_maps_to_exit_20_with_class_and_field() -> None:
+    from memoctl.secretscan import SecretDetected
+
+    f = _validated(failure_for(SecretDetected("jwt", "label")))
+    assert (f.exit_code, f.code, f.reason) == (REFUSED, "refused", "secret_detected")
+    assert f.details == {"class": "jwt", "field": "label"}
+    assert not f.retryable
+
+
+def test_unsafe_state_maps_to_exit_20_without_the_reason_word() -> None:
+    from memoctl.statedir import UnsafeStateError
+
+    f = _validated(failure_for(UnsafeStateError("mode")))
+    assert (f.exit_code, f.reason, f.details) == (REFUSED, "unsafe_state", None)
+
+
+def test_a_state_access_error_is_a_failed_state_not_internal() -> None:
+    from memoctl.statedir import StateAccessError
+
+    f = _validated(failure_for(StateAccessError()))
+    assert (f.exit_code, f.code, f.reason, f.details) == (FAILED, "failed", "db_unreadable", None)
+
+
+@pytest.mark.parametrize("exc", [OSError(30, "x"), PermissionError(13, "x"), FileNotFoundError()])
+def test_a_bare_os_error_is_internal(exc: OSError) -> None:
+    assert failure_for(exc) == cli_errors.internal_failure()
+
+
+def test_clock_error_is_internal() -> None:
+    from memoctl.lifetime import ClockError
+
+    assert failure_for(ClockError()) == cli_errors.internal_failure()
