@@ -68,8 +68,9 @@ def test_terminal_records_output_and_serves_scripted_input(tmp_path: Path) -> No
     gw = FakeGateway(tmp_path)
     gw.terminal.stdin = "body\n"
     gw.terminal.width = 33
-    gw.terminal.tty = {0: True, 1: False, 2: False}
-    assert gw.stdin_read() == "body\n"
+    gw.terminal.tty = {1: False, 2: False}
+    assert gw.read_stdin_bounded(100) == b"body\n"
+    gw.terminal.tty[0] = True
     gw.write_out("a")
     gw.write_out("b")
     gw.write_err("e")
@@ -80,7 +81,7 @@ def test_terminal_records_output_and_serves_scripted_input(tmp_path: Path) -> No
 
 def test_default_terminal_is_not_a_tty_and_has_no_input(tmp_path: Path) -> None:
     gw = FakeGateway(tmp_path)
-    assert gw.stdin_read() == ""
+    assert gw.read_stdin_bounded(100) == b""
     assert not any(gw.isatty(fd) for fd in (0, 1, 2))
 
 
