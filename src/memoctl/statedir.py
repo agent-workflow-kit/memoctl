@@ -16,8 +16,8 @@ permission on a parent, I/O error) propagates as the ``OSError`` it is.
 
 todo(#6): the CLI maps :class:`UnsafeStateError` to exit 20 ``unsafe_state`` and an ``OSError``
 from a failed creation (read-only parent, no permission on a parent, I/O error) to its exit.
-todo(#32): ``validate``'s check that the nearest existing ancestor of the state directory is
-writable and searchable is owned by #32, not done here.
+``validate``'s check that the nearest existing ancestor of the state directory is writable and
+searchable lives in ``validation.py`` (#32), not here.
 The store (``store.py``) opens ``state.db`` by :attr:`StateDir.db_path` after
 :meth:`check_db` and :meth:`check_sidecars`. ``log.jsonl`` and ``log.lock`` are opened relative
 to :attr:`StateDir.handle` by :mod:`memoctl.logfile`.

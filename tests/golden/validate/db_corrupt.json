@@ -1,0 +1,24 @@
+{
+  "ok": false,
+  "checks": [
+    {
+      "name": "config",
+      "ok": true,
+      "reason": null,
+      "message": "configuration is valid"
+    },
+    {
+      "name": "state_dir",
+      "ok": true,
+      "reason": null,
+      "message": "state directory is private"
+    },
+    {
+      "name": "database",
+      "ok": false,
+      "reason": "db_corrupt",
+      "message": "the database is damaged or not memoctl's"
+    }
+  ],
+  "warnings": []
+}

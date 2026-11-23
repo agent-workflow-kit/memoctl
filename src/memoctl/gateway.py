@@ -465,6 +465,20 @@ class Gateway(Protocol):
         """The entry names of a directory, unordered. Raises ``OSError`` as the filesystem does."""
         ...
 
+    def access(self, path: Path, *, write: bool, search: bool) -> bool:
+        """``os.access`` for the real user id (``W_OK`` when ``write``, ``X_OK`` when
+        ``search``; both must hold). ``False`` when the path is missing or on any error."""
+        ...
+
+    def resolve_path(self, path: Path) -> Path:
+        """``path`` made absolute with every symlink resolved (a missing tail is kept as is)."""
+        ...
+
+    def read_mountinfo(self, limit: int) -> bytes | None:
+        """The first ``limit`` bytes of ``/proc/self/mountinfo``; ``None`` when it cannot be
+        read (not Linux, not mounted)."""
+        ...
+
     def open_file(self, path: Path, limit: int) -> FileRead | None:
         """Open ``path`` without following a symlink and without blocking, check the opened
         descriptor and read at most ``limit + 1`` bytes of a regular file. ``None`` when the
@@ -829,6 +843,36 @@ class RealGateway:
 
     def list_dir(self, path: Path) -> list[str]:
         return os.listdir(path)
+
+    def access(self, path: Path, *, write: bool, search: bool) -> bool:
+        mode = (os.W_OK if write else 0) | (os.X_OK if search else 0)
+        try:
+            return os.access(path, mode or os.F_OK)
+        except (OSError, ValueError):
+            return False
+
+    def resolve_path(self, path: Path) -> Path:
+        return Path(os.path.realpath(path))
+
+    def read_mountinfo(self, limit: int) -> bytes | None:
+        try:
+            fd = os.open("/proc/self/mountinfo", os.O_RDONLY | os.O_CLOEXEC)
+        except OSError:
+            return None
+        try:
+            chunks: list[bytes] = []
+            remaining = limit
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
 
     def open_file(self, path: Path, limit: int) -> FileRead | None:
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
