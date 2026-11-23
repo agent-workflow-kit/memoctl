@@ -19,8 +19,8 @@ from a failed creation (read-only parent, no permission on a parent, I/O error) 
 todo(#32): ``validate``'s check that the nearest existing ancestor of the state directory is
 writable and searchable is owned by #32, not done here.
 The store (``store.py``) opens ``state.db`` by :attr:`StateDir.db_path` after
-:meth:`check_db` and :meth:`check_sidecars`.
-todo(#15): ``log.jsonl`` and ``log.lock`` are opened relative to :attr:`StateDir.handle`.
+:meth:`check_db` and :meth:`check_sidecars`. ``log.jsonl`` and ``log.lock`` are opened relative
+to :attr:`StateDir.handle` by :mod:`memoctl.logfile`.
 """
 
 from __future__ import annotations
@@ -85,6 +85,10 @@ class StateDir:
         self._gateway = gateway
         self.handle = handle
         self.path = path
+
+    @property
+    def uid(self) -> int:
+        return self._gateway.uid()
 
     @property
     def db_path(self) -> Path:
