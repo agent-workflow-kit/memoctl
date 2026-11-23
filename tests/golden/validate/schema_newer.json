@@ -1,0 +1,30 @@
+{
+  "ok": false,
+  "checks": [
+    {
+      "name": "config",
+      "ok": true,
+      "reason": null,
+      "message": "configuration is valid"
+    },
+    {
+      "name": "state_dir",
+      "ok": true,
+      "reason": null,
+      "message": "state directory is private"
+    },
+    {
+      "name": "database",
+      "ok": true,
+      "reason": null,
+      "message": "identity ok; newer schema, rows not checked"
+    },
+    {
+      "name": "schema",
+      "ok": false,
+      "reason": "schema_newer",
+      "message": "the schema is newer than this version supports"
+    }
+  ],
+  "warnings": []
+}

@@ -37,6 +37,7 @@ BANNED_MODULES = {
     "getpass",
     "shutil",
     "glob",
+    "fcntl",
     "sqlite3",
     "signal",
     "threading",
@@ -47,7 +48,6 @@ BANNED_MODULES = {
     "concurrent",
     "sched",
     "resource",
-    "fcntl",
 }
 # Module file name -> banned modules it alone may import (pinned by tests below).
 ALLOWED_IMPORTS = {"store.py": {"sqlite3"}}

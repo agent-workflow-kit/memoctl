@@ -15,8 +15,8 @@ translated into a refusal; an error from reaching or creating a level (read-only
 no permission on a parent, I/O error) is a :class:`StateAccessError` (the ``OSError`` is its
 cause). The CLI maps :class:`UnsafeStateError` to exit 20 ``unsafe_state`` and
 :class:`StateAccessError` to exit 12 ``db_unreadable``.
-todo(#32): ``validate``'s check that the nearest existing ancestor of the state directory is
-writable and searchable is owned by #32, not done here.
+``validate``'s check that the nearest existing ancestor of the state directory is writable and
+searchable lives in ``validation.py`` (#32), not here.
 The store (``store.py``) opens ``state.db`` by :attr:`StateDir.db_path` after
 :meth:`check_db` and :meth:`check_sidecars`. ``log.jsonl`` and ``log.lock`` are opened relative
 to :attr:`StateDir.handle` by :mod:`memoctl.logfile`.

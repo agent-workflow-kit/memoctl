@@ -1306,3 +1306,94 @@ def test_write_rechecks_the_schema_under_the_lock_and_releases_it(state: StateDi
         c.execute("BEGIN IMMEDIATE")  # the refused write rolled back and freed the lock
         c.execute("ROLLBACK")
         c.close()
+
+
+# --- descending order, the label merge and in_transaction ------------------------------------
+
+
+def _notes_db(state: StateDir) -> sqlite3.Connection:
+    init(state)
+    c = raw(state)
+    for i in range(1, 6):
+        insert(c, id=i, topic=f"t{i}")
+    return c
+
+
+def test_notes_descending_orders_by_id_and_applies_the_row_checks(state: StateDir) -> None:
+    c = _notes_db(state)
+    insert(c, id=6, topic="Bad Topic")  # fails the grammar: skipped and counted
+    c.close()
+    with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
+        assert [r.id for r in s.notes()] == [1, 2, 3, 4, 5]
+        assert s.bad_rows == 1
+        assert [r.id for r in s.notes(descending=True)] == [5, 4, 3, 2, 1]
+        assert s.bad_rows == 2
+        with pytest.raises(StoreError):
+            list(s.notes(descending=True, on_bad="raise"))
+
+
+@pytest.mark.parametrize("descending", [False, True])
+def test_notes_labels_merge_keeps_each_note_its_own_sorted_labels(
+    state: StateDir, descending: bool
+) -> None:
+    c = _notes_db(state)
+    c.executemany(
+        "INSERT INTO note_labels VALUES (?, ?, ?)",
+        [(2, "z", "1"), (2, "a", "2"), (4, "k", "v"), (5, "a", "b"), (5, "a", "a")],
+    )
+    c.close()
+    with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
+        got = {r.id: r.labels for r in s.notes(labels=True, descending=descending)}
+        assert got == {
+            1: (), 2: (("a", "2"), ("z", "1")), 3: (), 4: (("k", "v"),),
+            5: (("a", "a"), ("a", "b")),
+        }  # fmt: skip
+        assert [r.id for r in s.notes(labels=True, descending=descending)] == (
+            [5, 4, 3, 2, 1] if descending else [1, 2, 3, 4, 5]
+        )
+        assert s.bad_rows == 0
+
+
+@pytest.mark.parametrize("descending", [False, True])
+def test_notes_labels_a_bad_or_oversized_label_set_fails_only_that_note(
+    state: StateDir, descending: bool
+) -> None:
+    c = _notes_db(state)
+    c.execute("INSERT INTO note_labels VALUES (2, 'UPPER', 'v')")
+    c.executemany(
+        "INSERT INTO note_labels VALUES (4, ?, 'v')", [(f"k{i}",) for i in range(9)]
+    )  # 9 labels
+    c.executemany(
+        "INSERT INTO note_labels VALUES (3, ?, 'v')", [(f"k{i}",) for i in range(8)]
+    )  # exactly 8 labels
+    c.close()
+    with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
+        got = [r.id for r in s.notes(labels=True, descending=descending)]
+        assert sorted(got) == [1, 3, 5]
+        assert s.bad_rows == 2
+
+
+def test_notes_labels_ignore_labels_of_rows_outside_the_where(state: StateDir) -> None:
+    c = _notes_db(state)
+    c.execute("INSERT INTO note_labels VALUES (1, 'k', 'v')")
+    c.execute("INSERT INTO note_labels VALUES (3, 'k', 'w')")
+    c.close()
+    with open_store(state, Mode.READ) as s:  # type: ignore[union-attr]
+        rows = list(s.notes("WHERE id = ?", (3,), labels=True))
+        assert [(r.id, r.labels) for r in rows] == [(3, (("k", "w"),))]
+
+
+def test_in_transaction_before_inside_and_after_read_and_write(state: StateDir) -> None:
+    init(state)
+    with open_store(state, Mode.WRITE) as s:  # type: ignore[union-attr]
+        assert not s.in_transaction
+        with s.read():
+            assert s.in_transaction
+        assert not s.in_transaction
+        with s.write():
+            assert s.in_transaction
+        assert not s.in_transaction
+        with pytest.raises(KeyError), s.write():
+            assert s.in_transaction
+            raise KeyError
+        assert not s.in_transaction

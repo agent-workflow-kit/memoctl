@@ -147,6 +147,8 @@ class FakeGateway:
         self.login: str | None = "tester"
         self.uid_value = os.getuid()  # tests set another value to simulate a foreign owner
         self.environ: dict[str, str] = {}
+        self.denied_access: set[Path] = set()  # resolved paths ``access`` answers False for
+        self.mountinfo: bytes | None = None  # the /proc/self/mountinfo the fake serves
         self.argv_value: list[str] = []
         # Open descriptors by name ("r" or "w"); a test closes one with ``del gw.fds[1]``.
         self.fds: dict[int, str] = {0: "r", 1: "w", 2: "w"}
@@ -197,29 +199,6 @@ class FakeGateway:
         self.fds.pop(fd, None)
         self.fd_calls.append(("close", fd))
 
-    def monotonic(self) -> float:
-        return self.mono
-
-    def alarm_arm(self, seconds: float, on_alarm: Callable[[], None]) -> FakeAlarm:
-        if not 0 < seconds <= 3600:
-            raise ValueError("alarm seconds out of range")
-        alarm = FakeAlarm(self, seconds, on_alarm)
-        self.alarms.append(alarm)
-        return alarm
-
-    def advance_mono(self, seconds: float) -> None:
-        """Move the monotonic clock; an armed alarm that runs out calls its handler (as the
-        signal would, between two bytecodes)."""
-        self.mono += seconds
-        for alarm in list(self.alarms):
-            if not alarm.fired and self.mono >= alarm.at:
-                alarm.fired = True
-                alarm.on_alarm()
-
-    def exit_now(self, code: int) -> NoReturn:
-        self.exits.append(code)
-        raise FakeExit(code)
-
     def read_stdin_bounded(self, nbytes: int) -> bytes:
         self.stdin_reads += 1
         if self.terminal.stdin_error is not None:
@@ -248,6 +227,29 @@ class FakeGateway:
                 return f.read(nbytes)
         except OSError:
             raise BodySourceError("unreadable") from None
+
+    def monotonic(self) -> float:
+        return self.mono
+
+    def alarm_arm(self, seconds: float, on_alarm: Callable[[], None]) -> FakeAlarm:
+        if not 0 < seconds <= 3600:
+            raise ValueError("alarm seconds out of range")
+        alarm = FakeAlarm(self, seconds, on_alarm)
+        self.alarms.append(alarm)
+        return alarm
+
+    def advance_mono(self, seconds: float) -> None:
+        """Move the monotonic clock; an armed alarm that runs out calls its handler (as the
+        signal would, between two bytecodes)."""
+        self.mono += seconds
+        for alarm in list(self.alarms):
+            if not alarm.fired and self.mono >= alarm.at:
+                alarm.fired = True
+                alarm.on_alarm()
+
+    def exit_now(self, code: int) -> NoReturn:
+        self.exits.append(code)
+        raise FakeExit(code)
 
     def write_out(self, text: str, *, bound: float | None = None) -> None:
         self.terminal.stdout += text
@@ -297,6 +299,19 @@ class FakeGateway:
 
     def list_dir(self, path: Path) -> list[str]:
         return os.listdir(self._confined(path))
+
+    def access(self, path: Path, *, write: bool, search: bool) -> bool:
+        target = self._confined(path)
+        if target in self.denied_access:
+            return False
+        mode = (os.W_OK if write else 0) | (os.X_OK if search else 0)
+        return os.access(target, mode or os.F_OK)
+
+    def resolve_path(self, path: Path) -> Path:
+        return self._confined(path)
+
+    def read_mountinfo(self, limit: int) -> bytes | None:
+        return None if self.mountinfo is None else self.mountinfo[:limit]
 
     def open_file(self, path: Path, limit: int) -> FileRead | None:
         target = self._confined_nofollow(path)

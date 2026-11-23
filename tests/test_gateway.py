@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import pwd
+import sys
 import threading
 import time
 from datetime import UTC
@@ -287,7 +288,6 @@ def test_real_gateway_descriptor_primitives() -> None:
 
 
 def test_real_gateway_argv_is_a_copy_without_the_program(monkeypatch: pytest.MonkeyPatch) -> None:
-    import sys
 
     monkeypatch.setattr(sys, "argv", ["memoctl", "a", "--json"])
     argv = RealGateway().argv()

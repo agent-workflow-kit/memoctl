@@ -55,22 +55,6 @@ class GatewayError(RuntimeError):
     """An outside call failed; the message names what was attempted and how it failed."""
 
 
-# Why a body source was refused; fixed strings, never the path or the content.
-SOURCE_REASONS = ("symlink", "not_regular", "terminal", "unreadable")
-READ_CHUNK = 65536
-
-
-class BodySourceError(GatewayError):
-    """A file or standard input cannot be used as a body source. ``reason`` is one of
-    ``SOURCE_REASONS``; the message never contains the path or any content."""
-
-    def __init__(self, reason: str) -> None:
-        if reason not in SOURCE_REASONS:
-            raise ValueError(f"unknown body source reason {reason!r}")
-        super().__init__(f"body source refused ({reason})")
-        self.reason = reason
-
-
 @dataclass(frozen=True)
 class PathInfo:
     """What the config checks need to know about a path.
@@ -437,6 +421,22 @@ class AlarmHandle(Protocol):
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
+# Why a body source was refused; fixed strings, never the path or the content.
+SOURCE_REASONS = ("symlink", "not_regular", "terminal", "unreadable")
+READ_CHUNK = 65536
+
+
+class BodySourceError(GatewayError):
+    """A file or standard input cannot be used as a body source. ``reason`` is one of
+    ``SOURCE_REASONS``; the message never contains the path or any content."""
+
+    def __init__(self, reason: str) -> None:
+        if reason not in SOURCE_REASONS:
+            raise ValueError(f"unknown body source reason {reason!r}")
+        super().__init__(f"body source refused ({reason})")
+        self.reason = reason
+
+
 class Gateway(Protocol):
     """Everything memoctl needs from outside the process."""
 
@@ -450,16 +450,6 @@ class Gateway(Protocol):
 
     def login_name(self) -> str | None:
         """The login name from the password database, or ``None`` when the lookup fails."""
-        ...
-
-    def read_file_bounded(self, path: Path, nbytes: int) -> bytes:
-        """Read at most ``nbytes`` bytes of the regular file at ``path`` without following a
-        symlink in its last component. Raises ``BodySourceError``."""
-        ...
-
-    def read_stdin_bounded(self, nbytes: int) -> bytes:
-        """Read at most ``nbytes`` bytes from standard input (fewer at end of file). Raises
-        ``BodySourceError`` for a terminal, a directory or a descriptor that cannot be read."""
         ...
 
     def uid(self) -> int:
@@ -479,18 +469,25 @@ class Gateway(Protocol):
         """The entry names of a directory, unordered. Raises ``OSError`` as the filesystem does."""
         ...
 
+    def access(self, path: Path, *, write: bool, search: bool) -> bool:
+        """``os.access`` for the real user id (``W_OK`` when ``write``, ``X_OK`` when
+        ``search``; both must hold). ``False`` when the path is missing or on any error."""
+        ...
+
+    def resolve_path(self, path: Path) -> Path:
+        """``path`` made absolute with every symlink resolved (a missing tail is kept as is)."""
+        ...
+
+    def read_mountinfo(self, limit: int) -> bytes | None:
+        """The first ``limit`` bytes of ``/proc/self/mountinfo``; ``None`` when it cannot be
+        read (not Linux, not mounted)."""
+        ...
+
     def open_file(self, path: Path, limit: int) -> FileRead | None:
         """Open ``path`` without following a symlink and without blocking, check the opened
         descriptor and read at most ``limit + 1`` bytes of a regular file. ``None`` when the
         file is missing; a symlink gives kind ``symlink`` (nothing read). Other errors raise
         ``OSError``."""
-        ...
-
-    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
-        """Open the directory ``path`` (``O_DIRECTORY``; a final symlink is followed only when
-        ``follow``; symlinks in parent components are always followed). ``None`` when it or a
-        parent is missing. A final symlink (not following), a non-directory (also as a parent)
-        and a refusal raise ``OSError``."""
         ...
 
     def argv(self) -> list[str]:
@@ -513,6 +510,23 @@ class Gateway(Protocol):
 
     def release_fd(self, fd: int) -> None:
         """Close ``fd``; an ``OSError`` is ignored."""
+        ...
+
+    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
+        """Open the directory ``path`` (``O_DIRECTORY``; a final symlink is followed only when
+        ``follow``; symlinks in parent components are always followed). ``None`` when it or a
+        parent is missing. A final symlink (not following), a non-directory (also as a parent)
+        and a refusal raise ``OSError``."""
+        ...
+
+    def read_file_bounded(self, path: Path, nbytes: int) -> bytes:
+        """Read at most ``nbytes`` bytes of the regular file at ``path`` without following a
+        symlink in its last component. Raises ``BodySourceError``."""
+        ...
+
+    def read_stdin_bounded(self, nbytes: int) -> bytes:
+        """Read at most ``nbytes`` bytes from standard input (fewer at end of file). Raises
+        ``BodySourceError`` for a terminal, a directory or a descriptor that cannot be read."""
         ...
 
     def monotonic(self) -> float:
@@ -819,6 +833,110 @@ class RealGateway:
         except KeyError:
             return None
 
+    def uid(self) -> int:
+        return os.getuid()
+
+    def env(self, name: str) -> str | None:
+        return os.environ.get(name)
+
+    def stat_path(self, path: Path, *, follow: bool) -> PathInfo | None:
+        try:
+            st = Path(path).stat() if follow else Path(path).lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        return _info(st)
+
+    def list_dir(self, path: Path) -> list[str]:
+        return os.listdir(path)
+
+    def access(self, path: Path, *, write: bool, search: bool) -> bool:
+        mode = (os.W_OK if write else 0) | (os.X_OK if search else 0)
+        try:
+            return os.access(path, mode or os.F_OK)
+        except (OSError, ValueError):
+            return False
+
+    def resolve_path(self, path: Path) -> Path:
+        return Path(os.path.realpath(path))
+
+    def read_mountinfo(self, limit: int) -> bytes | None:
+        try:
+            fd = os.open("/proc/self/mountinfo", os.O_RDONLY | os.O_CLOEXEC)
+        except OSError:
+            return None
+        try:
+            chunks: list[bytes] = []
+            remaining = limit
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
+
+    def open_file(self, path: Path, limit: int) -> FileRead | None:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        try:
+            fd = os.open(path, flags)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, getattr(errno, "EMLINK", -1)):
+                return FileRead(PathInfo("symlink", -1, 0), b"")
+            raise
+        try:
+            info = _info(os.fstat(fd))
+            chunks: list[bytes] = []
+            remaining = limit + 1
+            while info.kind == "file" and remaining > 0:
+                chunk = os.read(fd, min(remaining, 65536))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return FileRead(info, b"".join(chunks))
+        finally:
+            os.close(fd)
+
+    def argv(self) -> list[str]:
+        return list(sys.argv[1:])
+
+    def fd_is_open(self, fd: int) -> bool:
+        try:
+            os.fstat(fd)
+        except OSError as exc:
+            return exc.errno != errno.EBADF
+        return True
+
+    def open_devnull(self, *, write: bool) -> int:
+        fd = os.open(os.devnull, (os.O_WRONLY if write else os.O_RDONLY) | os.O_CLOEXEC)
+        os.set_inheritable(fd, True)
+        return fd
+
+    def dup_onto(self, src: int, dst: int) -> None:
+        os.dup2(src, dst, inheritable=True)
+
+    def release_fd(self, fd: int) -> None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        if not follow:
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            return None
+        return _RealDirHandle(fd)
+
     def read_file_bounded(self, path: Path, nbytes: int) -> bytes:
         """Open with ``O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | O_NOCTTY`` (a FIFO or device opens
         at once instead of blocking), require a regular file on ``fstat`` of the open
@@ -881,80 +999,6 @@ class RealGateway:
             raise  # the deadline (todo(#10)) or a signal handler, not an unreadable source
         except OSError:
             raise BodySourceError("unreadable") from None
-
-    def uid(self) -> int:
-        return os.getuid()
-
-    def env(self, name: str) -> str | None:
-        return os.environ.get(name)
-
-    def stat_path(self, path: Path, *, follow: bool) -> PathInfo | None:
-        try:
-            st = Path(path).stat() if follow else Path(path).lstat()
-        except (FileNotFoundError, NotADirectoryError):
-            return None
-        return _info(st)
-
-    def list_dir(self, path: Path) -> list[str]:
-        return os.listdir(path)
-
-    def open_file(self, path: Path, limit: int) -> FileRead | None:
-        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-        try:
-            fd = os.open(path, flags)
-        except (FileNotFoundError, NotADirectoryError):
-            return None
-        except OSError as exc:
-            if exc.errno in (errno.ELOOP, getattr(errno, "EMLINK", -1)):
-                return FileRead(PathInfo("symlink", -1, 0), b"")
-            raise
-        try:
-            info = _info(os.fstat(fd))
-            chunks: list[bytes] = []
-            remaining = limit + 1
-            while info.kind == "file" and remaining > 0:
-                chunk = os.read(fd, min(remaining, 65536))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            return FileRead(info, b"".join(chunks))
-        finally:
-            os.close(fd)
-
-    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
-        if not follow:
-            flags |= os.O_NOFOLLOW
-        try:
-            fd = os.open(path, flags)
-        except FileNotFoundError:
-            return None
-        return _RealDirHandle(fd)
-
-    def argv(self) -> list[str]:
-        return list(sys.argv[1:])
-
-    def fd_is_open(self, fd: int) -> bool:
-        try:
-            os.fstat(fd)
-        except OSError as exc:
-            return exc.errno != errno.EBADF
-        return True
-
-    def open_devnull(self, *, write: bool) -> int:
-        fd = os.open(os.devnull, (os.O_WRONLY if write else os.O_RDONLY) | os.O_CLOEXEC)
-        os.set_inheritable(fd, True)
-        return fd
-
-    def dup_onto(self, src: int, dst: int) -> None:
-        os.dup2(src, dst, inheritable=True)
-
-    def release_fd(self, fd: int) -> None:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
 
     def monotonic(self) -> float:
         return time.monotonic()
