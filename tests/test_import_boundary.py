@@ -42,7 +42,7 @@ BANNED_MODULES = {
 # Module file name -> banned modules it alone may import (pinned by tests below).
 ALLOWED_IMPORTS = {"store.py": {"sqlite3"}}
 # Canonical dotted names (after alias resolution) that reach the host, whether called or
-# merely referenced. todo(#6): sys.argv is not banned because the CLI needs it.
+# merely referenced.
 BANNED_REFS = {
     # builtins, also through the ``builtins`` module
     *{
@@ -55,6 +55,8 @@ BANNED_REFS = {
     "io.open_code",
     "codecs.open",
     "sys.modules",
+    "sys.argv",
+    "sys.orig_argv",
     # the process's descriptors
     "sys.stdin",
     "sys.stdout",
@@ -299,6 +301,9 @@ def test_module_reaches_outside_only_through_the_gateway(path: Path) -> None:
         "import sys\nsys.stdin.read()",
         "import sys\nsys.stderr.write('x')",
         "from sys import stdout",
+        "import sys\nsys.argv",
+        "import sys\nsys.orig_argv",
+        "from sys import orig_argv",
         "import os\nos.urandom(3)",
         "from os import urandom",
         "import os\nos.fchmod(3, 0o600)",
@@ -466,12 +471,12 @@ def test_scanner_flags_aliases_and_new_bans(source: str) -> None:
         "def f(gateway):\n    return gateway.home() / 'x', gateway.now()",
         "def f(gateway):\n    gateway.write_out('x')\n    return gateway.run(['ls'])",
         "def f(gateway):\n    return gateway.crontab_read()",
-        "def f(gateway):\n    return gateway.stdin_read(), gateway.random_hex(4)",
+        "def f(gateway):\n    return gateway.read_stdin_bounded(9), gateway.random_hex(4)",
         # harmless neighbours of the banned names
         "import os\nos.path.join('a', 'b')",
         "from os import path\npath.join('a', 'b')",
         "import os\nos.sep",
-        "import sys\nsys.argv[1:]",
+        "def f(gateway):\n    return gateway.argv(), gateway.fd_is_open(0)",
         "import signal\nimport threading\nimport io\nio.StringIO()",
         "from pathlib import Path as P\nP('x') / 'y'",
         "from datetime import datetime as D, UTC\nD(2026, 1, 1, tzinfo=UTC)",
