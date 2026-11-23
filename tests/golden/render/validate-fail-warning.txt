@@ -1,0 +1,3 @@
+ok  config  valid
+FAIL  state_dir  bad mode
+warning  unsafe_filesystem
