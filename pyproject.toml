@@ -1,6 +1,6 @@
 [project]
 name = "memoctl"
-version = "0.8.0"
+version = "0.9.0"
 description = "Uncommitted shared knowledge that agents leave for each other"
 readme = "README.md"
 requires-python = ">=3.12"
