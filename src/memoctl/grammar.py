@@ -110,9 +110,9 @@ def parse_duration(text: str, field: str = "expires") -> int:
     whitespace, a trailing newline, a sign, an exponent, ``ms``, non-ASCII digits, eleven
     integer digits or ten fraction digits.
     """
-    # TODO(#5): config duration keys (integer seconds or a string, dotted field name, ranges)
-    # are #5's. TODO(#6): map GrammarError to the exit 2 usage envelope with details.field
-    # (callers add/list... are #11 and #24).
+    # Config duration keys (integer seconds or a string, ranges) are handled in ``config.py``,
+    # which maps GrammarError to ``config_invalid``. TODO(#6): map GrammarError to the exit 2
+    # usage envelope with details.field (callers add/list... are #11 and #24).
     if not isinstance(text, str):
         raise GrammarError(field)
     found = _DURATION.fullmatch(text)
