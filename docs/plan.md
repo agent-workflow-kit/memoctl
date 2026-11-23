@@ -24,7 +24,8 @@ Status: 0.1.0-design, 2026-11-18. This plan implements [interface.md](interface.
 | `cli.py` | 0 | argparse, the `--json` pre-scan, the descriptor check, exit-code mapping, the error envelope, human and JSON output. |
 | `statedir.py` | 1 | The state directory check on a descriptor, creation modes, `lstat` of `state.db`. |
 | `store.py` | 1 | Opening SQLite (modes, pragmas, the progress handler, `setlimit`), migrations, row checks, every query. |
-| `body.py` | 2 | The bounded reader, body validation (six classes, combining runs, NFKC bound), the secret check. |
+| `bodyread.py` | 2 | The bounded reader for `--body-file` and standard input (size cap, symlink and special-file refusals). |
+| `body.py` | 2 | Body validation (six classes, combining runs, NFKC bound), the secret check. |
 | `notes.py` | 3 and 6 | `add` (order, dedupe, supersede, lifetime, limits), `delete` (chain repointing), `prune`. |
 | `logfile.py` | 3 | `log.jsonl` append and rotation. |
 | `search.py` | 4 | Term parsing and streaming matching. |
@@ -50,7 +51,7 @@ Status: 0.1.0-design, 2026-11-18. This plan implements [interface.md](interface.
 ## Stage 2: Body, secrets, durations
 
 **Goal**: Everything `add` needs before it touches the store: bounded reading, the body rules and the secret check, and the lifetime arithmetic.
-**Success Criteria**: the bounded reader and every Body rules item ([Body rules](interface.md#body-rules)) with their classes, lines and limits; the secret check with every pattern and `mask_env` ([Secret check](interface.md#secret-check)) over the repo id, topic, labels, kind and body, raw and NFKC; duration parsing with integer arithmetic; the author-kind resolution ([Author kind](interface.md#author-kind)).
+**Success Criteria**: the bounded reader and every Body rules item ([Body rules](interface.md#body-rules)) with their classes, lines and limits; the secret check with every pattern and `mask_env` ([Secret check](interface.md#secret-check)) over the repo id, topic, labels, kind and body, raw and NFKC; duration parsing with integer arithmetic (delivered by #4, `memoctl.grammar.parse_duration`); the author-kind resolution ([Author kind](interface.md#author-kind)).
 **Tests**: reader tests on every special file and an endless stdin; a refusal golden for each of the six classes and the length cases (including a 4000-mark body and a 30-mark body accepted, and a body whose NFKC form exceeds the limit); a pattern test per secret class plus linear-time checks on adversarial input (the JWT prefix repeated, the private-key header repeated); duration edge cases (`59.5s`, an eleven-digit overflow, non-ASCII digits, a trailing newline); kind from flag, variable and malformed variable.
 **Status**: Not Started
 
