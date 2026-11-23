@@ -28,6 +28,7 @@ from memoctl.cli_errors import (
 )
 from memoctl.deadline import Deadline, initial_seconds
 from memoctl.gateway import Gateway, RealGateway
+from memoctl.grammar import matches
 
 STANDARD_FDS = ((0, False), (1, True), (2, True))  # (descriptor, open for writing)
 
@@ -102,4 +103,13 @@ def _run(
     # its own disarm points through ``memoctl.deadline.current()``.
     with Deadline(gateway, json_mode=json_mode) as deadline:
         deadline.arm(initial_seconds(namespace.command))
+        # Every command parses --actor (interface.md, Global flags). ``add`` validates it in its
+        # step 1, at its place in the order of the fields (repo, topic, labels, kind,
+        # supersedes, actor, expires); the others check it here.
+        if (
+            namespace.command != "add"
+            and namespace.actor is not None
+            and not matches("actor", namespace.actor)
+        ):
+            raise UsageError("actor")
         return by_name[namespace.command].run(namespace, gateway)

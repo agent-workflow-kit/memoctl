@@ -19,6 +19,7 @@ from memoctl.lifetime import (
     MIN_EXPIRES,
     ClockError,
     compute_lifetime,
+    format_timestamp,
     parse_expires,
     seconds_since_epoch,
 )
@@ -317,3 +318,21 @@ def test_module_has_no_float_arithmetic() -> None:
             assert node.id not in {"float", "round"}
         if isinstance(node, ast.Attribute):
             assert node.attr not in {"timestamp", "total_seconds"}
+
+
+@pytest.mark.parametrize(
+    ("epoch", "text"),
+    [
+        (0, "1970-01-01T00:00:00Z"),
+        (1_700_000_000, "2023-11-14T22:13:20Z"),
+        (MAX_EPOCH, "9999-12-31T23:59:59Z"),
+    ],
+)
+def test_format_timestamp(epoch: int, text: str) -> None:
+    assert format_timestamp(epoch) == text
+
+
+@pytest.mark.parametrize("bad", [-1, MAX_EPOCH + 1, True, 1.5, "1"])
+def test_format_timestamp_refuses_out_of_range(bad: object) -> None:
+    with pytest.raises(ClockError):
+        format_timestamp(bad)  # type: ignore[arg-type]

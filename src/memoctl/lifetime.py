@@ -12,8 +12,8 @@ last second of year 9999 (:data:`MAX_EPOCH`). A clock before the epoch or an exp
 second is refused (:class:`ClockError`) instead of being stored. Python integers do not
 overflow; the bound exists so the stored value can be formatted and compared.
 
-TODO(#16): ``add`` calls these at steps 1, 7 and 11. TODO(#6): map GrammarError and ClockError
-to the exit 2 usage envelope (``expires``) and a fixed clock error.
+``add`` calls these at steps 1, 7 and 11 (``memoctl.cmd_add``). ``cli_errors`` maps
+GrammarError to the exit 2 usage envelope (``expires``) and ClockError to exit 1 ``internal``.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ __all__ = [
     "ClockError",
     "Lifetime",
     "compute_lifetime",
+    "format_timestamp",
     "parse_expires",
     "seconds_since_epoch",
 ]
@@ -66,8 +67,8 @@ def seconds_since_epoch(moment: datetime) -> int:
     Raises :class:`ClockError` for a naive datetime (including a tzinfo whose utcoffset is
     None), a non-datetime, a time before 1970 or one whose conversion to UTC overflows.
 
-    TODO(#16): gateway.now() rounds through float; the single clock read must floor
-    time.time_ns().
+    ``gateway.now()`` floors ``time.time_ns()`` to the microsecond, so this floor to the second
+    is exact.
     """
     if not isinstance(moment, datetime) or moment.utcoffset() is None:
         raise ClockError
@@ -78,6 +79,18 @@ def seconds_since_epoch(moment: datetime) -> int:
     if seconds < 0:
         raise ClockError
     return seconds
+
+
+def format_timestamp(epoch: int) -> str:
+    """Epoch seconds as ``YYYY-MM-DDTHH:MM:SSZ`` (UTC); :class:`ClockError` outside
+    0..:data:`MAX_EPOCH`."""
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or not 0 <= epoch <= MAX_EPOCH:
+        raise ClockError
+    moment = _EPOCH + timedelta(seconds=epoch)
+    return (
+        f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}T"
+        f"{moment.hour:02d}:{moment.minute:02d}:{moment.second:02d}Z"
+    )
 
 
 def parse_expires(text: str) -> int:

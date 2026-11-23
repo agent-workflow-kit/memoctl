@@ -15,8 +15,9 @@ exit (``exit_now``) live here too; ``memoctl.deadline`` builds the command deadl
 
 Body sources (``read_file_bounded``, ``read_stdin_bounded``) return raw bytes, never text.
 
-A command reads the clock once with ``now()`` and hands the value down as a parameter.
-todo(#16): enforce one clock read per command.
+A command reads the clock once with ``now()`` and hands the value down as a parameter; ``add``
+reads it once at its step 7 (``tests/test_cmd_add.py`` asserts a single read). ``now()`` floors
+``time.time_ns()``, so the seconds and milliseconds derived from it never round up.
 
 ``env`` is the only way to read an environment variable (``os.environ`` is banned elsewhere).
 The config loader never calls it: HOME and XDG_* are not read (interface.md, Config).
@@ -40,7 +41,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn, Protocol
 
@@ -417,6 +418,9 @@ class AlarmHandle(Protocol):
         ...
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
 # Why a body source was refused; fixed strings, never the path or the content.
 SOURCE_REASONS = ("symlink", "not_regular", "terminal", "unreadable")
 READ_CHUNK = 65536
@@ -765,40 +769,39 @@ def _is_symlink(path: Path) -> bool:
         return False
 
 
-# Bound on the wait for a blocked output pipe, per unbounded ``_write_fd`` call (the deadline
-# restarts on each call); ``emit`` makes at most three (stdout, stderr, warnings), so the worst
-# case is ~9 s. A call with ``bound`` (the signal handler) uses its own, shorter bound.
+# Bound on the wait for a blocked output pipe, per stall: the deadline restarts after every
+# successful write, so only a reader making no progress for this long is abandoned.
 WRITE_WAIT_SECONDS = 3.0
 
 
 def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
     """Write ``text`` to a standard descriptor as UTF-8 with errors replaced, never through the
-    locale. On a non-blocking descriptor that is full (EAGAIN) it waits for writability, at most
-    ``WRITE_WAIT_SECONDS`` per call (the bound restarts on each call), and retries; partial
-    writes continue. Any other failure (closed descriptor, EPIPE) and the bound running out are
-    ignored, as the interface says ("a failure to write after the result was fixed is ignored").
+    locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says.
+
+    Without ``bound`` the descriptor is waited on (``poll``) before each small write for at most
+    ``WRITE_WAIT_SECONDS`` per stall (restarted after each successful write), then it gives up
+    silently; this holds for a blocking pipe too (one ``write`` of a large chunk would block
+    until a reader drains it). A non-blocking descriptor that is full (EAGAIN) is waited on the
+    same way; partial writes continue.
 
     With ``bound`` the write is for a signal handler that must not hang: it waits for the
     descriptor to be writable for at most ``bound`` seconds in all (``poll``, EINTR retried
     with the time left) and writes in small chunks, then gives up silently. The descriptor is
     left blocking (its open file description may be shared with other processes)."""
     view = memoryview(text.encode(ENCODING, "replace"))
-    end = None if bound is None else time.monotonic() + bound
-    wait_end = time.monotonic() + WRITE_WAIT_SECONDS
+    end = time.monotonic() + (WRITE_WAIT_SECONDS if bound is None else bound)
     try:
         while view:
-            if end is None:
-                chunk = view
-            elif _writable_before(fd, end):
+            if _writable_before(fd, end):
                 chunk = view[:_BOUNDED_CHUNK]
             else:
                 return
             try:
                 view = view[os.write(fd, chunk) :]
+                if bound is None:  # the budget is per stall: progress restarts it
+                    end = time.monotonic() + WRITE_WAIT_SECONDS
             except BlockingIOError:
-                if end is not None:
-                    continue  # the loop polls again, up to ``end``
-                remaining = wait_end - time.monotonic()
+                remaining = end - time.monotonic()
                 if remaining <= 0:
                     return
                 select.select([], [fd], [], remaining)
@@ -814,7 +817,9 @@ class RealGateway:
         self._crontab_timeout = crontab_timeout
 
     def now(self) -> datetime:
-        return datetime.fromtimestamp(time.time(), UTC)
+        # Integer nanoseconds floored to microseconds (a datetime's resolution): a float
+        # would round a reading within 0.5 us below a second up to the next second.
+        return _EPOCH + timedelta(microseconds=time.time_ns() // 1000)
 
     def home(self) -> Path:
         try:

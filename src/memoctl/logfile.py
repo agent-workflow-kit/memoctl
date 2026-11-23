@@ -25,7 +25,7 @@ Writing (:func:`append_record`), all relative to the state directory descriptor:
   append: no line is lost or written twice. A writer that opened the old file just before
   another process renamed it appends its one line to ``log.jsonl.1``; it is not lost.
 
-The failure reasons are fixed words, never a path or a value. todo(#16): ``add`` calls
+The failure reasons are fixed words, never a path or a value. ``add`` calls
 :func:`append_record` after its commit and turns a :class:`LogError` into the stderr warning.
 todo(#31): ``prune`` logs one record per removed note through the same function.
 todo(#20): the concurrent-writer process tests of the plan's stage 3.

@@ -41,7 +41,7 @@ from typing import Any
 
 from memoctl.config import ConfigError, load_config, resolve_home
 from memoctl.gateway import Gateway, GatewayError
-from memoctl.statedir import STATE_PARTS, UnsafeStateError, open_state_dir
+from memoctl.statedir import STATE_PARTS, StateAccessError, UnsafeStateError, open_state_dir
 from memoctl.store import (
     DB_CORRUPT,
     DB_LOCKED,
@@ -240,7 +240,7 @@ def _check_state_dir(gateway: Gateway) -> tuple[CheckResult, Path | None]:
             _fail("state_dir", "unsafe_state", "the state directory is not safe to use"),
             _warning_base(gateway, home),
         )
-    except OSError:
+    except (OSError, StateAccessError):
         # an existing level that cannot be opened (no search permission, I/O error)
         return (
             _fail("state_dir", "unsafe_state", "the state directory cannot be opened"),
@@ -278,7 +278,7 @@ def _check_store(gateway: Gateway, configure: Callable[[Store], None] | None) ->
     """``database`` and ``schema``, from one read-only open. Only ``database`` when it fails."""
     try:
         state = open_state_dir(gateway, create=False)
-    except (ConfigError, UnsafeStateError, OSError):
+    except (ConfigError, UnsafeStateError, StateAccessError, OSError):
         # the state_dir check passed a moment ago; whatever changed since is not safe either
         return [_fail("database", "unsafe_state", "the state directory is not safe to use")]
     if state is None:
@@ -290,7 +290,7 @@ def _check_store(gateway: Gateway, configure: Callable[[Store], None] | None) ->
 def _check_open(state: Any, configure: Callable[[Store], None] | None) -> list[CheckResult]:
     try:
         store = open_store(state, Mode.READ, configure=configure)
-    except (UnsafeStateError, OSError):
+    except (UnsafeStateError, StateAccessError, OSError):
         # a refused file, or one whose lstat failed (I/O error): not safe to use either
         return [_fail("database", "unsafe_state", "the database file is not safe to use")]
     except SchemaNewerError:
