@@ -29,7 +29,8 @@ Status: 0.1.0-design, 2026-11-18. This plan implements [interface.md](interface.
 | `notes.py` | 3 and 6 | `add` (order, dedupe, supersede, lifetime, limits), `delete` (chain repointing), `prune`. |
 | `logfile.py` | 3 | `log.jsonl` append and rotation. |
 | `search.py` | 4 | Term parsing and streaming matching. |
-| `render.py` | 4 and 5 | The read-time sanitizer, terminal rendering, the context block (plain and fenced). |
+| `sanitize.py` | 4 and 5 | The read-time sanitizer. |
+| `render.py` | 4 and 5 | Terminal rendering, the context block (plain and fenced). |
 | `selection.py` | 5 | Context selection: candidates, order, the two-pass kind-share walk, the reserved lines. |
 | `crontab.py` | 6 | The managed block: parsing, the three exact lines, install and uninstall outcomes (pure; calls go through the gateway). |
 
