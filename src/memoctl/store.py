@@ -27,11 +27,9 @@ disabled (the schema has none), no ATTACH, ``SQLITE_LIMIT_LENGTH`` 1 MiB, ``fore
 undecodable value cannot be returned as ``str``, so a row check rejects it instead of the
 driver raising with the value in its message).
 
-todo(#6): the CLI maps :class:`StoreError` (``reason``, ``retryable``) to exit 12 ``failed``
-and :class:`SchemaNewerError` to exit 12 ``schema_newer`` with ``details {found, supported}``.
-todo(#10): the deadline installs its handler through ``open_store(configure=...)`` calling
-:meth:`Store.set_progress_handler`; an interrupted statement already arrives as
-``StoreError("timeout")``.
+The CLI maps :class:`StoreError` and :class:`SchemaNewerError` to exit 12 (``cli_errors``). The
+deadline installs its progress handler through ``open_store(configure=deadline.configure_store)``;
+an interrupted statement arrives as ``StoreError("timeout")``.
 todo(#15): the change log is appended after :meth:`Store.write` returns (after the commit).
 todo(#16): ``add``'s queries (dedupe, limits, supersede, insert) are added here and run inside
 ``Store.write()``.
@@ -42,7 +40,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import TracebackType
@@ -133,10 +131,16 @@ def translate(exc: sqlite3.Error) -> StoreError:
     return StoreError(DB_CORRUPT)
 
 
-def _failure(exc: sqlite3.Error) -> BaseException:
+def _failure(exc: sqlite3.Error, owner: Store | None = None) -> BaseException:
     """What to raise for a sqlite failure. A Python-side error that carries no result code (a
     wrong parameter count, say) is a bug in this tool's own call, not a damaged file: it
-    propagates unchanged (exit 1) instead of becoming ``db_corrupt``."""
+    propagates unchanged (exit 1) instead of becoming ``db_corrupt``. An interrupt caused by
+    the progress callback raising is that exception (an internal error), not a ``timeout``."""
+    if owner is not None and owner._callback_error is not None:  # pyright: ignore[reportPrivateUsage]
+        code = getattr(exc, "sqlite_errorcode", None)
+        if isinstance(code, int) and code & 0xFF == _INTERRUPT:
+            error, owner._callback_error = owner._callback_error, None  # pyright: ignore[reportPrivateUsage]
+            return error
     if getattr(exc, "sqlite_errorcode", None) is None and isinstance(
         exc, (sqlite3.ProgrammingError, sqlite3.InterfaceError)
     ):
@@ -274,7 +278,9 @@ def _as_int(value: object, low: int, high: int) -> int | None:
     return None
 
 
-def check_note_row(values: Sequence[object]) -> NoteRow | None:
+def check_note_row(
+    values: Sequence[object], labels: tuple[tuple[str, str], ...] = ()
+) -> NoteRow | None:
     """The row as a :class:`NoteRow`, or ``None`` when any column fails its rule.
 
     Beyond the interface's list (integers, grammars, text), the bounds of the output schemas
@@ -282,7 +288,7 @@ def check_note_row(values: Sequence[object]) -> NoteRow | None:
     1 to 65536 and equal to the body's UTF-8 length, a body of 1 to 65536 UTF-8 bytes, a repo
     of at most 255 characters and a 64-character lowercase hex ``body_sha256``. A ``bool``, a
     float, a blob or a text that is not valid UTF-8 where an integer or text belongs fails. The
-    hash is not recomputed.
+    hash is not recomputed. ``labels`` (already checked by the caller) go into the row.
     """
     if len(values) != 10:
         return None
@@ -310,7 +316,42 @@ def check_note_row(values: Sequence[object]) -> NoteRow | None:
         return None
     if len(body.encode("utf-8")) != size_bytes:  # also bounds the body to MAX_BODY_BYTES
         return None
-    return NoteRow(note_id, repo, topic, kind, body, sha, size_bytes, created_at, expires_at, by)
+    return NoteRow(
+        note_id, repo, topic, kind, body, sha, size_bytes, created_at, expires_at, by, labels
+    )
+
+
+def _merge_labels(
+    note_id: Any,
+    pairs: Iterator[tuple[Any, ...]],
+    peeked: tuple[Any, ...] | None,
+    descending: bool,
+) -> tuple[tuple[tuple[str, str], ...] | None, tuple[Any, ...] | None]:
+    """The labels of ``note_id`` from ``pairs`` (ordered by ``note_id`` like the rows), sorted
+    by key then value, or ``None`` when one is bad or there are more than ``MAX_LABELS``; and
+    the first pair of a later note (consumed but not yet used). Pairs of an earlier id (only
+    possible outside one snapshot) are dropped."""
+    out: list[tuple[str, str]] = []
+    bad = False
+    count = 0
+    item = peeked if peeked is not None else next(pairs, None)
+    while item is not None:
+        nid = item[0]
+        if nid == note_id:
+            count += 1
+            if count <= MAX_LABELS + 1 and not bad:
+                pair = check_label_row(item[1], item[2])
+                if pair is None:
+                    bad = True
+                else:
+                    out.append(pair)
+        elif (nid > note_id) if descending else (nid < note_id):
+            pass  # an earlier note's pair: not ours
+        else:
+            break
+        item = next(pairs, None)
+    found = None if bad or count > MAX_LABELS else tuple(sorted(out))
+    return found, item
 
 
 # --- the connection -------------------------------------------------------------------------
@@ -320,28 +361,29 @@ class Cursor:
     """A result cursor whose fetches translate sqlite failures (a raw ``DataError`` for a
     value too big to hand to Python would otherwise carry sqlite's text out of the module)."""
 
-    __slots__ = ("_cursor",)
+    __slots__ = ("_cursor", "_owner")
 
-    def __init__(self, cursor: sqlite3.Cursor) -> None:
+    def __init__(self, cursor: sqlite3.Cursor, owner: Store | None = None) -> None:
         self._cursor = cursor
+        self._owner = owner
 
     def fetchone(self) -> Any:
         try:
             return self._cursor.fetchone()
         except sqlite3.Error as exc:
-            raise _failure(exc) from None
+            raise _failure(exc, self._owner) from None
 
     def fetchall(self) -> list[Any]:
         try:
             return self._cursor.fetchall()
         except sqlite3.Error as exc:
-            raise _failure(exc) from None
+            raise _failure(exc, self._owner) from None
 
     def fetchmany(self, size: int = 1) -> list[Any]:
         try:
             return self._cursor.fetchmany(size)
         except sqlite3.Error as exc:
-            raise _failure(exc) from None
+            raise _failure(exc, self._owner) from None
 
     def __iter__(self) -> Cursor:
         return self
@@ -378,6 +420,10 @@ class Store:
         self.mode = mode
         self.version = 0  # user_version after open (after migration for writers)
         self.bad_rows = 0  # rows :meth:`notes` skipped on this store
+        self._busy_ms = 0  # the configured busy timeout (set by open_store)
+        self._busy_cap: Callable[[], int | None] | None = None
+        self._callback_error: BaseException | None = None  # raised by the progress callback
+        self._progress: Callable[[], int] | None = None  # the installed progress callback
 
     # -- lifecycle
     def close(self) -> None:
@@ -402,9 +448,37 @@ class Store:
         """Call ``handler`` every :data:`PROGRESS_STEPS` virtual-machine steps; a true return
         interrupts the running statement, which then raises ``StoreError("timeout")``."""
         if handler is None:
+            self._progress = None
             self._conn.set_progress_handler(None, 0)
-        else:
-            self._conn.set_progress_handler(lambda: 1 if handler() else 0, PROGRESS_STEPS)
+            return
+
+        def callback() -> int:
+            try:
+                return 1 if handler() else 0
+            except BaseException as exc:  # noqa: BLE001 - re-raised by _failure, not a timeout
+                self._callback_error = exc
+                return 1
+
+        self._progress = callback
+        self._conn.set_progress_handler(callback, PROGRESS_STEPS)
+
+    def set_busy_cap(self, cap: Callable[[], int | None] | None) -> None:
+        """Cap every busy timeout to ``cap()`` milliseconds (``None``: no cap), asked again
+        before each wait that can block (the deadline's time left)."""
+        self._busy_cap = cap
+
+    def _budget(self, ms: int) -> int:
+        """``ms`` limited by the cap (never negative)."""
+        if self._busy_cap is None:
+            return ms
+        left = self._busy_cap()
+        return ms if left is None else max(0, min(ms, left))
+
+    def _apply_busy(self) -> None:
+        """Set the connection's busy timeout to the configured one, capped. Without a cap the
+        value set at open stays."""
+        if self._busy_cap is not None:
+            self._conn.execute(f"PRAGMA busy_timeout = {self._budget(self._busy_ms)}")
 
     # -- statements
     def execute(self, sql: LiteralString, params: Sequence[Any] = ()) -> Cursor:
@@ -413,13 +487,18 @@ class Store:
         sqlite cannot bind raises ``ValueError("invalid parameter")`` without the value. TEXT
         comes back as ``str`` (or the undecodable marker), so rows read this way go through
         :func:`check_note_row`."""
+        self._callback_error = None  # one a statement never raised must not leak into this one
         try:
-            return Cursor(self._conn.execute(sql, params))
+            return Cursor(self._conn.execute(sql, params), self)
         except sqlite3.Error as exc:
-            raise _failure(exc) from None
+            raise _failure(exc, self) from None
         except (UnicodeEncodeError, OverflowError):
             # a lone surrogate, or an integer beyond 64 bits; both messages echo the value
             raise ValueError("invalid parameter") from None
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._conn.in_transaction
 
     @contextmanager
     def write(self) -> Iterator[None]:
@@ -440,6 +519,11 @@ class Store:
     def _transaction(self, begin: LiteralString) -> Iterator[None]:
         if self._conn.in_transaction:
             raise RuntimeError("transaction already open")
+        self._callback_error = None
+        try:
+            self._apply_busy()  # the lock wait of BEGIN IMMEDIATE ends with the deadline
+        except sqlite3.Error as exc:
+            raise _failure(exc, self) from None
         self.execute(begin)
         try:
             yield
@@ -447,12 +531,19 @@ class Store:
                 self.execute("COMMIT")
         except BaseException as exc:
             if self._conn.in_transaction:
+                # An interrupted COMMIT leaves the transaction open, and the progress handler
+                # would interrupt the ROLLBACK as well: take it off for the rollback only, then
+                # put the same callback back so later statements stay interruptible.
+                self._conn.set_progress_handler(None, 0)
                 try:
                     self._conn.execute("ROLLBACK")
                 except sqlite3.Error:
                     pass
+                finally:
+                    if self._progress is not None:
+                        self._conn.set_progress_handler(self._progress, PROGRESS_STEPS)
             if isinstance(exc, sqlite3.Error):
-                raise _failure(exc) from None
+                raise _failure(exc, self) from None
             raise
 
     # -- rows
@@ -463,8 +554,10 @@ class Store:
         *,
         labels: bool = False,
         on_bad: str = "skip",
+        descending: bool = False,
     ) -> Iterator[NoteRow]:
-        """The ``notes`` rows (ordered by id) that pass the row checks.
+        """The ``notes`` rows (ordered by id, highest first with ``descending``) that pass the
+        row checks. The rows stream: a caller that stops early never reads the rest.
 
         ``where`` is a fixed SQL fragment such as ``"WHERE repo = ?"`` (never input; values go
         in ``params``; the type is ``LiteralString`` and a fragment that does not start with
@@ -480,13 +573,26 @@ class Store:
             raise ValueError("on_bad must be skip or raise")
         if where and (not where.startswith("WHERE ") or any(t in where for t in _UNSAFE_FRAGMENT)):
             raise ValueError("where must be a plain WHERE clause")
-        cursor = self.execute(f"SELECT {NOTE_COLUMNS} FROM notes {where} ORDER BY id", params)
+        direction: LiteralString = "DESC" if descending else "ASC"
+        cursor = self.execute(
+            f"SELECT {NOTE_COLUMNS} FROM notes {where} ORDER BY id {direction}", params
+        )
+        pairs: Iterator[tuple[Any, ...]] | None = None
+        label_cursor = None
+        if labels:  # one statement for every label, merged with the rows (same id order)
+            label_cursor = self.execute(
+                "SELECT note_id, key, value FROM note_labels"
+                f" WHERE note_id IN (SELECT id FROM notes {where}) ORDER BY note_id {direction}",
+                tuple(params),
+            )
+            pairs = self._rows(label_cursor)
+        peeked: tuple[Any, ...] | None = None
         try:
             for raw in self._rows(cursor):
-                row = check_note_row(raw)
-                if row is not None and labels:
-                    found = self._labels(row.id)
-                    row = None if found is None else replace(row, labels=found)
+                found: tuple[tuple[str, str], ...] | None = ()
+                if pairs is not None:
+                    found, peeked = _merge_labels(raw[0], pairs, peeked, descending)
+                row = None if found is None else check_note_row(raw, found)
                 if row is None:
                     if on_bad == "raise":
                         raise StoreError(DB_CORRUPT)
@@ -495,6 +601,8 @@ class Store:
                 yield row
         finally:
             cursor.close()
+            if label_cursor is not None:
+                label_cursor.close()
 
     @staticmethod
     def _rows(cursor: Cursor) -> Iterator[tuple[Any, ...]]:
@@ -503,19 +611,6 @@ class Store:
             if raw is None:
                 return
             yield raw
-
-    def _labels(self, note_id: int) -> tuple[tuple[str, str], ...] | None:
-        cursor = self.execute(
-            "SELECT key, value FROM note_labels WHERE note_id = ? ORDER BY key, value LIMIT ?",
-            (note_id, MAX_LABELS + 1),
-        )
-        out: list[tuple[str, str]] = []
-        for key, value in self._rows(cursor):
-            pair = check_label_row(key, value)
-            if pair is None:
-                return None
-            out.append(pair)
-        return None if len(out) > MAX_LABELS else tuple(out)
 
     def check_rows(self) -> None:
         """Run every row check over every note and label, and look for labels of no note
@@ -559,6 +654,7 @@ def _set_pragma(conn: sqlite3.Connection, name: str, value: str, expect: int) ->
 
 
 def _configure(conn: sqlite3.Connection, busy_ms: int) -> None:
+    """``busy_ms`` is the value to set (capped by the deadline when there is one)."""
     conn.text_factory = _text_factory
     conn.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)
     conn.setconfig(sqlite3.SQLITE_DBCONFIG_ENABLE_TRIGGER, False)
@@ -591,8 +687,9 @@ def _inspect(conn: sqlite3.Connection) -> _Snapshot:
     between separate reads would otherwise show a half-set identity). The first query reads the
     file, so a file that is not a database fails here (``db_corrupt``).
 
-    todo(#10): bound the schema parse (the first read parses sqlite_schema before any handler
-    fires; consider a file-size or page_count cap)."""
+    The schema parse runs under the progress handler the ``configure`` hook installed (a planted
+    schema with hundreds of thousands of objects is interrupted: ``StoreError("timeout")``), so
+    no size cap is needed."""
     own = not conn.in_transaction
     if own:
         conn.execute("BEGIN")
@@ -660,7 +757,9 @@ def _check_labels_against_sequence(conn: sqlite3.Connection) -> None:
 WAL_ATTEMPTS = 5
 
 
-def _ensure_wal(conn: sqlite3.Connection, busy_ms: int) -> None:
+def _ensure_wal(
+    conn: sqlite3.Connection, busy_ms: int, budget: Callable[[int], int] = lambda ms: ms
+) -> None:
     """Switch to WAL (before the migration transaction). A mount that cannot hold it leaves
     another mode, or an error: both refuse with ``db_unreadable`` (interface.md does not allow
     a silent fallback to a rollback journal; ``validate`` warns about such mounts).
@@ -669,11 +768,11 @@ def _ensure_wal(conn: sqlite3.Connection, busy_ms: int) -> None:
     several first writers can see ``database is locked`` at once. A busy answer is retried
     (a mode another process already set is accepted); between attempts a ``BEGIN IMMEDIATE``
     waits out the other writer. Each wait uses ``busy_ms // WAL_ATTEMPTS`` so the total stays
-    within the documented timeout. Still busy after the attempts: the ``db_locked`` the caller
-    maps."""
-    conn.execute(f"PRAGMA busy_timeout = {max(busy_ms // WAL_ATTEMPTS, 1)}")
+    within the documented timeout; each wait is also capped to the deadline's time left. Still
+    busy after the attempts: the ``db_locked`` the caller maps."""
     try:
         for attempt in range(WAL_ATTEMPTS):
+            conn.execute(f"PRAGMA busy_timeout = {budget(max(busy_ms // WAL_ATTEMPTS, 1))}")
             try:
                 mode = _scalar(conn, "PRAGMA journal_mode = WAL")
             except sqlite3.OperationalError as exc:
@@ -686,7 +785,7 @@ def _ensure_wal(conn: sqlite3.Connection, busy_ms: int) -> None:
                 raise StoreError(DB_UNREADABLE)
             return
     finally:
-        conn.execute(f"PRAGMA busy_timeout = {busy_ms}")
+        conn.execute(f"PRAGMA busy_timeout = {budget(busy_ms)}")
 
 
 def _migrate(conn: sqlite3.Connection) -> int:
@@ -735,7 +834,7 @@ def open_store(
 
     Raises :class:`memoctl.statedir.UnsafeStateError` (``state.db`` or a sidecar is not a
     private regular file), :class:`StoreError` and :class:`SchemaNewerError`.
-    ``configure`` is called with the :class:`Store` before the first read of the file (the
+    ``configure`` is called with the :class:`Store` before anything touches the file (the
     deadline installs its progress handler there). ``connect`` is for tests.
     """
     exists = state.check_db()
@@ -757,10 +856,11 @@ def open_store(
     except sqlite3.Error as exc:
         raise _failure(exc) from None
     store = Store(conn, mode)
+    store._busy_ms = busy_ms  # pyright: ignore[reportPrivateUsage]
     try:
-        _configure(conn, busy_ms)
         if configure is not None:
-            configure(store)
+            configure(store)  # first: some pragmas below already parse the schema
+        _configure(conn, store._budget(busy_ms))  # pyright: ignore[reportPrivateUsage]
         snap = _inspect(conn)
         found = _classify(snap)
         if found == EMPTY and mode is not Mode.INIT:
@@ -769,14 +869,18 @@ def open_store(
         if mode is Mode.READ:
             store.version = snap.version  # the snapshot the checks ran on
             return store
-        _ensure_wal(conn, busy_ms)
+        _ensure_wal(conn, busy_ms, store._budget)  # pyright: ignore[reportPrivateUsage]
         if found != EMPTY:
             _check_labels_against_sequence(conn)
-        store.version = _migrate(conn) if found != CURRENT else supported_version()
+        if found != CURRENT:
+            store._apply_busy()  # pyright: ignore[reportPrivateUsage]
+            store.version = _migrate(conn)
+        else:
+            store.version = supported_version()
         return store
     except sqlite3.Error as exc:
         store.close()
-        raise _failure(exc) from None
+        raise _failure(exc, store) from None
     except BaseException:
         store.close()
         raise

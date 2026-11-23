@@ -9,9 +9,9 @@ Every failure is a :class:`ConfigError` (code ``config_invalid``) whose ``field`
 key, ``home`` or a file path, and whose message is fixed text: no value from a file is ever
 placed in an error. Files are read only through the gateway.
 
-todo(#6): the CLI maps :class:`ConfigError` to the exit 2 ``config_invalid`` envelope
-(``details.field`` is :attr:`ConfigError.field`). The state directory
-(:mod:`memoctl.statedir`) finds the home with :func:`resolve_home` too.
+The CLI maps :class:`ConfigError` to the exit 2 ``config_invalid`` envelope
+(``details.field`` is :attr:`ConfigError.field`; ``cli_errors`` registers it). The state
+directory (:mod:`memoctl.statedir`) finds the home with :func:`resolve_home` too.
 """
 
 from __future__ import annotations
