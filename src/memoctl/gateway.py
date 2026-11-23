@@ -10,6 +10,8 @@ Commands are always run as argv lists, never through a shell, and untrusted text
 stdin or files, never in argv or the environment. Process output is decoded as UTF-8 with
 ``surrogateescape`` so no byte sequence raises or is lost.
 
+Body sources (``read_file_bounded``, ``read_stdin_bounded``) return raw bytes, never text.
+
 A command reads the clock once with ``now()`` and hands the value down as a parameter.
 todo(#16): enforce one clock read per command.
 
@@ -23,10 +25,10 @@ import errno
 import os
 import pwd
 import secrets
+import select
 import shutil
 import stat
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,6 +38,7 @@ from typing import Protocol
 ENCODING = "utf-8"
 ERRORS = "surrogateescape"
 DEFAULT_TERMINAL_WIDTH = 80
+TEMP_PREFIX = ".tmp."
 
 
 class GatewayError(RuntimeError):
@@ -78,6 +81,158 @@ def _info(st: os.stat_result) -> PathInfo:
     return PathInfo(_kind(st.st_mode), st.st_uid, stat.S_IMODE(st.st_mode))
 
 
+def _component(name: str) -> str:
+    """``name`` when it is one plain path component; ``ValueError`` otherwise, so a handle
+    can never be steered out of its directory."""
+    if not name or name in (".", "..") or "/" in name or "\0" in name:
+        raise ValueError(f"not a single path component: {name!r}")
+    return name
+
+
+class DirHandle(Protocol):
+    """An open directory descriptor: every name is relative to it and one component long.
+
+    The callers check the directory once, through :meth:`stat` (``fstat`` on the descriptor),
+    and everything after that goes through the same descriptor, so a swapped path cannot
+    redirect it. ``close`` is idempotent; any other call on a closed handle raises ``OSError``.
+    """
+
+    def stat(self) -> PathInfo:
+        """Kind, owner and mode of the directory itself (``fstat``)."""
+        ...
+
+    def open_dir(self, name: str, *, follow: bool) -> DirHandle | None:
+        """Open the subdirectory ``name`` (a final symlink is followed only when ``follow``).
+        ``None`` when it is missing. A symlink (not following), a non-directory and a refusal
+        raise ``OSError``."""
+        ...
+
+    def make_dir(self, name: str, mode: int) -> None:
+        """Create ``name`` (``mkdirat``; never follows a symlink). ``FileExistsError`` when
+        anything, even a dangling symlink, is there. The directory gets exactly ``mode``
+        whatever the umask (``mkdirat``, then ``fchmodat`` by name; the process umask is never
+        touched)."""
+        ...
+
+    def set_mode(self, mode: int) -> None:
+        """Set the directory's permission bits exactly (``fchmod``; the umask does not apply)."""
+        ...
+
+    def lstat(self, name: str) -> PathInfo | None:
+        """Kind, owner and mode of ``name`` without following a symlink; ``None`` when missing."""
+        ...
+
+    def create_file(self, name: str, mode: int) -> bool:
+        """Create the regular file ``name`` empty, exclusively and without following a symlink,
+        with exactly ``mode`` (the umask does not apply). ``False`` when anything is there."""
+        ...
+
+    def close(self) -> None: ...
+
+
+class _RealDirHandle:
+    def __init__(self, fd: int) -> None:
+        self._fd: int | None = fd
+
+    def _live(self) -> int:
+        if self._fd is None:
+            raise OSError(errno.EBADF, "directory handle is closed")
+        return self._fd
+
+    def stat(self) -> PathInfo:
+        return _info(os.fstat(self._live()))
+
+    def open_dir(self, name: str, *, follow: bool) -> DirHandle | None:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        if not follow:
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(_component(name), flags, dir_fd=self._live())
+        except FileNotFoundError:
+            return None
+        return _RealDirHandle(fd)
+
+    def make_dir(self, name: str, mode: int) -> None:
+        """Make ``name`` with exactly ``mode`` (the umask does not apply, and is never touched).
+
+        mkdir applies the umask, so the mode is set again afterwards, by name and without
+        following a symlink: ``chmod(..., dir_fd=, follow_symlinks=False)``. A hostile umask such
+        as 0o777 leaves a directory its owner cannot open yet, so no descriptor is opened for
+        this. Where that call is unavailable (``NotImplementedError``, ``ValueError`` or
+        ENOTSUP/ENOSYS, e.g. no /proc for the glibc emulation) the name is opened with
+        O_NOFOLLOW and ``fchmod`` is used instead, which needs the owner read bit. If the mode
+        cannot be set, the just-made directory is removed again (best effort, so a mode-0
+        leftover never blocks later runs) and the original error propagates."""
+        fd = self._live()
+        os.mkdir(_component(name), mode, dir_fd=fd)
+        try:
+            try:
+                os.chmod(name, mode, dir_fd=fd, follow_symlinks=False)
+            except (NotImplementedError, ValueError):
+                self._fchmod_nofollow(fd, name, mode)
+            except OSError as exc:
+                if exc.errno not in (errno.ENOTSUP, errno.ENOSYS):
+                    raise
+                self._fchmod_nofollow(fd, name, mode)
+        except BaseException:
+            try:
+                os.rmdir(name, dir_fd=fd)
+            except OSError:
+                pass
+            raise
+
+    @staticmethod
+    def _fchmod_nofollow(fd: int, name: str, mode: int) -> None:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        sub = os.open(name, flags, dir_fd=fd)
+        try:
+            os.fchmod(sub, mode)
+        finally:
+            os.close(sub)
+
+    def set_mode(self, mode: int) -> None:
+        os.fchmod(self._live(), mode)
+
+    def lstat(self, name: str) -> PathInfo | None:
+        try:
+            return _info(os.stat(_component(name), dir_fd=self._live(), follow_symlinks=False))
+        except FileNotFoundError:
+            return None
+
+    def create_file(self, name: str, mode: int) -> bool:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            fd = os.open(_component(name), flags, mode, dir_fd=self._live())
+        except FileExistsError:
+            return False
+        try:
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        return True
+
+    def close(self) -> None:
+        if self._fd is not None:
+            fd, self._fd = self._fd, None
+            os.close(fd)
+
+
+# Why a body source was refused; fixed strings, never the path or the content.
+SOURCE_REASONS = ("symlink", "not_regular", "terminal", "unreadable")
+READ_CHUNK = 65536
+
+
+class BodySourceError(GatewayError):
+    """A file or standard input cannot be used as a body source. ``reason`` is one of
+    ``SOURCE_REASONS``; the message never contains the path or any content."""
+
+    def __init__(self, reason: str) -> None:
+        if reason not in SOURCE_REASONS:
+            raise ValueError(f"unknown body source reason {reason!r}")
+        super().__init__(f"body source refused ({reason})")
+        self.reason = reason
+
+
 class Gateway(Protocol):
     """Everything memoctl needs from outside the process."""
 
@@ -117,7 +272,23 @@ class Gateway(Protocol):
         ``OSError``."""
         ...
 
-    def stdin_read(self) -> str: ...
+    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
+        """Open the directory ``path`` (``O_DIRECTORY``; a final symlink is followed only when
+        ``follow``; symlinks in parent components are always followed). ``None`` when it or a
+        parent is missing. A final symlink (not following), a non-directory (also as a parent)
+        and a refusal raise ``OSError``."""
+        ...
+
+    def read_file_bounded(self, path: Path, nbytes: int) -> bytes:
+        """Read at most ``nbytes`` bytes of the regular file at ``path`` without following a
+        symlink in its last component. Raises ``BodySourceError``."""
+        ...
+
+    def read_stdin_bounded(self, nbytes: int) -> bytes:
+        """Read at most ``nbytes`` bytes from standard input (fewer at end of file). Raises
+        ``BodySourceError`` for a terminal, a directory or a descriptor that cannot be read."""
+        ...
+
     def write_out(self, text: str) -> None: ...
     def write_err(self, text: str) -> None: ...
     def isatty(self, fd: int) -> bool: ...
@@ -128,7 +299,14 @@ class Gateway(Protocol):
         ...
 
     def read_bytes(self, path: Path) -> bytes: ...
-    def write_bytes(self, path: Path, data: bytes) -> None: ...
+    def write_bytes(self, path: Path, data: bytes, *, mode: int = 0o600) -> None:
+        """Replace ``path`` atomically with ``data`` at exactly ``mode`` (default 0600): a
+        temporary file beside it is written, synced and renamed over it, so a reader sees the
+        old or the new bytes, never a mix, and a symlink at ``path`` is replaced, not written
+        through. The parent is not created (``FileNotFoundError``). A hard exit
+        (``os._exit``, SIGKILL) between creating the temporary file and the rename can leave
+        an orphan ``.tmp.<hex>`` file behind; nothing cleans it up."""
+        ...
 
     def run(
         self, argv: list[str], *, stdin: str | bytes | None = None, timeout: float | None = None
@@ -182,6 +360,34 @@ def _run(
         raw.stdout.decode(ENCODING, ERRORS),
         raw.stderr.decode(ENCODING, ERRORS),
     )
+
+
+def _read_fd(fd: int, nbytes: int) -> bytes:
+    """Read until end of file or ``nbytes`` bytes, whichever is first; never asks for more
+    than is still wanted, so a growing file or an endless source cannot exceed the bound."""
+    chunks: list[bytes] = []
+    remaining = nbytes
+    while remaining > 0:
+        try:
+            chunk = os.read(fd, min(READ_CHUNK, remaining))
+        except BlockingIOError:
+            # A non-blocking descriptor (the caller set O_NONBLOCK on the open file
+            # description) with no data yet: wait until it is readable, then retry.
+            # todo(#10): the deadline of the command interrupts this wait.
+            select.select([fd], [], [])
+            continue
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _is_symlink(path: Path) -> bool:
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode)
+    except (OSError, ValueError):
+        return False
 
 
 def _write_fd(fd: int, text: str) -> None:
@@ -257,8 +463,78 @@ class RealGateway:
         finally:
             os.close(fd)
 
-    def stdin_read(self) -> str:
-        return sys.stdin.read()
+    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        if not follow:
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            return None
+        return _RealDirHandle(fd)
+
+    def read_file_bounded(self, path: Path, nbytes: int) -> bytes:
+        """Open with ``O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | O_NOCTTY`` (a FIFO or device opens
+        at once instead of blocking), require a regular file on ``fstat`` of the open
+        descriptor (so there is no check-then-open race) and read at most ``nbytes``.
+
+        An ``lstat`` runs first so that a socket, FIFO or device is classified without
+        opening it (opening some special files has side effects, and a socket cannot be
+        opened at all). It is not a security boundary: the ``fstat`` after the open is the
+        authority.
+        """
+        try:
+            before = os.lstat(path)
+        except (TimeoutError, InterruptedError):
+            raise
+        except (OSError, ValueError):  # missing, denied, a loop, an embedded NUL
+            raise BodySourceError("unreadable") from None
+        if stat.S_ISLNK(before.st_mode):
+            raise BodySourceError("symlink")
+        if not stat.S_ISREG(before.st_mode):
+            raise BodySourceError("not_regular")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY
+        try:
+            fd = os.open(path, flags)
+        except (TimeoutError, InterruptedError):
+            raise
+        except OSError as exc:
+            # ELOOP (Linux, macOS) or EMLINK (BSD) also come from a loop in a parent
+            # component: it is a symlink refusal only when the last component is one.
+            if exc.errno in (errno.ELOOP, errno.EMLINK) and _is_symlink(path):
+                raise BodySourceError("symlink") from None
+            raise BodySourceError("unreadable") from None
+        except ValueError:  # an embedded NUL
+            raise BodySourceError("unreadable") from None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise BodySourceError("not_regular")
+            return _read_fd(fd, nbytes)
+        except (TimeoutError, InterruptedError):
+            raise
+        except OSError:
+            raise BodySourceError("unreadable") from None
+        finally:
+            os.close(fd)
+
+    def read_stdin_bounded(self, nbytes: int) -> bytes:
+        """Read descriptor 0 directly (no text layer, no locale). A terminal and a directory
+        are refused; a pipe, socket, file or device (``/dev/zero``) is read up to ``nbytes``.
+        The read blocks while a pipe stays open and silent: the deadline of the command is
+        what ends it.
+        todo(#10): the deadline timer that interrupts this read.
+        """
+        try:
+            mode = os.fstat(0).st_mode
+            if os.isatty(0):
+                raise BodySourceError("terminal")
+            if stat.S_ISDIR(mode):
+                raise BodySourceError("not_regular")
+            return _read_fd(0, nbytes)
+        except (TimeoutError, InterruptedError):
+            raise  # the deadline (todo(#10)) or a signal handler, not an unreadable source
+        except OSError:
+            raise BodySourceError("unreadable") from None
 
     def write_out(self, text: str) -> None:
         _write_fd(1, text)
@@ -284,14 +560,36 @@ class RealGateway:
         """Read the whole file. Raises ``OSError`` as the filesystem does."""
         return Path(path).read_bytes()
 
-    def write_bytes(self, path: Path, data: bytes) -> None:
-        """Write ``data`` to ``path``.
-
-        Not atomic (a crash can leave a truncated file), does not set a file mode, does not
-        create parent directories and does not fsync.
-        todo(#8): file modes and atomic replace.
-        """
-        Path(path).write_bytes(data)
+    def write_bytes(self, path: Path, data: bytes, *, mode: int = 0o600) -> None:
+        if not isinstance(data, bytes):
+            raise TypeError(f"write_bytes needs bytes, got {type(data).__name__}")
+        target = Path(path)
+        parent = os.fspath(target.parent)
+        # A fixed-length name: one derived from the target would exceed NAME_MAX for a long one.
+        temp = os.path.join(parent, f"{TEMP_PREFIX}{secrets.token_hex(16)}")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        fd = os.open(temp, flags, mode)
+        try:
+            try:
+                os.fchmod(fd, mode)
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view) :]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(temp, target)
+        except BaseException:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+            raise
+        dfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
 
     def run(
         self, argv: list[str], *, stdin: str | bytes | None = None, timeout: float | None = None

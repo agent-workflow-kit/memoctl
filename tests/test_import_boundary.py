@@ -66,7 +66,8 @@ BANNED_REFS = {
             "urandom getuid get_terminal_size environ environb getenv getenvb putenv fdopen "
             "getlogin getcwd getcwdb listdir remove unlink rename replace mkdir makedirs rmdir "
             "stat lstat open scandir walk chmod chdir read write isatty kill killpg popen "
-            "fork system fstat dup dup2 close pipe geteuid getgid getegid umask fsync"
+            "fork system fstat dup dup2 close pipe geteuid getgid getegid umask fsync "
+            "fchmod fchown chown link symlink truncate ftruncate utime mkfifo"
         ).split()
     },
     *{
@@ -296,6 +297,15 @@ def test_module_reaches_outside_only_through_the_gateway(path: Path) -> None:
         "from sys import stdout",
         "import os\nos.urandom(3)",
         "from os import urandom",
+        "import os\nos.fchmod(3, 0o600)",
+        "import os\nos.fchown(3, 0, 0)",
+        "import os\nos.chown('f', 0, 0)",
+        "import os\nos.link('a', 'b')",
+        "import os\nos.symlink('a', 'b')",
+        "import os\nos.truncate('f', 0)",
+        "import os\nos.ftruncate(3, 0)",
+        "import os\nos.utime('f')",
+        "import os\nos.mkfifo('f')",
         "import os\nos.environ['HOME']",
         "import os\nos.getenv('HOME')",
         "from pathlib import Path\nPath.home()",
@@ -451,7 +461,7 @@ def test_scanner_flags_aliases_and_new_bans(source: str) -> None:
         "def f(gateway):\n    return gateway.home() / 'x', gateway.now()",
         "def f(gateway):\n    gateway.write_out('x')\n    return gateway.run(['ls'])",
         "def f(gateway):\n    return gateway.crontab_read()",
-        "def f(gateway):\n    return gateway.stdin_read(), gateway.random_hex(4)",
+        "def f(gateway):\n    return gateway.read_stdin_bounded(9), gateway.random_hex(4)",
         # harmless neighbours of the banned names
         "import os\nos.path.join('a', 'b')",
         "from os import path\npath.join('a', 'b')",
