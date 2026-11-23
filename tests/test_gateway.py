@@ -6,6 +6,7 @@ import io
 import os
 import pwd
 import sys
+import threading
 from datetime import UTC
 from pathlib import Path
 
@@ -279,3 +280,45 @@ def test_real_gateway_argv_is_a_copy_without_the_program(monkeypatch: pytest.Mon
     assert argv == ["a", "--json"]
     argv.append("x")
     assert RealGateway().argv() == ["a", "--json"]
+
+
+def test_a_full_nonblocking_pipe_is_waited_for_not_truncated() -> None:
+    reader, writer = os.pipe()
+    os.set_blocking(writer, False)
+    while True:  # fill the pipe so the next write raises BlockingIOError
+        try:
+            os.write(writer, b"\0" * 65536)
+        except BlockingIOError:
+            break
+    chunks: list[bytes] = []
+
+    def drain() -> None:
+        while chunk := os.read(reader, 65536):
+            chunks.append(chunk)
+
+    thread = threading.Thread(target=drain)
+    payload = "x" * 300_000
+    # Start the reader only now: _write_fd begins against a full pipe.
+    thread.start()
+    try:
+        gateway._write_fd(writer, payload)
+    finally:
+        os.close(writer)
+        thread.join(timeout=20)
+        os.close(reader)
+    data = b"".join(chunks)
+    assert not thread.is_alive()
+    assert data.endswith(payload.encode()) and data.count(b"x") == len(payload)
+
+
+def test_a_pipe_that_never_drains_gives_up_after_the_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway, "WRITE_WAIT_SECONDS", 0.2)
+    reader, writer = os.pipe()
+    os.set_blocking(writer, False)
+    try:
+        gateway._write_fd(writer, "x" * 1_000_000)  # returns, ignoring the failure
+    finally:
+        os.close(reader)
+        os.close(writer)

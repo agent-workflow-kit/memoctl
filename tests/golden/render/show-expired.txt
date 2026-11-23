@@ -1,0 +1,17 @@
+note 7
+repo: owner/repo
+topic: queue
+kind: unknown
+labels: a=b, c=d
+status: expired
+created: 2026-01-02T03:04:05Z
+expires: 2026-01-03T03:04:05Z
+superseded_by: -
+supersedes: -
+size: 11 bytes
+body_sha256: 0000000000000000000000000000000000000000000000000000000000000000
+body:
+| hello
+|
+| world
+|
