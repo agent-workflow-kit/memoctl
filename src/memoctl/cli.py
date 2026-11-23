@@ -26,6 +26,7 @@ from memoctl.cli_errors import (
     failure_for,
     internal_failure,
 )
+from memoctl.deadline import Deadline, initial_seconds
 from memoctl.gateway import Gateway, RealGateway
 
 STANDARD_FDS = ((0, False), (1, True), (2, True))  # (descriptor, open for writing)
@@ -69,7 +70,7 @@ def main(
         ensure_standard_descriptors(gateway)
         args = list(gateway.argv() if argv is None else argv)
         json_mode = prescan_json(args)
-        return _run(args, gateway, commands)
+        return _run(args, gateway, commands, json_mode=json_mode)
     except ParserExit as done:
         assert gateway is not None  # a ParserExit comes from _run
         gateway.write_out(done.text)
@@ -86,7 +87,9 @@ def main(
         return report(gateway, failure, json_mode=json_mode)
 
 
-def _run(args: list[str], gateway: Gateway, commands: Sequence[Command]) -> int:
+def _run(
+    args: list[str], gateway: Gateway, commands: Sequence[Command], *, json_mode: bool = False
+) -> int:
     if leading_flag_is_refused(args):
         raise UsageError("argv")
     parser = build_parser(commands)
@@ -94,4 +97,9 @@ def _run(args: list[str], gateway: Gateway, commands: Sequence[Command]) -> int:
     if namespace.command is None:
         raise UsageError("argv")
     by_name = {command.name: command for command in commands}
-    return by_name[namespace.command].run(namespace, gateway)
+    # Armed after parsing; leaving the block disarms (and ends in exit 12 when the time had
+    # run out), so nothing is reported after the deadline passed. A command disarms earlier at
+    # its own disarm points through ``memoctl.deadline.current()``.
+    with Deadline(gateway, json_mode=json_mode) as deadline:
+        deadline.arm(initial_seconds(namespace.command))
+        return by_name[namespace.command].run(namespace, gateway)

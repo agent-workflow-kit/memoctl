@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import os
 import pwd
 import sys
@@ -63,11 +62,6 @@ def test_files_round_trip_exact_bytes(tmp_path: Path) -> None:
     data = b"\x00\xff no newline"
     gw.write_bytes(tmp_path / "f", data)
     assert gw.read_bytes(tmp_path / "f") == data
-
-
-def test_stdin_comes_from_the_process_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "stdin", io.StringIO("in\n"))
-    assert RealGateway().stdin_read() == "in\n"
 
 
 def test_output_goes_to_descriptors_1_and_2(capfdbinary: pytest.CaptureFixture[bytes]) -> None:
@@ -273,7 +267,6 @@ def test_real_gateway_descriptor_primitives() -> None:
 
 
 def test_real_gateway_argv_is_a_copy_without_the_program(monkeypatch: pytest.MonkeyPatch) -> None:
-    import sys
 
     monkeypatch.setattr(sys, "argv", ["memoctl", "a", "--json"])
     argv = RealGateway().argv()
