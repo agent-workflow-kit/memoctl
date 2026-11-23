@@ -21,6 +21,7 @@ from typing import Any
 
 from memoctl.config import ConfigError
 from memoctl.grammar import GrammarError
+from memoctl.store import SchemaNewerError, StoreError
 
 OK = 0
 INTERNAL = 1
@@ -249,6 +250,19 @@ def failure_for(exc: BaseException) -> Failure:
     return internal_failure()
 
 
+def _store_failure(exc: StoreError) -> Failure:
+    if exc.reason == "timeout":
+        return Failure(FAILED, "failed", "deadline passed", "timeout")
+    return Failure(FAILED, "failed", _STORE_MESSAGES[exc.reason], exc.reason)
+
+
+_STORE_MESSAGES = {
+    "db_unreadable": "database cannot be read",
+    "db_locked": "database is locked",
+    "db_corrupt": "database is corrupt",
+}
+
+
 def _register_defaults() -> None:
     register_error(UsageError, lambda e: usage_failure(e.field))
     register_error(GrammarError, lambda e: usage_failure(e.field))
@@ -274,8 +288,19 @@ def _register_defaults() -> None:
     #   fault. Register it with ``internal_failure`` (decision recorded on issue #6).
     # todo(#33): a crontab GatewayError -> exit 12 failed, reason crontab_failed. A
     #   GatewayError is internal elsewhere (a bug or an environment fault).
-    # todo(#9): sqlite failures -> exit 12 db_unreadable, db_locked, db_corrupt, schema_newer.
-    # todo(#10): the deadline writes its own pre-built envelope and exits 12 timeout.
+    # The deadline's own timer writes a pre-built envelope and exits 12 (memoctl.deadline); a
+    # progress-handler interrupt arrives as StoreError("timeout") and maps to the same failure.
+    register_error(StoreError, _store_failure)
+    register_error(
+        SchemaNewerError,
+        lambda e: Failure(
+            FAILED,
+            "failed",
+            "database schema is newer",
+            "schema_newer",
+            details={"found": e.found, "supported": e.supported},
+        ),
+    )
 
 
 _register_defaults()

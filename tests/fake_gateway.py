@@ -7,9 +7,11 @@ import os
 import random
 import stat
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NoReturn
 
 from memoctl.gateway import (
     TEMP_PREFIX,
@@ -46,6 +48,35 @@ class FakeClock:
     def advance(self, delta: timedelta) -> None:
         """Move by ``delta``; a negative ``delta`` moves backward."""
         self._now += delta
+
+
+class FakeExit(BaseException):
+    """``exit_now`` on the fake: a ``BaseException`` so no ``except Exception`` swallows it."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class FakeAlarm:
+    """A one-shot alarm on the fake's monotonic clock; it fires when the test advances time."""
+
+    def __init__(self, gw: FakeGateway, seconds: float, on_alarm: Callable[[], None]) -> None:
+        self._gw = gw
+        self.on_alarm = on_alarm
+        self.at = gw.mono + seconds
+        self.released = False
+        self.fired = False
+
+    def reset(self, seconds: float) -> None:
+        self.at = self._gw.mono + seconds
+
+    def release(self) -> bool:
+        if self.released:
+            return False
+        self.released = True
+        self._gw.alarms.remove(self)
+        return self.fired or self._gw.mono >= self.at
 
 
 @dataclass
@@ -125,6 +156,9 @@ class FakeGateway:
         self.runs: list[tuple[list[str], str | bytes | None, float | None]] = []
         self._scripted: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {}
         self._random = random.Random(seed)
+        self.mono = 1000.0
+        self.alarms: list[FakeAlarm] = []
+        self.exits: list[int] = []
 
     def now(self) -> datetime:
         return self.clock.now()
@@ -188,10 +222,33 @@ class FakeGateway:
         except OSError:
             raise BodySourceError("unreadable") from None
 
-    def write_out(self, text: str) -> None:
+    def monotonic(self) -> float:
+        return self.mono
+
+    def alarm_arm(self, seconds: float, on_alarm: Callable[[], None]) -> FakeAlarm:
+        if not 0 < seconds <= 3600:
+            raise ValueError("alarm seconds out of range")
+        alarm = FakeAlarm(self, seconds, on_alarm)
+        self.alarms.append(alarm)
+        return alarm
+
+    def advance_mono(self, seconds: float) -> None:
+        """Move the monotonic clock; an armed alarm that runs out calls its handler (as the
+        signal would, between two bytecodes)."""
+        self.mono += seconds
+        for alarm in list(self.alarms):
+            if not alarm.fired and self.mono >= alarm.at:
+                alarm.fired = True
+                alarm.on_alarm()
+
+    def exit_now(self, code: int) -> NoReturn:
+        self.exits.append(code)
+        raise FakeExit(code)
+
+    def write_out(self, text: str, *, bound: float | None = None) -> None:
         self.terminal.stdout += text
 
-    def write_err(self, text: str) -> None:
+    def write_err(self, text: str, *, bound: float | None = None) -> None:
         self.terminal.stderr += text
 
     def isatty(self, fd: int) -> bool:

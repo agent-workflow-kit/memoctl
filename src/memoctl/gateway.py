@@ -10,6 +10,9 @@ Commands are always run as argv lists, never through a shell, and untrusted text
 stdin or files, never in argv or the environment. Process output is decoded as UTF-8 with
 ``surrogateescape`` so no byte sequence raises or is lost.
 
+Signals are process-wide host state, so the wall-clock alarm (``alarm_arm``) and the immediate
+exit (``exit_now``) live here too; ``memoctl.deadline`` builds the command deadline on them.
+
 Body sources (``read_file_bounded``, ``read_stdin_bounded``) return raw bytes, never text.
 
 A command reads the clock once with ``now()`` and hands the value down as a parameter.
@@ -22,19 +25,23 @@ The config loader never calls it: HOME and XDG_* are not read (interface.md, Con
 from __future__ import annotations
 
 import errno
+import math
 import os
 import pwd
 import secrets
 import select
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
 
 ENCODING = "utf-8"
 ERRORS = "surrogateescape"
@@ -218,6 +225,26 @@ class _RealDirHandle:
             os.close(fd)
 
 
+MAX_ALARM_SECONDS = 3600.0
+_MIN_RESTORED_TIMER = 1e-6  # a host timer that ran out while ours was armed fires at once
+
+
+class AlarmHandle(Protocol):
+    """One armed alarm. ``on_alarm`` runs in the main thread between two bytecodes (never while
+    SQLite or another C call works) and only while the handle is active."""
+
+    def reset(self, seconds: float) -> None:
+        """Restart the one-shot timer with ``seconds`` (same limits as ``alarm_arm``)."""
+        ...
+
+    def release(self) -> bool:
+        """Stop the timer, discard a signal that is already pending, restore the previous
+        handler, the host's timer (its remaining time less what passed) and the signal mask.
+        True when the timer had already run out (the alarm fired or is pending). Idempotent:
+        later calls do nothing and return False."""
+        ...
+
+
 # Why a body source was refused; fixed strings, never the path or the content.
 SOURCE_REASONS = ("symlink", "not_regular", "terminal", "unreadable")
 READ_CHUNK = 65536
@@ -312,8 +339,34 @@ class Gateway(Protocol):
         ``BodySourceError`` for a terminal, a directory or a descriptor that cannot be read."""
         ...
 
-    def write_out(self, text: str) -> None: ...
-    def write_err(self, text: str) -> None: ...
+    def monotonic(self) -> float:
+        """A monotonic clock in seconds, for measuring the deadline (never for a timestamp)."""
+        ...
+
+    def alarm_arm(self, seconds: float, on_alarm: Callable[[], None]) -> AlarmHandle:
+        """Install a ``SIGALRM`` handler that calls ``on_alarm`` and start a one-shot
+        ``ITIMER_REAL`` timer of ``seconds``. The previous handler, the signal mask and any timer
+        the host had set are kept for :meth:`AlarmHandle.release`. Main thread only
+        (``GatewayError`` elsewhere); ``ValueError`` for a ``seconds`` that is not a finite
+        number in ``(0, MAX_ALARM_SECONDS]``."""
+        ...
+
+    def exit_now(self, code: int) -> NoReturn:
+        """Leave the process at once (``os._exit``: no cleanup, no ``finally``, no flush), after
+        killing the direct child processes this gateway started and has not yet reaped (not their
+        own children)."""
+        ...
+
+    def write_out(self, text: str, *, bound: float | None = None) -> None:
+        """Write ``text`` to file descriptor 1. With ``bound`` (seconds) the write gives up once
+        the descriptor has not become writable for that long (a full pipe, a stopped terminal),
+        so the caller never waits on a reader that is not reading."""
+        ...
+
+    def write_err(self, text: str, *, bound: float | None = None) -> None:
+        """As :meth:`write_out`, for file descriptor 2."""
+        ...
+
     def isatty(self, fd: int) -> bool: ...
     def terminal_width(self) -> int: ...
 
@@ -356,20 +409,39 @@ def _exec(
     timeout: float | None,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run ``argv`` without a shell; any start failure or timeout becomes a ``GatewayError``."""
+    """Run ``argv`` without a shell; any start failure or timeout becomes a ``GatewayError``.
+
+    SIGALRM is blocked from before the child starts until it is in ``_CHILDREN``, so a deadline
+    that runs out in that window is delivered right after the registration and ``exit_now``
+    kills the child (otherwise it would be orphaned). The child itself starts with the caller's
+    mask restored, so it does not inherit a blocked SIGALRM."""
+    proc: subprocess.Popen[bytes] | None = None
+    caller_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
     try:
-        return subprocess.run(
+        with subprocess.Popen(
             argv,
-            input=stdin,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+            stdin=None if stdin is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=env,
-        )
+            preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, caller_mask),
+        ) as proc:
+            _CHILDREN.add(proc)  # so exit_now can kill it when the deadline ends the process
+            try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, caller_mask)  # a pending alarm runs now
+                out, err = proc.communicate(stdin, timeout=timeout)
+            except BaseException:  # the same cleanup as subprocess.run
+                proc.kill()
+                raise
+            return subprocess.CompletedProcess(argv, proc.returncode, out, err)
     except subprocess.TimeoutExpired as exc:
         raise GatewayError(f"{argv!r} timed out after {timeout}s") from exc
     except (OSError, ValueError) as exc:
         raise GatewayError(f"{argv!r} could not run: {exc}") from exc
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, caller_mask)  # also when Popen failed
+        if proc is not None:
+            _CHILDREN.discard(proc)  # after the with block reaped it (exit_now never misses one)
 
 
 def _run(
@@ -383,6 +455,100 @@ def _run(
         raw.stdout.decode(ENCODING, ERRORS),
         raw.stderr.decode(ENCODING, ERRORS),
     )
+
+
+_CHILDREN: set[subprocess.Popen[bytes]] = set()  # started by _exec, not yet reaped
+
+
+def _check_alarm_seconds(seconds: float) -> float:
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        raise ValueError("alarm seconds must be a number")
+    # The range test alone also rejects nan and inf, and compares a huge int without float().
+    if not 0 < seconds <= MAX_ALARM_SECONDS:
+        raise ValueError("alarm seconds out of range")
+    return float(seconds)
+
+
+class _RealAlarm:
+    """``SIGALRM`` plus ``ITIMER_REAL``, set up and torn down with the signal blocked so a
+    handler never runs half-installed or half-restored."""
+
+    def __init__(self, seconds: float, on_alarm: Callable[[], None]) -> None:
+        seconds = _check_alarm_seconds(seconds)
+        if threading.current_thread() is not threading.main_thread():
+            raise GatewayError("the alarm can only be armed from the main thread")
+        self._on_alarm = on_alarm
+        self._active = False
+        self._released = False
+        self._previous: signal.Handlers | int | Callable[..., object] | None = signal.SIG_DFL
+        self._host_left, self._host_interval, self._host_at = 0.0, 0.0, 0.0
+        self._mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+        try:
+            handler = signal.getsignal(signal.SIGALRM)
+            # None: installed outside Python and not restorable; the default is the best left.
+            self._previous = signal.SIG_DFL if handler is None else handler
+            # A SIGALRM left pending while blocked (inherited across exec, or sent early)
+            # would hit our handler the moment it is unblocked: ignoring it discards it.
+            signal.signal(signal.SIGALRM, signal.SIG_IGN)
+            self._host_left, self._host_interval = signal.setitimer(signal.ITIMER_REAL, 0)
+            self._host_at = time.monotonic()
+            signal.signal(signal.SIGALRM, self._handle)
+            self._active = True
+            signal.setitimer(signal.ITIMER_REAL, seconds)
+        except BaseException:
+            self._teardown()
+            raise
+        # A parent that blocked SIGALRM would silence the deadline: unblock it while armed.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+
+    def _handle(self, signum: int, frame: object) -> None:
+        if self._active:
+            self._on_alarm()
+
+    def reset(self, seconds: float) -> None:
+        seconds = _check_alarm_seconds(seconds)
+        if self._released:
+            raise GatewayError("the alarm was released")
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+
+    def release(self) -> bool:
+        if self._released:
+            return False
+        return self._teardown()
+
+    def _teardown(self) -> bool:
+        self._released = True
+        self._active = False
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+        try:
+            left, _interval = signal.setitimer(signal.ITIMER_REAL, 0)
+            ran_out = left == 0.0
+            # Ignoring a signal discards one that is pending, so it cannot reach the restored
+            # handler (the default action would end the process).
+            signal.signal(signal.SIGALRM, signal.SIG_IGN)
+            signal.signal(signal.SIGALRM, self._previous)
+            if self._host_left > 0:
+                left_now = self._host_left - (time.monotonic() - self._host_at)
+                signal.setitimer(
+                    signal.ITIMER_REAL, max(left_now, _MIN_RESTORED_TIMER), self._host_interval
+                )
+            return ran_out
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, self._mask)
+
+
+_BOUNDED_CHUNK = 512  # below PIPE_BUF: a writable pipe takes it whole, without blocking
+
+
+def _writable_before(fd: int, end: float) -> bool:
+    """Wait until ``fd`` can take a write or ``end`` (a ``time.monotonic`` value) passes. A
+    closed or broken descriptor counts as ready: the write then fails and is ignored."""
+    left_ms = math.ceil((end - time.monotonic()) * 1000)
+    if left_ms <= 0:
+        return False
+    poller = select.poll()
+    poller.register(fd, select.POLLOUT)
+    return bool(poller.poll(left_ms))
 
 
 def _read_fd(fd: int, nbytes: int) -> bytes:
@@ -413,13 +579,25 @@ def _is_symlink(path: Path) -> bool:
         return False
 
 
-def _write_fd(fd: int, text: str) -> None:
+def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
     """Write ``text`` to a standard descriptor as UTF-8 with errors replaced, never through the
-    locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says."""
+    locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says.
+
+    With ``bound`` the write is for a signal handler that must not hang: it waits for the
+    descriptor to be writable for at most ``bound`` seconds in all (``poll``, EINTR retried
+    with the time left) and writes in small chunks, then gives up silently. The descriptor is
+    left blocking (its open file description may be shared with other processes)."""
     view = memoryview(text.encode(ENCODING, "replace"))
+    end = None if bound is None else time.monotonic() + bound
     try:
         while view:
-            view = view[os.write(fd, view) :]
+            if end is None:
+                chunk = view
+            elif _writable_before(fd, end):
+                chunk = view[:_BOUNDED_CHUNK]
+            else:
+                return
+            view = view[os.write(fd, chunk) :]
     except OSError:
         pass
 
@@ -583,11 +761,25 @@ class RealGateway:
         except OSError:
             raise BodySourceError("unreadable") from None
 
-    def write_out(self, text: str) -> None:
-        _write_fd(1, text)
+    def monotonic(self) -> float:
+        return time.monotonic()
 
-    def write_err(self, text: str) -> None:
-        _write_fd(2, text)
+    def alarm_arm(self, seconds: float, on_alarm: Callable[[], None]) -> AlarmHandle:
+        return _RealAlarm(seconds, on_alarm)
+
+    def exit_now(self, code: int) -> NoReturn:
+        for child in list(_CHILDREN):
+            try:
+                child.kill()  # only a process this gateway started; Popen skips a reaped one
+            except Exception:  # noqa: BLE001 - leaving matters more than a failed kill
+                pass
+        os._exit(code)
+
+    def write_out(self, text: str, *, bound: float | None = None) -> None:
+        _write_fd(1, text, bound)
+
+    def write_err(self, text: str, *, bound: float | None = None) -> None:
+        _write_fd(2, text, bound)
 
     def isatty(self, fd: int) -> bool:
         try:
