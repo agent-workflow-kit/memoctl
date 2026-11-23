@@ -48,6 +48,7 @@ addopts = "-m 'not live'"
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
+version_variables = ["src/memoctl/__init__.py:__version__"]
 commit_parser = "conventional"
 allow_zero_version = true
 major_on_zero = false
