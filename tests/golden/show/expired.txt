@@ -1,0 +1,14 @@
+note 2
+repo: example.com/x/y
+topic: old
+kind: unknown
+labels: -
+status: expired
+created: 2025-12-31T23:58:20Z
+expires: 2025-12-31T23:59:59Z
+superseded_by: -
+supersedes: -
+size: 12 bytes
+body_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+body:
+| expired note

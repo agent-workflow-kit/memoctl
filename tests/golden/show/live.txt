@@ -1,0 +1,15 @@
+note 3
+repo: example.com/a/b
+topic: build
+kind: human
+labels: area=ci, ticket=T-1
+status: live
+created: 2025-12-31T23:00:00Z
+expires: 2026-01-31T00:00:00Z
+superseded_by: -
+supersedes: 1
+size: 24 bytes
+body_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+body:
+| use `make verify` first
+|

@@ -3,11 +3,13 @@ line here and nothing else, so sibling branches conflict on one line at most."""
 
 from __future__ import annotations
 
+from memoctl import cmd_list, cmd_show
 from memoctl.cli_args import Command
 
 COMMANDS: tuple[Command, ...] = (
     # todo(#16): add (memoctl.cmd_add.COMMAND)
-    # todo(#22): list, show
+    cmd_list.COMMAND,
+    cmd_show.COMMAND,
     # todo(#23): search
     # todo(#27): context
     # todo(#30): delete

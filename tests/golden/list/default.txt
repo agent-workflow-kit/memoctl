@@ -1,0 +1,2 @@
+4  live  2025-12-31  example.com/a/b  queue  unknown  area=ci
+3  live  2025-12-31  example.com/a/b  build  human  area=ci,ticket=T-1

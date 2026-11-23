@@ -1,0 +1,15 @@
+note 1
+repo: example.com/a/b
+topic: t
+kind: unknown
+labels: -
+status: live
+created: 2025-12-31T23:58:20Z
+expires: 2026-01-01T00:16:40Z
+superseded_by: -
+supersedes: -
+size: 20 bytes
+body_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+body:
+| line1\u{001B}[31m
+| \u{202E}\u{0000}\u{0085}end
