@@ -10,7 +10,16 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from memoctl.gateway import BodySourceError, FileRead, GatewayError, PathInfo, _info
+from memoctl.gateway import (
+    TEMP_PREFIX,
+    BodySourceError,
+    DirHandle,
+    FileRead,
+    GatewayError,
+    PathInfo,
+    _info,
+    _RealDirHandle,
+)
 
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -207,11 +216,39 @@ class FakeGateway:
         with target.open("rb") as handle:
             return FileRead(info, handle.read(limit + 1))
 
+    def open_dir(self, path: Path, *, follow: bool) -> DirHandle | None:
+        # The path is confined to ``root`` when opened. The handle is a real descriptor and, as
+        # with the real gateway, its own ``open_dir(follow=True)`` can follow an absolute
+        # symlink out of ``root``; the fake does not prevent that.
+        target = self._confined(path) if follow else self._confined_nofollow(path)
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        if not follow:
+            flags |= os.O_NOFOLLOW
+        try:
+            return _RealDirHandle(os.open(target, flags))
+        except FileNotFoundError:
+            return None
+
     def read_bytes(self, path: Path) -> bytes:
         return self._confined(path).read_bytes()
 
-    def write_bytes(self, path: Path, data: bytes) -> None:
-        self._confined(path).write_bytes(data)
+    def write_bytes(self, path: Path, data: bytes, *, mode: int = 0o600) -> None:
+        # Same steps as the real gateway (temporary file, exact mode, replace), minus fsync.
+        if not isinstance(data, bytes):
+            raise TypeError(f"write_bytes needs bytes, got {type(data).__name__}")
+        target = self._confined_nofollow(path)
+        temp = target.with_name(f"{TEMP_PREFIX}{self._random.randbytes(16).hex()}")
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+        try:
+            try:
+                os.fchmod(fd, mode)
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            os.replace(temp, target)
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
 
     def script_run(
         self, argv: list[str], *, stdout: str = "", stderr: str = "", returncode: int = 0
