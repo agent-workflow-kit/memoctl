@@ -1,6 +1,6 @@
 [project]
 name = "memoctl"
-version = "0.0.1"
+version = "0.11.0"
 description = "Uncommitted shared knowledge that agents leave for each other"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -28,6 +28,8 @@ dev = [
     "pymarkdownlnt>=0.9.41",
     "jsonschema>=4.26.0",
     "types-pyyaml>=6.0.12.20261113",
+    "regress>=2026.9.1",
+    "referencing>=0.37.0",
 ]
 
 [tool.ruff]
