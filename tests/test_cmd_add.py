@@ -146,7 +146,7 @@ def test_quiet_suppresses_the_result_line_but_not_json(gw: FakeGateway) -> None:
     code, out, err = add(gw, "--quiet", json_mode=False)
     assert (code, out, err) == (0, "", "")
     assert len(stored(gw)) == 1
-    code, out, _ = add(gw, "--quiet")
+    code, out, _ = add(gw, "--quiet", body="another body")
     assert code == 0 and json.loads(out)["id"] == 2
 
 
@@ -534,13 +534,6 @@ def test_dry_run_is_not_yet_accepted_so_a_note_is_never_written_by_mistake(
     assert stored(gw) == []
 
 
-def test_supersedes_is_refused_not_ignored_until_it_is_built(gw: FakeGateway) -> None:
-    # TODO(#17): replaced by the supersede tests; the flag must never be silently ignored.
-    code, out, _ = add(gw, "--supersedes", "5")
-    assert code == 1 and error_of(out)["code"] == "internal"
-    assert stored(gw) == []
-
-
 # -- secrets ---------------------------------------------------------------------------------------
 
 
@@ -897,8 +890,7 @@ def test_a_deadline_that_passed_during_the_commit_exits_12_with_the_note_stored_
 def test_a_retry_after_that_timeout_is_not_blocked_by_the_stored_note(
     gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """TODO(#17): the retry returns the stored note with created: false; until dedupe exists
-    the retry stores a second note."""
+    """The retry finds the stored note (dedupe): created false, one note."""
     original = cmd_add.step13_insert
     monkeypatch.setattr(
         cmd_add, "step13_insert",
@@ -907,7 +899,8 @@ def test_a_retry_after_that_timeout_is_not_blocked_by_the_stored_note(
     with pytest.raises(FakeExit):
         add(gw)
     monkeypatch.undo()
-    assert add(gw)[0] == 0
+    code, out, _ = add(gw)
+    assert code == 0 and json.loads(out)["created"] is False and len(stored(gw)) == 1
 
 
 # -- the order of the steps ------------------------------------------------------------------------
@@ -978,6 +971,30 @@ def _s9_corrupt(gw: FakeGateway, argv: list[str]) -> None:
     sd.chmod(0o700)
 
 
+def _seed_corrupt_target(gw: FakeGateway, argv: list[str]) -> None:
+    """Step 10: ``--supersedes 1`` names a row that fails its row checks (db_corrupt); the one
+    failure of the dedupe step that does not depend on a step before it."""
+    state = open_state_dir(gw, create=True)
+    with state:
+        store = open_store(state, Mode.INIT)
+        assert store is not None
+        with store.write():
+            store.insert_note(
+                repo=REPO, topic="build", kind="unknown", body="x", body_sha256="0" * 64,
+                size=1, created=1, expires=2, labels=(),
+            )  # fmt: skip
+        store.close()
+    conn = sqlite3.connect(state_dir(gw) / "state.db")
+    conn.execute("UPDATE notes SET expires = -5")
+    conn.commit()
+    conn.close()
+    argv += ["--supersedes", "1"]
+
+
+def _s11(gw: FakeGateway, argv: list[str]) -> None:
+    argv += ["--supersedes", "5"]  # no such note
+
+
 Scenario = tuple[
     str, Callable[[FakeGateway, list[str]], None], Callable[[int, dict[str, Any]], bool]
 ]
@@ -992,6 +1009,8 @@ SCENARIOS: list[Scenario] = [
     ("9", _s9, lambda c, e: c == 12 and e["reason"] == "schema_newer"),
     ("9l", _s9_locked, lambda c, e: c == 12 and e["reason"] == "db_locked"),
     ("9c", _s9_corrupt, lambda c, e: c == 12 and e["reason"] == "db_corrupt"),
+    ("10", _seed_corrupt_target, lambda c, e: c == 12 and e["reason"] == "db_corrupt"),
+    ("11", _s11, lambda c, e: c == 10 and e["details"] == {"id": 5}),
 ]
 
 
@@ -1015,8 +1034,11 @@ def _argv() -> list[str]:
 
 
 PAIRS = [
-    pair for pair in itertools.combinations(SCENARIOS, 2) if _step(pair[0]) != _step(pair[1])
-]  # two step-9 states would be one database
+    pair
+    for pair in itertools.combinations(SCENARIOS, 2)
+    if _step(pair[0]) != _step(pair[1]) and {_step(pair[0]), _step(pair[1])} != {10, 11}
+]  # two step-9 states would be one database; steps 10 and 11 both read the one --supersedes
+# target row (a corrupt row is step 10's, an absent one step 11's): one flag, one state
 
 
 @pytest.mark.parametrize(("first", "second"), PAIRS, ids=lambda s: s[0])

@@ -95,7 +95,7 @@ Package `src/memoctl/` (design guide section 15):
 | `body.py` | Body validation (six classes, combining runs, NFKC bound). |
 | `secretscan.py` | The secret check: patterns and `mask_env` values over the repo id, topic, labels, kind and body (named so it never shadows the standard library `secrets`). |
 | `store.py` | SQLite open modes, migrations, the queries (all SQL lives here). |
-| `cmd_add.py` | The `add` command: its 14 steps as one function each, called in the interface's order (argv grammars, config, body, secrets, clock, state, store transaction, log, output). The dedupe, supersede and limit rules of steps 10 to 12 are `notes.py`'s (#17, #18); until then they are named seams in this module. |
+| `cmd_add.py` | The `add` command: its 14 steps as one function each, called in the interface's order (argv grammars, config, body, secrets, clock, state, store transaction, log, output). The dedupe and supersede rules of steps 10 and 11 are `notes.py`'s (the queries are `store.py`'s); the limit rules of step 12 are still a named seam in this module (#18). |
 | `notes.py` | The rules of `add`, `delete`, `prune`: supersede, dedupe, limits, chain repointing and reinstatement on `delete`. |
 | `selection.py` | Context selection and fairness. |
 | `sanitize.py` | The read-time sanitizer. |

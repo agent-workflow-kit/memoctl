@@ -153,6 +153,20 @@ class NoteNotFoundError(Exception):
         self.note_id = note_id
 
 
+class SupersedeMismatchError(Exception):
+    """``--supersedes`` names a note of another repo (exit 20 ``supersede_mismatch``)."""
+
+    def __init__(self) -> None:
+        super().__init__("supersede target is in another repo")
+
+
+class AlreadySupersededError(Exception):
+    """``--supersedes`` names a note that is already superseded (exit 20 ``already_superseded``)."""
+
+    def __init__(self) -> None:
+        super().__init__("supersede target is already superseded")
+
+
 @dataclass(frozen=True)
 class Failure:
     """One failed command, ready to render. Built only from fixed strings and identifiers."""
@@ -312,6 +326,18 @@ def _register_defaults() -> None:
     register_error(
         NoteNotFoundError,
         lambda e: Failure(NOT_FOUND, "not_found", "note not found", details={"id": e.note_id}),
+    )
+    register_error(
+        SupersedeMismatchError,
+        lambda e: Failure(
+            REFUSED, "refused", "supersede target is in another repo", "supersede_mismatch"
+        ),
+    )
+    register_error(
+        AlreadySupersededError,
+        lambda e: Failure(
+            REFUSED, "refused", "supersede target is already superseded", "already_superseded"
+        ),
     )
     # A bad clock is an environment fault with no code of its own (interface.md, Exit codes).
     register_error(ClockError, lambda e: internal_failure())
