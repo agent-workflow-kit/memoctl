@@ -48,6 +48,7 @@ from typing import NoReturn, Protocol
 ENCODING = "utf-8"
 ERRORS = "surrogateescape"
 DEFAULT_TERMINAL_WIDTH = 80
+ASK_MAX_BYTES = 1024  # the longest answer line ``ask_tty`` accepts
 TEMP_PREFIX = ".tmp."
 
 
@@ -560,6 +561,14 @@ class Gateway(Protocol):
         ...
 
     def isatty(self, fd: int) -> bool: ...
+
+    def ask_tty(self, prompt: str) -> str | None:
+        """Write ``prompt`` to ``/dev/tty`` and read one answer line from it (``delete``'s
+        confirmation). Returns the line without its terminator, or ``None`` when ``/dev/tty``
+        cannot be opened or used, the input ends before a newline, or the line is longer than
+        :data:`ASK_MAX_BYTES`. Blocks until the person answers; the caller pauses its deadline."""
+        ...
+
     def terminal_width(self) -> int: ...
 
     def random_hex(self, nbytes: int) -> str:
@@ -1032,6 +1041,32 @@ class RealGateway:
 
     def write_err(self, text: str, *, bound: float | None = None) -> None:
         _write_fd(2, text, bound)
+
+    def ask_tty(self, prompt: str) -> str | None:
+        try:
+            fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY | os.O_CLOEXEC)
+        except OSError:
+            return None
+        try:
+            data = prompt.encode(ENCODING, "replace")
+            while data:
+                data = data[os.write(fd, data) :]
+            buffer = b""
+            while b"\n" not in buffer:
+                if len(buffer) > ASK_MAX_BYTES:
+                    return None
+                chunk = os.read(fd, ASK_MAX_BYTES + 1)
+                if not chunk:
+                    return None  # end of input before the end of a line
+                buffer += chunk
+            line = buffer.split(b"\n", 1)[0]
+            if len(line) > ASK_MAX_BYTES:
+                return None
+            return line.removesuffix(b"\r").decode(ENCODING, "replace")
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
 
     def isatty(self, fd: int) -> bool:
         try:

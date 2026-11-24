@@ -50,12 +50,13 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, LiteralString, NamedTuple
 
-from memoctl.grammar import matches
+from memoctl.grammar import is_add_repo_id, matches
 from memoctl.statedir import StateDir, UnsafeStateError
 
 __all__ = [
     "APPLICATION_ID",
     "MIGRATIONS",
+    "DeleteTarget",
     "NoteRow",
     "Mode",
     "SchemaNewerError",
@@ -260,6 +261,24 @@ class NoteRow:
     expires: int
     superseded_by: int | None
     labels: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteTarget:
+    """A note as ``delete`` sees it (no body); a ``None`` field failed its row check."""
+
+    id: int
+    repo: str | None
+    topic: str | None
+    kind: str | None
+    size: int | None
+    body_sha256: str | None  # the first 16 hex characters, as the log records them
+    superseded_by: int | None
+    expires: int | None
+
+
+def _is_sha256(text: str) -> bool:
+    return len(text) == 64 and set(text) <= _HEX64
 
 
 NOTE_COLUMNS: Final = (
@@ -723,6 +742,83 @@ class Store:
         found = cursor.fetchone()
         cursor.close()
         return found[0] if found is not None and type(found[0]) is int else None
+
+    # -- delete (the rules are notes.py's; these are the statements)
+    def delete_target(self, note_id: int) -> DeleteTarget | None:
+        """What ``delete`` knows about note ``note_id``, read column by column and without the
+        body: ``None`` when no such row exists. A column that fails its check is ``None`` in the
+        result (the log record then carries null there); the row is deleted like any other."""
+        cursor = self.execute(
+            "SELECT repo, topic, kind, size, body_sha256, superseded_by, expires FROM notes"
+            " WHERE id = ?",
+            (note_id,),
+        )
+        raw = cursor.fetchone()
+        cursor.close()
+        if raw is None:
+            return None
+        repo, topic, kind, size, sha, by, expires = raw
+        return DeleteTarget(
+            id=note_id,
+            repo=repo if type(repo) is str and is_add_repo_id(repo) else None,
+            topic=topic if type(topic) is str and matches("topic", topic) else None,
+            kind=kind if type(kind) is str and matches("kind", kind) else None,
+            size=_as_int(size, 1, MAX_SIZE),
+            body_sha256=sha[:16] if type(sha) is str and _is_sha256(sha) else None,
+            superseded_by=_as_int(by, 1, MAX_ID),
+            expires=_as_int(expires, 0, MAX_TIMESTAMP),
+        )
+
+    def pointing_at(self, note_id: int) -> list[tuple[int, int | None]]:
+        """``(id, expires)`` of every note whose ``superseded_by`` is ``note_id``, ascending by
+        id (one at most in a store the tool wrote). ``expires`` is ``None`` when it fails its
+        check. An id outside the output range is left out."""
+        cursor = self.execute(
+            "SELECT id, expires FROM notes WHERE superseded_by = ? AND id <= ? ORDER BY id",
+            (note_id, MAX_ID),
+        )
+        out = [(row[0], _as_int(row[1], 0, MAX_TIMESTAMP)) for row in self._rows(cursor)]
+        cursor.close()
+        return [(i, e) for i, e in out if type(i) is int and i >= 1]
+
+    def pointer_of(self, note_id: int) -> int | None:
+        """The valid ``superseded_by`` of note ``note_id`` (``None``: no such note, not
+        superseded, or an invalid pointer)."""
+        cursor = self.execute("SELECT superseded_by FROM notes WHERE id = ?", (note_id,))
+        raw = cursor.fetchone()
+        cursor.close()
+        return None if raw is None else _as_int(raw[0], 1, MAX_ID)
+
+    def note_exists(self, note_id: int) -> bool:
+        cursor = self.execute("SELECT 1 FROM notes WHERE id = ?", (note_id,))
+        found = cursor.fetchone()
+        cursor.close()
+        return found is not None
+
+    def set_pointer(self, note_id: int, by: int | None) -> None:
+        """Set ``superseded_by`` of note ``note_id`` (``None`` clears it): ``delete``'s repoint
+        and reinstatement, inside :meth:`write`. One row must change, else
+        ``StoreError("db_corrupt")`` and the transaction rolls back."""
+        if self.mode is Mode.READ:
+            raise RuntimeError("update on a read-only store")
+        cursor = self.execute("UPDATE notes SET superseded_by = ? WHERE id = ?", (by, note_id))
+        changed = cursor.rowcount
+        cursor.close()
+        if changed != 1:
+            raise StoreError(DB_CORRUPT)
+
+    def delete_note(self, note_id: int) -> None:
+        """Delete note ``note_id`` and its labels (never its rate rows), inside :meth:`write`.
+        One note row must go, else ``StoreError("db_corrupt")`` and the transaction rolls
+        back (the caller looked the note up under the same lock)."""
+        if self.mode is Mode.READ:
+            raise RuntimeError("delete on a read-only store")
+        self.execute("DELETE FROM note_labels WHERE note_id = ?", (note_id,)).close()
+        cursor = self.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        changed = cursor.rowcount
+        cursor.close()
+        if changed != 1:
+            raise StoreError(DB_CORRUPT)
 
     # -- rows
     def notes(

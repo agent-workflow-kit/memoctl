@@ -4,11 +4,12 @@ The rules live here; every query is a :class:`~memoctl.store.Store` method (only
 touches SQLite). Every function runs inside the caller's ``Store.write()`` transaction, so what
 is checked is what is committed: no other writer can change a note between a check and the
 insert. The limit rules (``check_limits``, ``evaluate_limits``) are here too.
-todo(#30), todo(#31): ``delete`` and ``prune``.
+``delete``'s rules (lookup, chain repointing) are at the end; todo(#31): ``prune``.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -22,16 +23,22 @@ from memoctl.cli_errors import (
 )
 from memoctl.config import Limits
 from memoctl.notes_read import LIVE, note_status
-from memoctl.store import NoteRow, Store
+from memoctl.store import DeleteTarget, NoteRow, Store
 
 __all__ = [
+    "DeletePlan",
+    "Reinstated",
     "LimitCounts",
     "LimitRefusal",
     "NoteKey",
     "check_limits",
     "check_supersede_target",
     "evaluate_limits",
+    "apply_delete",
     "find_duplicate",
+    "find_targets",
+    "plan_delete",
+    "smallest_missing",
     "rate_retry_after",
 ]
 
@@ -189,3 +196,108 @@ def evaluate_limits(
     index = found.rate_count - found.limit
     pivot = store.rate_instant(repo if found.scope == "repo" else None, now, window, index)
     return replace(found, retry_after_s=rate_retry_after(pivot, window, now))
+
+
+# -- delete (interface.md, ``delete``) ---------------------------------------------------------
+
+
+def find_targets(store: Store, ids: Sequence[int]) -> dict[int, DeleteTarget]:
+    """Every id of ``ids`` (distinct, ascending) that names a note. A row that fails its row
+    checks is found like any other (its bad fields are ``None``): ``delete`` is the way to
+    remove it. The caller raises ``NoteNotFoundError`` for the smallest id that is missing."""
+    found: dict[int, DeleteTarget] = {}
+    for note_id in ids:
+        target = store.delete_target(note_id)
+        if target is not None:
+            found[note_id] = target
+    return found
+
+
+def smallest_missing(ids: Sequence[int], found: dict[int, DeleteTarget]) -> int | None:
+    return next((i for i in ids if i not in found), None)
+
+
+@dataclass(frozen=True)
+class Reinstated:
+    """A note whose ``superseded_by`` is cleared: ``via`` is the deleted note it pointed to."""
+
+    id: int
+    via: int
+    expired: bool
+
+
+@dataclass(frozen=True)
+class DeletePlan:
+    deleted: tuple[DeleteTarget, ...]  # ascending by id
+    repoints: tuple[tuple[int, int], ...]  # (note, its new superseded_by)
+    reinstated: tuple[Reinstated, ...]  # ascending by id
+
+
+def plan_delete(store: Store, targets: dict[int, DeleteTarget], now: int) -> DeletePlan:
+    """The chain rule, computed before anything is deleted (reads only).
+
+    For each note P that is not deleted and whose ``superseded_by`` names a deleted note D,
+    follow ``superseded_by`` upward from D to the first note that is not deleted: P points to
+    it, or, when D's chain ends (no pointer) among deleted notes, P is cleared and reinstated.
+    Ids rise along a chain. A pointer that does not rise (a planted cycle), that names a note
+    that does not exist, or an invalid one leaves P untouched: it stays hidden, as ``add``
+    already treats a dangling pointer (``already_superseded``). Never a guess that shows more.
+    """
+    resolved: dict[int, int | None | bool] = {}  # deleted id -> note above, None, or False
+
+    def above(start: int) -> int | None | bool:
+        """The first note above ``start`` that is not deleted; ``None`` when the chain ends in
+        deleted notes; ``False`` when it cannot be followed."""
+        path: list[int] = []
+        cur = start
+        while True:
+            if cur in resolved:
+                answer = resolved[cur]
+                break
+            path.append(cur)
+            nxt = targets[cur].superseded_by
+            if nxt is None:
+                answer = None
+                break
+            if nxt <= cur:
+                answer = False
+                break
+            if nxt in targets:
+                cur = nxt
+                continue
+            answer = nxt if store.note_exists(nxt) else False
+            break
+        for node in path:
+            resolved[node] = answer
+        return answer
+
+    repoints: list[tuple[int, int]] = []
+    reinstated: list[Reinstated] = []
+    for d in sorted(targets):
+        for p, expires in store.pointing_at(d):
+            if p in targets or p >= d:
+                continue
+            answer = above(d)
+            if answer is False:
+                continue
+            if answer is None:
+                # an unreadable ``expires`` counts as expired: never claim a live note
+                reinstated.append(Reinstated(p, d, expires is None or expires <= now))
+            else:
+                assert isinstance(answer, int)
+                repoints.append((p, answer))
+    return DeletePlan(
+        tuple(targets[i] for i in sorted(targets)),
+        tuple(sorted(repoints)),
+        tuple(sorted(reinstated, key=lambda r: r.id)),
+    )
+
+
+def apply_delete(store: Store, plan: DeletePlan) -> None:
+    """The writes of the plan, in the caller's ``Store.write()`` transaction."""
+    for target in plan.deleted:
+        store.delete_note(target.id)
+    for note_id, by in plan.repoints:
+        store.set_pointer(note_id, by)
+    for item in plan.reinstated:
+        store.set_pointer(item.id, None)
