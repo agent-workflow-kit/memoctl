@@ -516,3 +516,11 @@ def test_check_text_applies_items_2_to_4_and_nothing_else() -> None:
         check_text(b"\xff", field="text")
     with pytest.raises(BodyTextError):
         check_text(("a" + "́" * 31).encode(), field="text")
+
+
+def test_has_long_combining_run() -> None:
+    from memoctl.body import has_long_combining_run
+
+    assert not has_long_combining_run("e" + "\u0301" * 30)
+    assert has_long_combining_run("e" + "\u0301" * 31)
+    assert not has_long_combining_run("plain")

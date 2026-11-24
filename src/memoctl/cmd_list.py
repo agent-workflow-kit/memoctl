@@ -81,17 +81,23 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
         with store:
             result = scan(store, filters, now)
     deadline.current().disarm()
-    document = result.document()
+    print_result(args, gateway, result)
+    return 0
+
+
+def print_result(args: argparse.Namespace, gateway: Gateway, result: ListResult) -> None:
+    """The output of ``list`` and ``search``: one compact JSON line, or the rendered lines.
+    ``--quiet`` drops the status lines on stderr, never the data."""
     if args.json:
+        document = result.document()
         gateway.write_out(json.dumps(document, ensure_ascii=True, separators=(",", ":")) + "\n")
         if result.hidden > 0 and not args.quiet:
             gateway.write_err(HIDDEN_LINE.format(result.hidden))
-        return 0
+        return
     rendered = format_list(result.notes, result.total, len(result.notes), result.hidden)
     if args.quiet:
         rendered = Rendered(rendered.out, "", rendered.warnings)
     emit(gateway, rendered)
-    return 0
 
 
 COMMAND = Command("list", "list notes, newest first", run, configure)
