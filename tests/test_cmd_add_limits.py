@@ -702,11 +702,11 @@ def test_the_limit_queries_use_indexes(gw: FakeGateway) -> None:
     init_store(gw)
     state = open_state_dir(gw, create=False)
     assert state is not None
-    seen: list[tuple[str, str]] = []  # (kind, sql)
+    seen: list[str] = []
     with state:
         store = open_store(state, Mode.READ)
         assert store is not None
-        store._conn.set_trace_callback(lambda sql: seen.append(("run", sql)))  # noqa: SLF001
+        store._conn.set_trace_callback(seen.append)  # noqa: SLF001
         with store.read():
             for repo in (REPO, None):
                 store.count_rate(repo, 9, 8)
@@ -717,12 +717,17 @@ def test_the_limit_queries_use_indexes(gw: FakeGateway) -> None:
             store.count_live(REPO, 5, 9)
             store.count_notes(9)
         store._conn.set_trace_callback(None)  # noqa: SLF001
-        statements = [sql for _, sql in seen if sql.lstrip().upper().startswith("SELECT")]
+        statements = [sql for sql in seen if sql.lstrip().upper().startswith("SELECT")]
         assert len(statements) >= 6, statements
         for sql in statements:
             plan = store._conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall()  # noqa: SLF001
-            for row in plan:
-                assert row[3] not in ("SCAN notes", "SCAN rate"), (sql, row[3])
+            details = [row[3] for row in plan]
+            if "FROM notes LIMIT" in sql:  # count_notes: a LIMIT-bounded scan by design
+                continue
+            assert any("SEARCH" in d for d in details), (sql, details)
+            # scanning the count(*) subquery's own (already bounded) result is not a table scan
+            scans = [d for d in details if d.startswith("SCAN") and "(subquery" not in d]
+            assert not scans, (sql, details)
         store.close()
 
 

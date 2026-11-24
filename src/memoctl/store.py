@@ -647,7 +647,9 @@ class Store:
     # -- the limit counts (read inside the write transaction; interface.md, Limits)
     def count_live(self, repo: str, now: int, cap: int) -> int:
         """Live notes of ``repo`` at ``now`` (not superseded, ``expires`` after ``now``), counted
-        up to ``cap``: the work is bounded by ``cap`` live rows, whatever the store holds."""
+        up to ``cap``. The plan visits the repo's rows through the index ``notes_repo_topic``, so
+        the work is bounded by the repo's rows (at most ``limits.total``); only the returned count
+        is capped at ``cap``."""
         cursor = self.execute(
             "SELECT count(*) FROM (SELECT 1 FROM notes WHERE repo = ? AND superseded_by IS NULL"
             " AND expires > ? LIMIT ?)",
