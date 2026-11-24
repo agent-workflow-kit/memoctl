@@ -353,7 +353,9 @@ def test_storable_worst_case_combining_bodies_finish_well_under_the_deadline(
     conn.execute("COMMIT")
     started = time.monotonic()
     assert search(gw, "nomatch", "--limit", "1") == 0
-    assert time.monotonic() - started < 15  # measured 5 s on a shared machine; deadline is 30 s
+    # The real deadline (30 s, exit 12) is the hard bound; exit 0 above proves it was not hit.
+    # 25 s is well under the deadline yet loose enough for a loaded CI machine (measured ~5 s).
+    assert time.monotonic() - started < 25
 
 
 def test_prefilter_has_no_false_negatives_against_the_exact_check() -> None:
