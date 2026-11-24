@@ -1,0 +1,17 @@
+note 1
+repo: example.com/a/b
+topic: build
+kind: human
+labels: -
+status: superseded
+created: 2025-12-30T00:00:00Z
+expires: 2026-01-02T00:00:00Z
+superseded_by: 3
+supersedes: -
+size: 31 bytes
+body_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+body:
+| use `make verify`
+|
+| then commit
+|

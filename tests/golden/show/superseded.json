@@ -1,0 +1,1 @@
+{"id":1,"repo":"example.com/a/b","topic":"build","kind":"human","labels":[],"body":"use `make verify`\n\nthen commit\n","size":31,"created":"2025-12-30T00:00:00Z","expires":"2026-01-02T00:00:00Z","status":"superseded","superseded_by":3,"body_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","supersedes":null}
