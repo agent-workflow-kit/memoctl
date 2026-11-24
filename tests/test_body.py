@@ -13,6 +13,9 @@ import pytest
 from memoctl import body
 from memoctl.body import BodyTextError, check_text, validate_body
 from memoctl.bodyread import BodyError
+from memoctl.cli_errors import failure_for
+from memoctl.sanitize import refused_class
+from tests.golden_files import check_golden
 
 LIMIT = 8192
 
@@ -108,7 +111,67 @@ def test_utf8_bom_is_an_invisible_character_not_skipped() -> None:
 
 # ---------- item 3: the refused characters ----------
 
-# Note: these refusal cases could move into the golden harness
+# One golden per refused class and length case: the error envelope the CLI prints for the body
+# (the stderr status line is pinned once, in test_too_long_golden).
+# Sweeps over every code point of a class stay below as plain assertions.
+
+GOLDEN_REFUSALS: dict[str, tuple[bytes, int]] = {
+    "encoding": (b"ok\nok\n\xff\xfe", LIMIT),
+    "control": (b"one\ntwo\x00", LIMIT),
+    "control-cr": (b"a\r\nb", LIMIT),
+    "control-line-separator": ("a\u2028b".encode(), LIMIT),
+    "invisible": ("a\u202eb".encode(), LIMIT),
+    "invisible-bom": (b"\xef\xbb\xbfhello", LIMIT),
+    "invisible-ignorable": ("a\u034fb".encode(), LIMIT),
+    "invisible-unassigned-tag": ("a\U000e0000b".encode(), LIMIT),
+    "private-use": ("a\ue000b".encode(), LIMIT),
+    "unassigned": ("a\u0378b".encode(), LIMIT),
+    "combining": (("e" + "\u0301" * 31).encode(), LIMIT),
+    "whitespace-only": (b" \n\t ", LIMIT),
+    "nfkc-too-long": (("\ufdfa" * 100).encode(), 400),
+}
+
+
+@pytest.mark.parametrize("case", list(GOLDEN_REFUSALS))
+def test_refusal_golden(case: str) -> None:
+    data, limit = GOLDEN_REFUSALS[case]
+    with pytest.raises(BodyTextError) as info:
+        validate_body(data, limit)
+    failure = failure_for(info.value)
+    check_golden(f"body/{case}.json", failure.envelope().encode(), schema="cli/error")
+
+
+def test_too_long_golden() -> None:
+    with pytest.raises(BodyError) as info:
+        validate_body(b"a" * 257, 256)
+    failure = failure_for(info.value)
+    check_golden("body/too-long.json", failure.envelope().encode(), schema="cli/error")
+    check_golden("body/too-long-err.txt", failure.status_line().encode())
+
+
+def test_search_text_refusal_golden() -> None:
+    with pytest.raises(BodyTextError) as info:
+        check_text(b"a\x00", field="text")
+    failure = failure_for(info.value)
+    check_golden("body/text-control.json", failure.envelope().encode(), schema="cli/error")
+
+
+def test_classify_is_the_sanitizers_classification_for_every_code_point() -> None:
+    # Only guards against body growing its own classification again; the independent oracles
+    # below (unicodedata sweep, INVISIBLE_EXTRA, tag block) are what pin the classes.
+    for cp in range(0x110000):
+        ch = chr(cp)
+        expected = refused_class(ch)
+        if expected == "surrogate":
+            expected = None  # strict UTF-8 cannot decode one; not a body class
+        assert body.classify(ch) == expected, hex(cp)
+
+
+def test_the_tag_block_is_invisible_to_the_sanitizer_labels_too() -> None:
+    for cp in range(0xE0000, 0xE0080):
+        assert refused_class(chr(cp)) == "invisible", hex(cp)
+        assert body.classify(chr(cp)) == "invisible", hex(cp)
+
 
 CONTROL = [chr(c) for c in [*range(0, 9), *range(11, 32), 127, *range(0x80, 0xA0), 0x2028, 0x2029]]
 
@@ -160,11 +223,6 @@ def test_named_invisibles() -> None:
         assert refusal(f"a{chr(cp)}".encode()).cls == "invisible", hex(cp)
 
 
-def test_whole_tag_block_is_invisible_even_where_unassigned() -> None:
-    for cp in range(0xE0000, 0xE0080):
-        assert body.classify(chr(cp)) == "invisible", hex(cp)
-
-
 def test_zwj_and_emoji_variation_selector_are_refused() -> None:
     assert refusal("\U0001f468‍\U0001f469".encode()).cls == "invisible"
     assert refusal("❤️".encode()).cls == "invisible"
@@ -196,6 +254,13 @@ def test_classify_agrees_with_unicodedata_for_all_code_points() -> None:
             assert cls == "private_use", hex(cp)
         elif cat == "Cn" and not 0xE0000 <= cp <= 0xE007F:
             assert cls == "unassigned", hex(cp)
+        elif (
+            cat not in {"Cc", "Cf", "Co", "Cn", "Cs"}
+            and cp not in INVISIBLE_EXTRA
+            and cp not in (0x2028, 0x2029)
+            and not 0xE0000 <= cp <= 0xE007F
+        ):
+            assert cls is None, hex(cp)
         if cls is None:
             allowed_extra.add(cp)
     # nothing in any refused class is accepted; whitespace letters stay accepted

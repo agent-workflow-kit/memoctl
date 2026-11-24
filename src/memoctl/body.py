@@ -28,9 +28,8 @@ accepted by a newer interpreter may be stripped by an older one at read time; ac
 Traceback frames of a raised :class:`BodyTextError` hold the decoded text, so callers must
 never render tracebacks with locals (``cli_errors`` maps the error).
 
-The refused-character classes are defined here from the spec, independently of
-``memoctl.sanitize.refused_class``; both must follow Body rules item 3 (the tag block
-U+E0000..E007F is tested before the category lookup).
+The refused-character classes are those of ``memoctl.sanitize.refused_class``, the single
+definition shared with the read-time sanitizer (see :func:`classify`).
 Item 7, the secret check, is :mod:`memoctl.secretscan`; it runs after this validation.
 ``cli_errors`` maps :class:`BodyTextError` to exit 2 ``usage`` with ``details``.
 """
@@ -38,6 +37,8 @@ Item 7, the secret check, is :mod:`memoctl.secretscan`; it runs after this valid
 from __future__ import annotations
 
 import unicodedata
+
+from memoctl.sanitize import refused_class
 
 __all__ = [
     "CLASSES",
@@ -112,36 +113,16 @@ def _rebuild(reason: str, field: str, line: int | None, limit: int | None) -> Bo
     return BodyTextError(reason, field=field, line=line, limit=limit)
 
 
-# Default-ignorable code points outside category Cf (Body rules item 3).
-_IGNORABLE = frozenset(
-    {0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F, 0x2800, 0x3164}
-    | set(range(0xFE00, 0xFE10))
-    | {0xFFA0}
-    | set(range(0xE0100, 0xE01F0))
-)
-_LINE_SEPARATORS = frozenset({0x2028, 0x2029})
-
-
 def classify(ch: str) -> str | None:
-    """The refused class of one code point, or None when it may appear in a body."""
-    cp = ord(ch)
-    if cp < 128:
-        # Only LF and tab are allowed among the controls; DEL is a control too.
-        return "control" if (cp < 32 and cp not in (9, 10)) or cp == 127 else None
-    if cp in _LINE_SEPARATORS:
-        return "control"
-    if 0xE0000 <= cp <= 0xE007F or cp in _IGNORABLE:
-        return "invisible"  # the whole tag block, assigned or not
-    cat = unicodedata.category(ch)
-    if cat == "Cc":
-        return "control"
-    if cat == "Cf":
-        return "invisible"
-    if cat == "Co":
-        return "private_use"
-    if cat == "Cn":
-        return "unassigned"
-    return None
+    """The refused class of one code point, or None when it may appear in a body.
+
+    The classes are ``memoctl.sanitize.refused_class``, the one definition of Body rules item 3
+    (the read-time sanitizer removes exactly what this refuses). The only extra label there is
+    ``surrogate``: strict UTF-8 cannot decode one, so it never reaches a body and is not a
+    body class.
+    """
+    cls = refused_class(ch)
+    return None if cls == "surrogate" else cls
 
 
 def _decode(data: bytes, field: str) -> str:

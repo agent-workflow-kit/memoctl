@@ -60,10 +60,13 @@ def refused_class(c: str) -> str | None:
     rules item 3. ``surrogate`` (an unpaired surrogate) cannot be stored, since strict UTF-8
     refuses it, and is removed here so the output is always encodable. LF and tab are not
     refused (the sanitizer rewrites the tab). Unassigned is judged by the running
-    interpreter's ``unicodedata``.
+    interpreter's ``unicodedata``. The whole tag block U+E0000 to U+E007F is ``invisible``,
+    including its unassigned code points, as body rules item 3 says.
     """
     if c == "\n" or c == "\t":
         return None
+    if "\U000e0000" <= c <= "\U000e007f":
+        return "invisible"  # the whole tag block, assigned or not (body rules item 3)
     cls = _CATEGORY_CLASS.get(unicodedata.category(c))
     if cls is not None:
         return cls
