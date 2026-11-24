@@ -236,7 +236,7 @@ def test_maximum_size_bodies_at_the_live_notes_cap_stay_bounded(
     assert counter.calls == 200 + doc["shown"]
     assert counter.chars <= (200 + doc["shown"]) * max_body
     # No body is kept for a note that is not chosen: the peak is a few bodies, not 200 of them.
-    assert peak < 200 * max_body // 8, peak
+    assert peak < 200 * max_body // 8 + 512 * 1024, peak  # fixed overhead: sqlite, json
 
 
 # --- pathological Unicode -----------------------------------------------------------------------
