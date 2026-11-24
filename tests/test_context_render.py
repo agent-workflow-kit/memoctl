@@ -229,11 +229,15 @@ def test_golden_header_over_the_budget_shows_nothing_through_selection(db: Db) -
 
 
 def test_golden_real_cut_of_a_single_line_through_selection(db: Db) -> None:
-    db.add(body="w" * 300 + " caf\u00e9 \U0001f600", topic="wide")
+    # "| " + 96 "w" = 98 UTF-16 units; the emoji (2 units) plus the LF would be 101 > 100, so the
+    # cap lands between its two surrogates and the whole emoji is dropped, never half of it.
+    db.add(body="w" * 96 + "\U0001f600 caf\u00e9 tail", topic="wide")
     s = db.select(config=cfg(note_max_chars=100))
     assert s.shown == 1 and s.notes[0].cut
     block = _golden_through_selection("cut-line", s)
     assert block.count("cut]") == 1
+    assert "\U0001f600" not in block and "\ud83d" not in block
+    assert f"| {'w' * 96}\n[memoctl: note" in block
 
 
 # --- hostile selections: the renderer refuses what no selection can contain ----------------------
