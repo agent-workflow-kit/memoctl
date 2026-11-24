@@ -18,7 +18,7 @@ from tests.schema_check import validate
 HOME = Path("/home/example")
 BLOCK = block_bytes(str(HOME))
 OTHER = b"MAILTO=me@example.com\n0 * * * * /usr/bin/true\n"
-SECRET = "SECRET-TABLE-TEXT"
+LEAK_MARKER = "LEAK-MARKER-TEXT"
 
 
 @pytest.fixture
@@ -222,13 +222,13 @@ def test_help_lists_both_actions(gw: FakeGateway) -> None:
 def test_malformed_block_exits_20_changes_nothing_and_never_echoes_the_table(
     gw: FakeGateway,
 ) -> None:
-    gw.crontab.table = b"# memoctl managed \n" + SECRET.encode() + b"\n"
+    gw.crontab.table = b"# memoctl managed \n" + LEAK_MARKER.encode() + b"\n"
     for command in ("install", "uninstall"):
         assert run(gw, command, "--json") == 20
         error = json.loads(gw.terminal.stdout)["error"]
         assert (error["code"], error["reason"], error["details"]) == (
             "refused", "cron_block_malformed", None)  # fmt: skip
-        assert SECRET not in gw.terminal.stdout + gw.terminal.stderr
+        assert LEAK_MARKER not in gw.terminal.stdout + gw.terminal.stderr
         assert gw.terminal.stderr.startswith("refused (cron_block_malformed)")
     assert gw.crontab.writes == []
 
@@ -238,7 +238,7 @@ def test_malformed_block_exits_20_changes_nothing_and_never_echoes_the_table(
 def test_a_failing_crontab_exits_12_without_a_claim_of_success(
     gw: FakeGateway, command: str, flags: list[str]
 ) -> None:
-    gw.crontab.fail_with = SECRET
+    gw.crontab.fail_with = LEAK_MARKER
     assert run(gw, command, "--json", *flags) == 12
     error = json.loads(gw.terminal.stdout)["error"]
     assert (error["code"], error["reason"], error["retryable"]) == (
@@ -247,20 +247,20 @@ def test_a_failing_crontab_exits_12_without_a_claim_of_success(
         False,
     )
     assert "outcome" not in gw.terminal.stdout
-    assert SECRET not in gw.terminal.stdout + gw.terminal.stderr
+    assert LEAK_MARKER not in gw.terminal.stdout + gw.terminal.stderr
     assert gw.crontab.writes == []
 
 
 def test_a_failing_write_exits_12_after_a_successful_read(gw: FakeGateway) -> None:
     def boom(data: bytes) -> None:
-        raise GatewayError(f"crontab - failed: {SECRET}")
+        raise GatewayError(f"crontab - failed: {LEAK_MARKER}")
 
     gw.crontab.table = OTHER
     gw.crontab_write = boom  # type: ignore[method-assign]
     assert run(gw, "install") == 12
     assert gw.terminal.stdout == ""
     assert gw.terminal.stderr.startswith("failed (crontab_failed)")
-    assert SECRET not in gw.terminal.stderr
+    assert LEAK_MARKER not in gw.terminal.stderr
     assert gw.crontab.table == OTHER
 
 

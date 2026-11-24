@@ -15,7 +15,7 @@ from tests import private_home
 from tests.child_env import FAKE_CRONTAB_TOOLS, child_path
 from tests.schema_check import validate
 
-SECRET = "SECRET-TABLE-TEXT"
+LEAK_MARKER = "LEAK-MARKER-TEXT"
 
 
 @pytest.fixture
@@ -121,13 +121,13 @@ def test_a_failing_write_after_a_good_read_is_exit_12(
     # a crontab that lists fine and refuses to install, with a message that must not be echoed
     fail = wrapper / "crontab"
     fail.write_text(
-        f"#!/bin/sh\nif [ \"$1\" = -l ]; then echo '0 * * * * x'; exit 0; fi\n"
-        f"cat >/dev/null; echo {SECRET} >&2; exit 1\n"
+        "#!/bin/sh\nif [ \"$1\" = -l ]; then echo '0 * * * * x'; exit 0; fi\n"
+        'cat >/dev/null; echo "$FAKE_LEAK" >&2; exit 1\n'
     )
     fail.chmod(0o755)
-    done = cron(home, wrapper, "install")
+    done = cron(home, wrapper, "install", extra={"FAKE_LEAK": LEAK_MARKER})
     assert done.returncode == 12
-    assert SECRET.encode() not in done.stdout + done.stderr
+    assert LEAK_MARKER.encode() not in done.stdout + done.stderr
     assert done.stderr.startswith(b"failed (crontab_failed)")
     assert done.stdout == b""
 
@@ -142,10 +142,10 @@ def test_a_malformed_block_is_exit_20_and_nothing_is_written(
     home: Path, fake_crontab: tuple[str, Path]
 ) -> None:
     script, state = fake_crontab
-    (state / "crontab").write_bytes(b"# memoctl managed\n" + SECRET.encode() + b"\n")
+    (state / "crontab").write_bytes(b"# memoctl managed\n" + LEAK_MARKER.encode() + b"\n")
     done = cron(home, Path(script).parent, "uninstall")
     assert done.returncode == 20
-    assert SECRET.encode() not in done.stderr + done.stdout
+    assert LEAK_MARKER.encode() not in done.stderr + done.stdout
     assert calls(state) == ["1 -l exit=0"]
 
 
