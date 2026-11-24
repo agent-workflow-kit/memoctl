@@ -330,6 +330,7 @@ def test_mismatch_is_checked_before_already_superseded(gw: FakeGateway) -> None:
 def test_a_chain_of_supersedes_in_a_row(gw: FakeGateway) -> None:
     add(gw, body="v0")
     for n in range(1, 25):
+        gw.clock.advance(timedelta(minutes=1))  # stay under the rate limit (20 per 10 minutes)
         code, out, _ = add(gw, "--supersedes", str(n), body=f"v{n}")
         assert code == 0 and json.loads(out)["id"] == n + 1
     assert [(r.id, r.superseded_by) for r in stored(gw)][:3] == [(1, 2), (2, 3), (3, 4)]

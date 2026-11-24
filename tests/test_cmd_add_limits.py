@@ -127,7 +127,7 @@ def assert_untouched_after(gw: FakeGateway, action: Any) -> None:
     assert (stored(gw), rate_rows(gw), log_records(gw)) == before
 
 
-# -- 1. repo_full ----------------------------------------------------------------------------------
+# -- 1. repo_full ----------------------------------------------
 
 
 def test_repo_full_refuses_at_exactly_the_limit_and_never_below(gw: FakeGateway) -> None:
@@ -184,7 +184,7 @@ def test_the_repo_override_of_live_per_repo_wins_over_the_global_figure(gw: Fake
     assert ok(gw, repo=OTHER, body="c")["created"] is True  # the global 5 applies there
 
 
-# -- 2. store_full -----------------------------------------------------------------------------------
+# -- 2. store_full ----------------------------------------------
 
 
 def test_store_full_counts_every_note_of_every_status_and_repo(gw: FakeGateway) -> None:
@@ -212,7 +212,7 @@ def test_repo_full_is_reported_before_store_full(gw: FakeGateway) -> None:
     assert refused(gw, body="b")["reason"] == "repo_full"  # both fail: the first wins
 
 
-# -- 3. rate_limited --------------------------------------------------------------------------------
+# -- 3. rate_limited ----------------------------------------------
 
 
 def test_rate_limited_per_repo_at_exactly_the_limit(gw: FakeGateway) -> None:
@@ -367,7 +367,7 @@ def test_many_repos_each_have_their_own_repo_budget(gw: FakeGateway) -> None:
     assert len(rate_rows(gw)) == 30
 
 
-# -- 4. dedupe and --supersedes ------------------------------------------------------------------
+# -- 4. dedupe and --supersedes ----------------------------------------------
 
 
 def test_a_dedupe_hit_consumes_no_budget_and_skips_every_limit(gw: FakeGateway) -> None:
@@ -420,7 +420,7 @@ def test_a_refused_supersede_leaves_the_target_live(gw: FakeGateway) -> None:
     assert [r.superseded_by for r in stored(gw)] == [None]
 
 
-# -- 5. order against the earlier steps -------------------------------------------------------------
+# -- 5. order against the earlier steps ----------------------------------------------
 
 # Each fault is (name, arguments, setup) and is a refusal of an earlier step, with the limits
 # already exceeded (see the fixture below). The earlier step wins.
@@ -509,7 +509,7 @@ def test_of_two_limit_faults_the_earlier_in_the_documented_order_wins(
     assert len(stored(gw)) == 2 and len(rate_rows(gw)) == 1
 
 
-# -- 6. what a refusal leaves behind ------------------------------------------------------------
+# -- 6. what a refusal leaves behind ----------------------------------------------
 
 
 def test_a_refusal_prints_nothing_on_stdout_in_human_mode_and_one_status_line(
@@ -561,7 +561,7 @@ def test_failure_mapping_is_registered_for_the_limit_errors() -> None:
     assert failure.retryable is True
 
 
-# -- 7. the pure rules (what #19 calls) -------------------------------------------------------------
+# -- 7. the pure rules (what #19 calls) ----------------------------------------------
 
 
 def counts(**kw: int) -> LimitCounts:
@@ -642,7 +642,7 @@ def test_evaluate_limits_reads_a_store_without_writing(gw: FakeGateway) -> None:
     assert notes.__doc__  # the rules live in notes.py
 
 
-# -- 8. size: bounded queries ---------------------------------------------------------------------
+# -- 8. size: bounded queries ----------------------------------------------
 
 
 def test_the_limit_queries_stay_fast_with_100k_live_notes(gw: FakeGateway) -> None:
@@ -672,7 +672,7 @@ def test_the_limit_queries_use_indexes(gw: FakeGateway) -> None:
         assert "USING" in detail and "SCAN notes" not in detail, (name, detail)
 
 
-# -- 9. real processes racing for the last slot ----------------------------------------------------
+# -- 9. real processes racing for the last slot ----------------------------------------------
 
 
 def test_two_processes_racing_for_the_last_slot_admit_exactly_one(tmp_path: Path) -> None:

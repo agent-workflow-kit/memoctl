@@ -3,7 +3,8 @@
 The rules live here; every query is a :class:`~memoctl.store.Store` method (only ``store.py``
 touches SQLite). Every function runs inside the caller's ``Store.write()`` transaction, so what
 is checked is what is committed: no other writer can change a note between a check and the
-insert. the limit rules (``check_limits``, ``evaluate_limits``); todo(#30), todo(#31): ``delete`` and ``prune``.
+insert. The limit rules (``check_limits``, ``evaluate_limits``) are here too.
+todo(#30), todo(#31): ``delete`` and ``prune``.
 """
 
 from __future__ import annotations
