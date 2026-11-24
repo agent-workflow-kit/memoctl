@@ -20,7 +20,21 @@ Autouse guards:
   because code reads ``pwd.getpwuid`` as a module attribute: ``from pwd import getpwuid``
   bypasses it (the session backstop still catches a write after the fact).
 
-Session backstop: ``pytest_sessionstart`` and ``pytest_sessionfinish`` compare the real
+- Child environment rule (every process, not only ``crontab``): before ``Popen`` (and
+  ``subprocess._fork_exec``, and the ``posix_spawn`` paths ``subprocess`` takes) starts anything,
+  the ``PATH`` of the child's effective environment (the ``env=`` given, or ``os.environ`` when
+  none) is searched for ``crontab`` with ``shutil.which``. If one is found it must resolve below
+  the pytest base temporary directory (a fake) or be the session tripwire; otherwise
+  ``CrontabGuardError`` is raised before any process exists. This closes the hole the other checks
+  leave: a child (such as a ``memoctl`` child through ``tests/private_home.py``) that looks
+  ``crontab`` up itself inside its own process, which no in-process guard can see. Empty and
+  relative ``PATH`` entries mean the child's working directory. There is no switch to disable it.
+  ``tests/child_env.py`` builds a ``PATH`` that passes.
+
+Session backstop: ``pytest_sessionstart`` also puts a tripwire directory with a ``crontab`` that
+always exits 97 first on ``os.environ["PATH"]`` for the whole session (restored at the end), so
+code that runs outside the per-test fixtures finds the stub, never the real crontab.
+``pytest_sessionstart`` and ``pytest_sessionfinish`` compare the real
 ``~/.local/state/memoctl`` and ``~/.config/memoctl`` before and after the run and fail the
 session (exit status 1) when either was absent at the start and exists at the end.
 This also covers child processes.
@@ -36,7 +50,8 @@ import pwd
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterator
+import tempfile
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +66,59 @@ class CrontabGuardError(AssertionError):
     pass
 
 
+TRIPWIRE_SCRIPT = "#!/bin/sh\necho 'tripwire: the real crontab must not run' >&2\nexit 97\n"
+_SESSION: dict[str, Any] = {}  # "tripwire": Path, "path": the PATH to restore
+
+
+def _write_tripwire(directory: Path) -> None:
+    trap = directory / "crontab"
+    trap.write_text(TRIPWIRE_SCRIPT)
+    trap.chmod(0o755)
+
+
+def session_tripwire() -> Path | None:
+    """The session-wide directory whose ``crontab`` always fails (``None`` outside a session)."""
+    return _SESSION.get("tripwire")
+
+
+def _path_of(env: Mapping[Any, Any] | list[Any] | None) -> str:
+    """The ``PATH`` a child started with ``env`` sees (``os.environ`` when ``env`` is ``None``)."""
+    if env is None:
+        env = os.environ
+    if isinstance(env, Mapping):
+        for key, value in env.items():
+            if os.fsdecode(key) == "PATH":
+                return os.fsdecode(value)
+    else:  # the "NAME=value" list that subprocess hands to _fork_exec
+        for item in env:
+            text = os.fsdecode(item)
+            if text.startswith("PATH="):
+                return text[len("PATH=") :]
+    return os.defpath  # a child without PATH searches the default path
+
+
+def check_child_path(
+    env: Mapping[Any, Any] | list[Any] | None, cwd: Any, bases: list[Path]
+) -> None:
+    """Refuse a child whose ``PATH`` can resolve ``crontab`` to anything but a fake.
+
+    ``crontab`` found through the child's ``PATH`` must resolve below one of ``bases`` (the pytest
+    base temporary directory, the session tripwire). Empty and relative entries are taken
+    relative to the child's ``cwd`` (``None`` means the current directory).
+    """
+    here = Path(os.fsdecode(cwd)) if cwd is not None else Path.cwd()
+    entries = [str((here / (entry or ".")).absolute()) for entry in _path_of(env).split(os.pathsep)]
+    found = shutil.which("crontab", path=os.pathsep.join(entries))
+    if found is None:
+        return
+    resolved = Path(found).resolve()
+    if not any(base in resolved.parents for base in bases):
+        raise CrontabGuardError(
+            f"refusing to start a process whose PATH finds a crontab at {found!r}: a child may "
+            f"only find a fake crontab below {bases[0]} (see tests/child_env.py)"
+        )
+
+
 @pytest.fixture(autouse=True)
 def _private_environment(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
@@ -60,15 +128,18 @@ def _private_environment(
     home.mkdir()
     tripwire = root / "tripwire"
     tripwire.mkdir()
-    trap = tripwire / "crontab"
-    trap.write_text("#!/bin/sh\necho 'tripwire: the real crontab must not run' >&2\nexit 97\n")
-    trap.chmod(0o755)
+    _write_tripwire(tripwire)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(home / ".local" / "state"))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(root / "run"))
     monkeypatch.setenv("LC_ALL", "C")
     monkeypatch.setenv("PATH", f"{tripwire}{os.pathsep}{os.environ.get('PATH', '')}")
+    # Sanity: with the tripwire first, a PATH lookup of crontab must end below the base dir.
+    base = tmp_path_factory.getbasetemp().resolve()
+    check_child_path(None, None, [base])
+    found = shutil.which("crontab")
+    assert found is not None and base in Path(found).resolve().parents, found
     return home
 
 
@@ -87,9 +158,22 @@ _BEFORE: dict[str, int | None] = {}
 
 def pytest_sessionstart(session: pytest.Session) -> None:
     _BEFORE.update(passwd_guard.real_state_snapshot())
+    tripwire = Path(tempfile.mkdtemp(prefix="memoctl-session-tripwire-")).resolve()
+    _write_tripwire(tripwire)
+    _SESSION["tripwire"] = tripwire
+    _SESSION["path"] = os.environ.get("PATH")
+    os.environ["PATH"] = f"{tripwire}{os.pathsep}{os.environ.get('PATH', '')}"
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    tripwire = _SESSION.pop("tripwire", None)
+    original = _SESSION.pop("path", None)
+    if tripwire is not None:
+        if original is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = original
+        shutil.rmtree(tripwire, ignore_errors=True)
     changed = passwd_guard.changed_paths(_BEFORE, passwd_guard.real_state_snapshot())
     if changed:
         sys.stderr.write(
@@ -149,6 +233,7 @@ def _process_guard(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[None]:
     base = tmp_path_factory.getbasetemp().resolve()
+    bases = [base, *([session_tripwire()] if session_tripwire() else [])]
     real_popen = subprocess.Popen
     real_fork_exec = subprocess._fork_exec  # type: ignore[attr-defined]
     real_posix_spawn = os.posix_spawn
@@ -166,6 +251,13 @@ def _process_guard(
             else:
                 argv = [os.fsdecode(x) for x in args]
             check_process(argv, [os.fsdecode(executable)] if executable is not None else [], base)
+            # Popen(args, bufsize, executable, stdin, stdout, stderr, preexec_fn, close_fds,
+            # shell, cwd, env, ...): cwd is the 9th and env the 10th positional after args.
+            check_child_path(
+                kw.get("env", a[9] if len(a) > 9 else None),
+                kw.get("cwd", a[8] if len(a) > 8 else None),
+                bases,
+            )
             super().__init__(args, *a, **kw)
             started.append(self)
 
@@ -173,6 +265,10 @@ def _process_guard(
         # Reached by every Popen, including one imported before the guard was installed.
         argv = [os.fsdecode(x) for x in args] if args is not None else []
         check_process(argv, [os.fsdecode(x) for x in executable_list], base)
+        # CPython 3.12-3.14: _fork_exec(args, executable_list, close_fds, pass_fds, cwd, env, ...)
+        if len(a) < 4:
+            raise CrontabGuardError("unexpected subprocess._fork_exec signature")
+        check_child_path(a[3], a[2], bases)
         return real_fork_exec(args, executable_list, *a, **kw)
 
     def from_subprocess() -> bool:
@@ -182,12 +278,14 @@ def _process_guard(
         if not from_subprocess():
             raise CrontabGuardError("os.posix_spawn is not allowed in tests")
         check_process([os.fsdecode(x) for x in argv], [os.fsdecode(path)], base)
+        check_child_path(a[0] if a else kw.get("env"), None, bases)
         return real_posix_spawn(path, argv, *a, **kw)
 
     def guarded_posix_spawnp(path: Any, argv: Any, *a: Any, **kw: Any) -> Any:
         if not from_subprocess():
             raise CrontabGuardError("os.posix_spawnp is not allowed in tests")
         check_process([os.fsdecode(x) for x in argv], [], base)
+        check_child_path(a[0] if a else kw.get("env"), None, bases)
         return real_posix_spawnp(path, argv, *a, **kw)
 
     def blocked(name: str) -> Any:

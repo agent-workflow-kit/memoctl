@@ -21,6 +21,7 @@ from memoctl import store as store_module
 from memoctl.deadline import Deadline
 from memoctl.statedir import StateDir, open_state_dir
 from memoctl.store import Mode, StoreError, open_store
+from tests.child_env import child_path
 from tests.fake_gateway import FakeGateway
 from tests.test_statedir import HomeGateway
 
@@ -176,7 +177,7 @@ def test_a_writer_waiting_on_a_held_lock_ends_with_exit_12_timeout(
     env = {
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
-        "PATH": "/usr/bin:/bin",
+        "PATH": child_path(tmp_path),
         "LC_ALL": "C",
     }
     p = subprocess.Popen(

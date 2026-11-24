@@ -23,6 +23,7 @@ from memoctl.cli_commands import COMMANDS
 from memoctl.statedir import StateAccessError
 from memoctl.store import Store
 from tests import private_home
+from tests.child_env import child_path
 from tests.fake_gateway import FakeAlarm, FakeExit, FakeGateway
 from tests.golden_files import check_golden
 from tests.schema_check import validate_json_output
@@ -477,7 +478,12 @@ def test_a_deadline_that_ran_out_before_the_output_exits_12_with_no_output(
 def _child(
     home: Path, *args: str, stdout: Any = subprocess.PIPE, prefix: str = ""
 ) -> subprocess.CompletedProcess[bytes]:
-    env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "HOME": str(home), "XDG_CONFIG_HOME": str(home)}
+    env = {
+        "PATH": child_path(home.parent, tools=["sh"] if prefix else []),
+        "LC_ALL": "C",
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home),
+    }
     cmd: list[str] = private_home.argv(home, *args)
     if prefix:
         cmd = ["sh", "-c", f'exec "$0" "$@" {prefix}', *cmd]

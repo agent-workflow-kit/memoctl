@@ -12,6 +12,7 @@ import pytest
 
 from memoctl.cron_block import block_bytes
 from tests import private_home
+from tests.child_env import FAKE_CRONTAB_TOOLS, child_path
 from tests.schema_check import validate
 
 SECRET = "SECRET-TABLE-TEXT"
@@ -33,9 +34,9 @@ def cron(
 ) -> subprocess.CompletedProcess[bytes]:
     import os
 
-    # Never "/usr/bin:/bin" here: a real crontab lives there. Without a fake, PATH is an empty
-    # directory, so no ``crontab`` can be found at all.
-    path = f"{bindir}:/usr/bin:/bin" if bindir is not None else str(home / "empty-path")
+    # Never "/usr/bin:/bin" here: a real crontab lives there. ``child_path`` is the fake first and
+    # an empty directory (no ``crontab`` at all without a fake); conftest refuses anything else.
+    path = child_path(home.parent, fake_bin=bindir, tools=FAKE_CRONTAB_TOOLS)
     env = {
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
@@ -132,7 +133,6 @@ def test_a_failing_write_after_a_good_read_is_exit_12(
 
 
 def test_a_crontab_missing_from_path_is_exit_12(home: Path) -> None:
-    (home / "empty-path").mkdir()
     done = cron(home, None, "install", "--json")
     assert done.returncode == 12
     assert json.loads(done.stdout)["error"]["reason"] == "crontab_failed"
@@ -168,7 +168,9 @@ def test_closed_stdout_does_not_leave_a_half_written_crontab(
     import os
 
     env = {
-        "HOME": str(home), "PATH": f"{Path(script).parent}:/usr/bin:/bin",
+        "HOME": str(home), "PATH": child_path(
+            home.parent, fake_bin=Path(script).parent, tools=FAKE_CRONTAB_TOOLS
+        ),
         "FAKE_CRONTAB_DIR": os.environ["FAKE_CRONTAB_DIR"],
     }  # fmt: skip
     done = subprocess.run(

@@ -28,6 +28,7 @@ from memoctl.notes import (
 from memoctl.statedir import open_state_dir
 from memoctl.store import Mode, StoreError, open_store
 from tests import private_home
+from tests.child_env import child_path
 from tests.fake_gateway import EPOCH, FakeGateway
 from tests.golden_files import check_golden
 from tests.test_cmd_add import (
@@ -740,7 +741,7 @@ def test_two_processes_racing_for_the_last_slot_admit_exactly_one(tmp_path: Path
     config = home / ".config" / "memoctl" / "config.yaml"
     config.write_text("limits:\n  live_per_repo: 1\n  total: 10\n")
     config.chmod(0o600)
-    env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "HOME": str(home)}
+    env = {"PATH": child_path(home.parent), "LC_ALL": "C", "HOME": str(home)}
     argv = [
         *private_home.argv(home, "add", "--repo", REPO, "--topic", "race", "--body-file", "-"),
         "--json",
