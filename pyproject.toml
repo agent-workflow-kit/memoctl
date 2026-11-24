@@ -35,12 +35,15 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Copies of sibling code, pinned as test data: never reformatted or linted.
+extend-exclude = ["tests/pinned"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.pyright]
 include = ["src", "tests"]
+exclude = ["tests/pinned"]
 pythonVersion = "3.12"
 
 [tool.pytest.ini_options]
