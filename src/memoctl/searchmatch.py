@@ -14,16 +14,16 @@ Bounded work, because a Python signal handler (the deadline) cannot run during o
 - NFKC is quadratic in a long run of combining marks (3 s for one 64 KiB body of marks measured),
   and only a database written by something else can hold one (Body rules item 4 refuses a run
   over 30 on ``add``). :meth:`Matcher.matches` therefore checks a non-ASCII text for such a run
-  first (one cheap pass over its distinct characters, an exact linear check only when a run of
-  8 marks or more is there) and never normalizes a text that fails: the note does not match and
-  is counted in :attr:`Matcher.skipped`.
+  first (one C-speed disjointness test against the set of mark code points, an exact linear
+  check only when a run of 8 marks or more is there) and never normalizes a text that fails: the
+  note does not match and is counted in :attr:`Matcher.skipped`.
 """
 
 from __future__ import annotations
 
+import sys
 import unicodedata
 from collections.abc import Sequence
-from functools import lru_cache
 
 from memoctl.body import has_long_combining_run
 
@@ -58,18 +58,35 @@ def parse_terms(text: str) -> tuple[str, ...]:
     return terms
 
 
-@lru_cache(maxsize=65536)
-def _starts_with_mark(char: str) -> bool:
-    """Whether ``char`` decomposes (NFKD) to combining marks only, so it can extend a run."""
-    parts = unicodedata.normalize("NFKD", char)
-    return bool(parts) and all(unicodedata.combining(p) for p in parts)
+_marks: frozenset[str] | None = None
+
+
+def _mark_chars() -> frozenset[str]:
+    """Every non-ASCII code point whose NFKD is combining marks only (so it can extend a run),
+    computed from this interpreter's Unicode data on first use (not at import: about 0.1 s).
+    A code point with neither a combining class nor a decomposition cannot qualify, so only
+    those few are normalized."""
+    global _marks
+    if _marks is None:
+        nfkd, combining = unicodedata.normalize, unicodedata.combining
+        found: set[str] = set()
+        for cp in range(0x80, sys.maxunicode + 1):
+            ch = chr(cp)
+            if combining(ch) or unicodedata.decomposition(ch):
+                parts = nfkd("NFKD", ch)
+                if parts and all(map(combining, parts)):
+                    found.add(ch)
+        _marks = frozenset(found)
+    return _marks
 
 
 def _may_blow_up(text: str) -> bool:
     """Whether normalizing ``text`` could be slow: it holds a run over the Body rules item 4
-    limit. Non-ASCII only (ASCII holds no marks and is never normalized)."""
-    marks = {c for c in set(text) if c >= "\x80" and _starts_with_mark(c)}
-    if not marks:
+    limit. Non-ASCII only (ASCII holds no marks and is never normalized). Sound (no false
+    negative): a mark-only code point has at most 2 marks and a code point that ends in marks
+    adds at most 3, so a run over 30 needs at least 14 mark-only code points in a row."""
+    marks = _mark_chars()
+    if marks.isdisjoint(text):
         return False
     # Every mark becomes NUL; a NUL run is found by a C substring search. A NUL in the text
     # itself can only make this say "maybe", and the exact check below decides.

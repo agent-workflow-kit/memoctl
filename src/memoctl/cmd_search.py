@@ -19,7 +19,7 @@ from memoctl.body import check_text
 from memoctl.bodyread import STDIN, BodyError, read_body
 from memoctl.cli_args import Command
 from memoctl.cli_errors import UsageError
-from memoctl.cmd_list import DEFAULT_LIMIT, _grammar, _limit, empty_result, print_result
+from memoctl.cmd_list import DEFAULT_LIMIT, empty_result, grammar_arg, limit_arg, print_result
 from memoctl.gateway import Gateway
 from memoctl.notes_read import Filters, open_read_store, scan
 from memoctl.searchmatch import Matcher, TermError, parse_terms
@@ -30,10 +30,10 @@ MAX_TEXT_BYTES = 1024
 def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("text", nargs="?", default=None, help="the search text (or --text-file)")
     parser.add_argument("--text-file", default=None, help="read the search text from a file or -")
-    parser.add_argument("--repo", type=_grammar("repo"), default=None, help="only this repo id")
+    parser.add_argument("--repo", type=grammar_arg("repo"), default=None, help="only this repo id")
     parser.add_argument("--all", action="store_true", help="include superseded and expired notes")
     parser.add_argument(
-        "--limit", type=_limit, default=DEFAULT_LIMIT, help="at most this many notes (1 to 500)"
+        "--limit", type=limit_arg, default=DEFAULT_LIMIT, help="at most this many notes (1 to 500)"
     )
 
 

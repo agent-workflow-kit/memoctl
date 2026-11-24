@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
 import time
 import tracemalloc
@@ -11,7 +12,8 @@ from typing import Any
 
 import pytest
 
-from memoctl import notes_read
+from memoctl import notes_read, searchmatch
+from memoctl.body import has_long_combining_run
 from memoctl.searchmatch import Matcher, TermError, fold, parse_terms
 from tests.fake_gateway import FakeExit, FakeGateway
 from tests.golden_files import check_golden
@@ -157,6 +159,7 @@ def test_newline_in_text_separates_terms(gw: FakeGateway) -> None:
 def test_text_over_1024_bytes_is_refused(gw: FakeGateway) -> None:
     assert search(gw, "a" * 1025) == 2
     assert usage_details(gw) == {"field": "text", "limit": 1024}
+    assert out_json(gw)["error"]["message"] == "the search text is over the size limit"
 
 
 def test_lone_surrogate_and_non_utf8_argv(gw: FakeGateway) -> None:
@@ -305,6 +308,27 @@ def test_foreign_long_combining_run_is_skipped_quickly(gw: FakeGateway) -> None:
     assert time.monotonic() - started < 2
 
 
+def test_foreign_long_run_note_counts_in_bad_rows_not_total(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memoctl.cmd_search as cs
+
+    conn = seed(gw, [dict(id=1, body="hit")])
+    add_note(conn, id=2, body="hit e" + "\u0301" * 40)
+    stores: list[Any] = []
+    real = cs.open_read_store
+
+    def spy(gateway: Any) -> Any:
+        stores.append(real(gateway))
+        return stores[-1]
+
+    monkeypatch.setattr(cs, "open_read_store", spy)
+    assert found(gw, "hit") == [1]
+    assert stores[0].bad_rows == 1
+    doc = out_json(gw)
+    assert (doc["total"], doc["hidden"]) == (1, 0)
+
+
 def test_matcher_unit_cases() -> None:
     assert fold("ǅ") == fold("ǆ") == "dž"
     with pytest.raises(TermError):
@@ -315,6 +339,52 @@ def test_matcher_unit_cases() -> None:
     mm = Matcher(("x",))
     mm.matches("t", long_run)
     assert mm.skipped == 1
+
+
+def test_storable_worst_case_combining_bodies_finish_well_under_the_deadline(
+    gw: FakeGateway,
+) -> None:
+    body = ("e" + "\u0301" * 30) * 130  # about 8 KiB, runs of 30 (storable), NFKC-heavy
+    assert len(body.encode()) <= 8192 and not has_long_combining_run(body)
+    conn = seed(gw, [])
+    conn.execute("BEGIN")
+    for i in range(1, 5001):
+        add_note(conn, id=i, body=body)
+    conn.execute("COMMIT")
+    started = time.monotonic()
+    assert search(gw, "nomatch", "--limit", "1") == 0
+    assert time.monotonic() - started < 15  # measured 5 s on a shared machine; deadline is 30 s
+
+
+def test_prefilter_has_no_false_negatives_against_the_exact_check() -> None:
+    marks = sorted(searchmatch._mark_chars())
+    assert 800 < len(marks) < 1200
+    rng = random.Random(7)
+    samples = [
+        "e" + "\u0301" * 31,
+        "x" + "".join(rng.choice(marks) for _ in range(40)),  # mark-only chars, 1 or 2 marks each
+        "é" + "\u0301" * 29,  # a char ending in marks starts the run
+        "\u1e09" + "\u0301" * 28,
+        "a" + "\u0301" * 30,  # exactly the limit: storable
+        "ab" * 50 + "\u0301" * 7 + "c" + "\u0301" * 7,
+    ]
+    for _ in range(300):
+        pool = [*marks[: rng.randint(1, 60)], "e", "\u00e9", "\u1e09", "z", "\u4e00"]
+        samples.append("".join(rng.choice(pool) for _ in range(rng.randint(1, 80))))
+    for text in samples:
+        if has_long_combining_run(text):
+            assert searchmatch._may_blow_up(text), text
+
+
+def test_non_ascii_body_prefilter_cost_per_row_is_bounded() -> None:
+    body = "漢字かな" * 2048  # 8 KB-ish of CJK, no marks
+    m = Matcher(("zzz",))
+    m.matches("t", body)  # builds the mark set once
+    started = time.perf_counter()
+    for _ in range(1000):
+        assert not m.matches("t", body)
+    per_row = (time.perf_counter() - started) / 1000
+    assert per_row < 0.005, per_row  # loose; the fold itself is most of it
 
 
 def test_adversarial_near_max_bodies_are_cheap(gw: FakeGateway) -> None:
@@ -381,13 +451,13 @@ def test_read_never_creates_or_writes(gw: FakeGateway) -> None:
     assert db_path(gw).read_bytes() == before
 
 
-def test_hundred_thousand_notes_bounded_memory(gw: FakeGateway) -> None:
+def _peak_search_memory(gw: FakeGateway, count: int) -> int:
     conn = seed(gw, [])
     conn.execute("BEGIN")
     conn.executemany(
         "INSERT INTO notes (id, repo, topic, kind, body, body_sha256, size, created, expires)"
         " VALUES (?, ?, 't', 'unknown', ?, ?, 40, 1, 4000000000)",
-        ((i, REPO, ("hit " if i % 2 else "mis ") + "b" * 36, SHA) for i in range(1, 100_001)),
+        ((i, REPO, ("hit " if i % 2 else "mis ") + "b" * 36, SHA) for i in range(1, count + 1)),
     )
     conn.execute("INSERT INTO note_labels SELECT id, 'k', 'v' FROM notes WHERE id % 10 = 0")
     conn.execute("COMMIT")
@@ -399,9 +469,16 @@ def test_hundred_thousand_notes_bounded_memory(gw: FakeGateway) -> None:
     finally:
         tracemalloc.stop()
     doc = out_json(gw)
-    assert (doc["total"], doc["shown"]) == (50_000, 500)
-    assert ids(gw)[:2] == [99_999, 99_997]
-    assert peak < 8_000_000, peak
+    assert (doc["total"], doc["shown"]) == (count // 2, 500)
+    assert ids(gw)[:2] == [count - 1, count - 3]
+    return peak
+
+
+def test_memory_does_not_grow_with_the_store(tmp_path: Path) -> None:
+    small = _peak_search_memory(FakeGateway(tmp_path / "small"), 10_000)
+    large = _peak_search_memory(FakeGateway(tmp_path / "large"), 50_000)
+    assert large < 1_000_000, large  # measured about 0.5 MB
+    assert large < small * 1.5 + 100_000, (small, large)  # five times the notes, not the memory
 
 
 # --- goldens ---------------------------------------------------------------------------------

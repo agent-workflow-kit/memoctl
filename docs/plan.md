@@ -34,7 +34,8 @@ Status: 0.1.0-design, 2026-11-18. This plan implements [interface.md](interface.
 | `cmd_add.py` | 3 | The `add` command: the 14 ordered steps, one function each. |
 | `notes.py` | 3 and 6 | The rules `add` calls (dedupe, supersede, limits: #17, #18), `delete` (chain repointing), `prune`. |
 | `logfile.py` | 3 | `log.jsonl` append and rotation. |
-| `search.py` | 4 | Term parsing and streaming matching. |
+| `searchmatch.py` | 4 | Search term parsing and matching. |
+| `cmd_search.py` | 4 | The `search` command. |
 | `sanitize.py` | 4 and 5 | The read-time sanitizer. |
 | `render.py` | 4 | Terminal rendering of stored text for `list`, `show` and the other human output (not `context`). |
 | `context_render.py` | 5 | The context block (plain and fenced) and the `--json` document, pure functions over a `Selection`. |

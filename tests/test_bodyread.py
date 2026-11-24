@@ -593,6 +593,18 @@ def test_every_reason_has_a_fixed_message() -> None:
     assert all(m and "\n" not in m for m in messages)
 
 
+def test_text_field_messages_use_search_text_wording() -> None:
+    assert BodyError("too_long", 5, "text").message == "the search text is over the size limit"
+    assert BodyError("symlink", 5, "text").message == "the search text file is a symbolic link"
+    assert BodyError("not_regular", 5, "text").message == (
+        "the search text source is not a regular file"
+    )
+    assert BodyError("unreadable", 5, "text").message == "the search text source cannot be read"
+    assert BodyError("terminal", 5, "text").message == BodyError("terminal", 5).message
+    assert BodyError("too_long", 5).message == "the body is over the size limit"
+    assert BodyError("symlink", 5, "label").message == "the body file is a symbolic link"
+
+
 def test_unknown_reason_is_rejected() -> None:
     with pytest.raises(ValueError):
         BodyError("because", 5)
