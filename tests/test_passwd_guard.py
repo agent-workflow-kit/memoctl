@@ -56,18 +56,22 @@ def test_the_marker_opts_out_of_the_guard() -> None:
     assert pwd.getpwuid(os.getuid()).pw_dir == passwd_guard.REAL_HOME
 
 
-def test_the_backstop_reports_a_directory_that_appeared_or_changed(tmp_path: Path) -> None:
+def test_the_backstop_reports_a_directory_that_appeared(tmp_path: Path) -> None:
     before = passwd_guard.real_state_snapshot(tmp_path)
     assert before == {rel: None for rel in passwd_guard.WATCHED}
     assert passwd_guard.changed_paths(before, passwd_guard.real_state_snapshot(tmp_path)) == []
-    state = tmp_path / ".local/state/memoctl"
-    state.mkdir(parents=True)
+    (tmp_path / ".local/state/memoctl").mkdir(parents=True)
     appeared = passwd_guard.real_state_snapshot(tmp_path)
     assert passwd_guard.changed_paths(before, appeared) == [".local/state/memoctl"]
+
+
+def test_the_backstop_ignores_a_directory_that_already_existed(tmp_path: Path) -> None:
+    state = tmp_path / ".local/state/memoctl"
+    state.mkdir(parents=True)
+    before = passwd_guard.real_state_snapshot(tmp_path)
     os.utime(state, ns=(1, 1))
     touched = passwd_guard.real_state_snapshot(tmp_path)
-    assert passwd_guard.changed_paths(appeared, touched) == [".local/state/memoctl"]
+    assert touched != before
+    assert passwd_guard.changed_paths(before, touched) == []
     state.rmdir()
-    assert passwd_guard.changed_paths(touched, passwd_guard.real_state_snapshot(tmp_path)) == [
-        ".local/state/memoctl"
-    ]
+    assert passwd_guard.changed_paths(before, passwd_guard.real_state_snapshot(tmp_path)) == []

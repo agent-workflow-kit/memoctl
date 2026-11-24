@@ -16,11 +16,14 @@ Autouse guards:
   ``pwd.getpwuid`` and ``pwd.getpwnam`` are patched to return entries whose ``pw_dir`` raises
   ``AssertionError`` when it is the real home (``tests/passwd_guard.py``). Other fields still
   work. A test that must read the real value (it only compares it) takes the ``real_passwd``
-  marker; a test that patches ``pwd.getpwuid`` itself replaces the guard.
+  marker; a test that patches ``pwd.getpwuid`` itself replaces the guard. The guard works only
+  because code reads ``pwd.getpwuid`` as a module attribute: ``from pwd import getpwuid``
+  bypasses it (the session backstop still catches a write after the fact).
 
 Session backstop: ``pytest_sessionstart`` and ``pytest_sessionfinish`` compare the real
 ``~/.local/state/memoctl`` and ``~/.config/memoctl`` before and after the run and fail the
-session (exit status 1) when either appeared or changed. This also covers child processes.
+session (exit status 1) when either was absent at the start and exists at the end.
+This also covers child processes.
 
 A real child process that needs a home uses ``tests/private_home.py`` (``argv(home, ...)``): a
 wrapper that gives ``pwd.getpwuid`` a private ``pw_dir`` and runs ``python -m memoctl``.

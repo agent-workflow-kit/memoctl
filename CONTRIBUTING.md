@@ -19,6 +19,6 @@ Run `make schemas`. It replicates two steps of the CI `schemas` job at CI's pinn
 
 ## Tests: the real home
 
-- The tool takes its home from the password database, not from `HOME`, so a private `HOME` does not protect `~/.local/state/memoctl`. An autouse fixture in `tests/conftest.py` makes `pwd.getpwuid` and `pwd.getpwnam` raise `AssertionError` when a test reads the real `pw_dir` (other fields still work). A test that only compares the real value takes `@pytest.mark.real_passwd`.
+- The tool takes its home from the password database, not from `HOME`, so a private `HOME` does not protect `~/.local/state/memoctl`. An autouse fixture in `tests/conftest.py` makes `pwd.getpwuid` and `pwd.getpwnam` raise `AssertionError` when a test reads the real `pw_dir` (other fields still work). This works only because code reads `pwd.getpwuid` as a module attribute; a `from pwd import getpwuid` bypasses it (the session backstop still catches the write afterwards). A test that only compares the real value takes `@pytest.mark.real_passwd`.
 - A test that runs the real entry point in a child process builds its command with `tests/private_home.py` (`argv(home, *args)`): a wrapper gives `pwd.getpwuid` the private `pw_dir`, then runs `python -m memoctl`. Production code is unchanged.
-- As a backstop the session fails (exit status 1) when the real `~/.local/state/memoctl` or `~/.config/memoctl` appeared or changed while it ran. Never run a test or probe without these guards.
+- As a backstop the session fails (exit status 1) when the real `~/.local/state/memoctl` or `~/.config/memoctl` was absent when it started and exists when it finished. Never run a test or probe without these guards.

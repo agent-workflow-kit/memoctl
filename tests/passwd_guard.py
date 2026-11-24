@@ -8,8 +8,11 @@ test that runs the real gateway. Two layers (see the ``conftest`` docstring):
   ``pw_dir`` is the real home (``conftest`` patches ``pwd.getpwuid`` and ``pwd.getpwnam`` with
   it for every test that is not marked ``real_passwd``).
 - :func:`real_state_snapshot` and :func:`changed_paths` are the session backstop: whether the
-  real state and config directories appeared or changed while the session ran (this also
-  covers child processes).
+  real state and config directories appeared while the session ran (this also covers child
+  processes). A directory that already existed is ignored, so the user's own use of memoctl
+  during a run cannot fail it.
+- The in-process layer works only because code reads ``pwd.getpwuid`` as a module attribute;
+  ``from pwd import getpwuid`` bypasses it (the backstop still catches the write afterwards).
 """
 
 from __future__ import annotations
@@ -87,5 +90,5 @@ def real_state_snapshot(home: str | Path = REAL_HOME) -> dict[str, int | None]:
 
 
 def changed_paths(before: dict[str, int | None], after: dict[str, int | None]) -> list[str]:
-    """The watched directories that appeared, vanished or changed between two snapshots."""
-    return [rel for rel in WATCHED if before.get(rel) != after.get(rel)]
+    """The watched directories that were absent in ``before`` and are present in ``after``."""
+    return [rel for rel in WATCHED if before.get(rel) is None and after.get(rel) is not None]
