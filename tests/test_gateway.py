@@ -61,6 +61,7 @@ def test_now_is_timezone_aware_utc() -> None:
     assert now.utcoffset() == UTC.utcoffset(now)
 
 
+@pytest.mark.real_passwd
 def test_home_comes_from_the_password_database_not_the_environment() -> None:
     assert os.environ["HOME"] != pwd.getpwuid(os.getuid()).pw_dir
     assert RealGateway().home() == Path(pwd.getpwuid(os.getuid()).pw_dir)

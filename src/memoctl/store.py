@@ -32,8 +32,10 @@ deadline installs its progress handler through ``open_store(configure=deadline.c
 an interrupted statement arrives as ``StoreError("timeout")``.
 todo(#15): the change log is appended after :meth:`Store.write` returns (after the commit).
 ``add``'s write is :meth:`Store.insert_note` (the note, its labels and its rate row), run inside
-``Store.write()``. todo(#17): the dedupe and supersede queries and todo(#18): the limit queries
-are added here by their issues and run inside the same transaction.
+``Store.write()``. The dedupe and supersede queries (:meth:`Store.live_with_key`,
+:meth:`Store.get_note`, :meth:`Store.replaced_note_id`, :meth:`Store.mark_superseded`) run inside
+the same transaction; the rules that use them are ``notes.py``'s. todo(#18): the limit queries
+are added here by their issue.
 """
 
 from __future__ import annotations
@@ -600,6 +602,65 @@ class Store:
             ).close()
         self.execute("INSERT INTO rate (repo, at) VALUES (?, ?)", (repo, created)).close()
         return note_id
+
+    def mark_superseded(self, target: int, by: int) -> None:
+        """Set ``superseded_by`` of the live-pointer note ``target`` to ``by`` (``add`` step 13).
+
+        Inside :meth:`write`, after the checks of the same transaction: the note must still be
+        unmarked, else ``StoreError("db_corrupt")`` and the transaction rolls back (the checks
+        and this write share one lock, so this means the row changed under the tool).
+        """
+        if self.mode is Mode.READ:
+            raise RuntimeError("update on a read-only store")
+        cursor = self.execute(
+            "UPDATE notes SET superseded_by = ? WHERE id = ? AND superseded_by IS NULL",
+            (by, target),
+        )
+        changed = cursor.rowcount
+        cursor.close()
+        if changed != 1:
+            raise StoreError(DB_CORRUPT)
+
+    # -- the add checks (read inside the write transaction)
+    def get_note(self, note_id: int) -> NoteRow | None:
+        """The note ``note_id`` with its labels, or ``None`` when no such row exists. A row that
+        fails its checks raises ``StoreError("db_corrupt")``: a write never builds on it."""
+        for row in self.notes("WHERE id = ?", (note_id,), labels=True, on_bad="raise"):
+            return row
+        return None
+
+    def live_with_key(
+        self, repo: str, topic: str, kind: str, body_sha256: str, now: int
+    ) -> Iterator[NoteRow]:
+        """The notes of ``repo`` and ``topic`` with this kind and ``body_sha256`` that are live
+        at ``now`` (not superseded, ``expires`` after ``now``), highest id first, with their
+        labels. A row that fails its checks is skipped. The caller compares the label sets."""
+        return self.notes(
+            "WHERE repo = ? AND topic = ? AND kind = ? AND body_sha256 = ?"
+            " AND superseded_by IS NULL AND expires > ?",
+            (repo, topic, kind, body_sha256, now),
+            labels=True,
+            descending=True,
+        )
+
+    def replaced_note_id(self, note_id: int, repo: str | None = None) -> int | None:
+        """The smallest valid id of a note whose ``superseded_by`` is ``note_id`` (one at most
+        in a store the tool wrote): the note ``note_id`` replaced. With ``repo`` only a note of
+        that repo counts, so a planted pointer from another repo never shows its id."""
+        if repo is None:
+            cursor = self.execute(
+                "SELECT id FROM notes WHERE superseded_by = ? AND id <= ? ORDER BY id LIMIT 1",
+                (note_id, MAX_ID),
+            )
+        else:
+            cursor = self.execute(
+                "SELECT id FROM notes WHERE superseded_by = ? AND id <= ? AND repo = ?"
+                " ORDER BY id LIMIT 1",
+                (note_id, MAX_ID, repo),
+            )
+        found = cursor.fetchone()
+        cursor.close()
+        return found[0] if found is not None and type(found[0]) is int else None
 
     # -- rows
     def notes(

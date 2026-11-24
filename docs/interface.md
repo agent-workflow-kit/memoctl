@@ -225,11 +225,12 @@ The order, with the exit code of each refusal. Config is loaded right after argv
 
 - (a) Without `--supersedes`: if a `live` note with the same key exists, nothing is created and the output is that note (the highest such id) with `created: false`, exit 0.
 - (b) With `--supersedes <T>`: if note T exists, its `superseded_by` names a note S with the same key, and S is `live`, nothing is created and the output is S with `created: false`, exit 0. This is the retry of an earlier identical call. Otherwise no dedupe applies: the supersede checks and the limits run and a new note is created, even when a live note with the same key exists. So `add --supersedes <id>` with note <id>'s own body creates a fresh note with a fresh lifetime that replaces it (the way to refresh a note).
+- A target T in another repo is no hit (the supersede check then refuses it with `supersede_mismatch`), so a planted pointer cannot leak another repo's id. A `--supersedes` target that fails its row checks exits 12 `db_corrupt`; a corrupt dedupe candidate under (a) or (b) is skipped.
 - So a dedupe hit is always a live note. A retry after S expired or was superseded exits 20 `already_superseded` (T is still superseded): the caller supersedes the current note instead.
 - A retry after the earlier note was deleted creates a new note; a retry whose target no longer exists exits 10.
 - A dedupe hit runs no limit and writes nothing (no log record). A hit returns the stored note whoever wrote it, with that note's own lifetime (which may be shorter than this call would have given); a caller that needs a different lifetime supersedes the note.
 
-The output of a hit is the stored note's fields (`id`, `expires`, `size`, `body_sha256`, `supersedes`, labels as stored) and `warnings` computed from this call's inputs (`expires_capped` and `kind_not_shown`; `expires_extended` is never reported on a hit). This call's `--expires` is not applied: `expires` is the stored value.
+The output of a hit is the stored note's fields (`id`, `expires`, `size`, `body_sha256`, `supersedes`, labels as stored; under (b) `supersedes` is T, under (a) the smallest id of a note *of the same repo* whose `superseded_by` is the hit) and `warnings` computed from this call's inputs (`expires_capped` and `kind_not_shown`; `expires_extended` is never reported on a hit). This call's `--expires` is not applied: `expires` is the stored value.
 
 `--dry-run` runs steps 1 to 7 and writes nothing; it never looks at the state directory or `state.db`. The output has `id` null, `created` true (the call is valid; dedupe, the supersede checks and the limits are not run), `supersedes` the requested target unchecked, and `expires` the call's own lifetime (never raised by a target, so never `expires_extended`).
 

@@ -142,6 +142,7 @@ def test_the_wal_switch_waits_are_capped_too(state: StateDir) -> None:
 
 # -- R6: acceptance criterion 1, with a real lock holder and a real child ----------------------
 
+# The child below overrides home() in its own gateway subclass (no password database read).
 CHILD = """\
 import os, sys
 from pathlib import Path

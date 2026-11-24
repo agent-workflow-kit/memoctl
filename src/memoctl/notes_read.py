@@ -25,7 +25,6 @@ from memoctl.gateway import Gateway
 from memoctl.lifetime import format_timestamp
 from memoctl.statedir import open_state_dir
 from memoctl.store import (
-    MAX_ID,
     MAX_LABELS,
     NOTE_COLUMNS,
     Mode,
@@ -235,9 +234,5 @@ def fetch_note(store: Store, note_id: int, now: int) -> dict[str, Any] | None:
         if not found:
             return None
         row = found[0]
-        earlier = store.execute(
-            "SELECT id FROM notes WHERE superseded_by = ? AND id <= ? ORDER BY id LIMIT 1",
-            (note_id, MAX_ID),
-        ).fetchone()
-    supersedes = earlier[0] if earlier is not None and type(earlier[0]) is int else None
+        supersedes = store.replaced_note_id(note_id)
     return show_document(row, note_status(row, now), supersedes)

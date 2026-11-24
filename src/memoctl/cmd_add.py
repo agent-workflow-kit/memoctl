@@ -15,12 +15,12 @@ can run before an earlier refusal. The rules of the order:
   before the log append and the output, so a timeout is never reported after the change is
   durable.
 
-Seams owned by later issues are marked with ``TODO(#N)`` at the exact step: #17 (dedupe,
-``--supersedes``), #18 (limits), #19 (``--dry-run`` and the warning lines), #20 (concurrency).
+Seams owned by later issues are marked with ``TODO(#N)`` at the exact step: #18 (limits), #19
+(``--dry-run`` and the warning lines), #20 (concurrency).
 
 A crash (or a signal) between the commit of step 13 and the log append of step 14 leaves a stored
-note with no log record, as the interface documents; the retry then finds the note (#17) and
-writes no record either.
+note with no log record, as the interface documents; the retry then finds the note and
+writes no record either (a dedupe hit).
 
 Nothing here renders an exception: failures leave as typed exceptions that ``cli_errors`` maps
 to fixed text, and no value from argv, stdin or the environment is put in a message.
@@ -58,6 +58,7 @@ from memoctl.lifetime import (
     seconds_since_epoch,
 )
 from memoctl.logfile import LogRecord, append_record
+from memoctl.notes import NoteKey, check_supersede_target, find_duplicate
 from memoctl.render import emit, format_add
 from memoctl.secretscan import check_secrets
 from memoctl.statedir import StateDir, open_state_dir
@@ -235,25 +236,40 @@ def step9_open_store(state: StateDir) -> Store:
 
 def step10_dedupe(store: Store, plan: Plan) -> Result | None:
     """Step 10: the retry and dedupe check; a stored live note with the same key is returned
-    with ``created`` false and nothing is written.
+    with ``created`` false and nothing is written (:func:`memoctl.notes.find_duplicate`).
 
-    TODO(#17): dedupe (without ``--supersedes``: a live note with the same repo, topic, kind,
-    label set and body hash, the highest id; with it: the target's ``superseded_by`` note when
-    it has the same key and is live). A hit reports the stored note's own ``expires`` and never
-    ``expires_extended`` (``build_warnings(..., hit=True)``)."""
-    return None
+    A hit reports the stored note's own ``expires`` and ``supersedes`` and the warnings of this
+    call, never ``expires_extended`` (``build_warnings(..., hit=True)``)."""
+    call = plan.call
+    key = NoteKey(call.repo, call.topic, plan.kind.kind, frozenset(call.labels), plan.body_sha256)
+    row = find_duplicate(store, key, plan.created, call.supersedes)
+    if row is None:
+        return None
+    # Under (b) the target is the note this retry replaced; under (a) the pointer is looked up
+    # in the hit's own repo only, so a planted row of another repo never shows its id.
+    supersedes = (
+        call.supersedes if call.supersedes is not None else store.replaced_note_id(row.id, row.repo)
+    )
+    return Result(
+        row.id, False, row.repo, row.topic, row.kind, row.labels, row.expires,
+        supersedes, row.size, row.body_sha256,
+        build_warnings(plan, plan.lifetime, hit=True),
+    )  # fmt: skip
 
 
 def step11_supersede(store: Store, plan: Plan) -> tuple[Lifetime, int | None]:
     """Step 11: the ``--supersedes`` checks (exit 10, then 20 ``supersede_mismatch``, then 20
     ``already_superseded``); with a target the lifetime is raised to the target's ``expires``
-    when that is later (``compute_lifetime(..., target_expires=...)``).
-
-    TODO(#17): the checks, the lifetime raise and marking the target superseded in step 13.
-    Until then ``--supersedes`` is refused here as an internal error, never silently ignored."""
-    if plan.call.supersedes is not None:
-        raise NotImplementedError("TODO(#17): --supersedes")
-    return plan.lifetime, None
+    when that is later (``compute_lifetime(..., target_expires=...)``). The target is marked
+    superseded by step 13, in the same transaction."""
+    call = plan.call
+    if call.supersedes is None:
+        return plan.lifetime, None
+    target = check_supersede_target(store, call.supersedes, call.repo)
+    lifetime = compute_lifetime(
+        plan.created, plan.config.retention.max_age, call.requested, target.expires
+    )
+    return lifetime, target.id
 
 
 def step12_limits(store: Store, plan: Plan) -> None:
@@ -265,8 +281,8 @@ def step12_limits(store: Store, plan: Plan) -> None:
 
 
 def step13_insert(store: Store, plan: Plan, lifetime: Lifetime, supersedes: int | None) -> Result:
-    """Step 13 (the insert part): the note, its labels and its rate row, in the transaction the
-    caller commits."""
+    """Step 13 (the insert part): the note, its labels and its rate row, and ``superseded_by`` of
+    the ``--supersedes`` target, in the transaction the caller commits."""
     call = plan.call
     note_id = store.insert_note(
         repo=call.repo,
@@ -279,6 +295,8 @@ def step13_insert(store: Store, plan: Plan, lifetime: Lifetime, supersedes: int 
         expires=lifetime.expires,
         labels=call.labels,
     )
+    if supersedes is not None:
+        store.mark_superseded(supersedes, note_id)
     return Result(
         note_id, True, call.repo, call.topic, plan.kind.kind, call.labels, lifetime.expires,
         supersedes, plan.size, plan.body_sha256,
@@ -378,7 +396,6 @@ def configure(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--label", action="append", default=[], help="key=value (repeatable)")
     parser.add_argument("--kind", default=None, help="the claimed author kind")
-    # TODO(#17): --supersedes is parsed and checked here; its effect is step 11.
     parser.add_argument("--supersedes", default=None, help="the id of the note this replaces")
     parser.add_argument("--expires", default=None, help="a lifetime such as 2h or 7d")
 
