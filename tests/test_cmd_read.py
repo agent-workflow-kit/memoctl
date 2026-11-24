@@ -134,10 +134,13 @@ def test_filters_repo_topic_kind_label(gw: FakeGateway) -> None:
     )
     run(gw, "list", "--json", "--repo", REPO)
     assert ids(gw) == [3, 2]
+    assert out_json(gw)["hidden"] == 1
     run(gw, "list", "--json", "--topic", "a")
     assert ids(gw) == [2, 1]
+    assert out_json(gw)["hidden"] == 1  # 4 matches and is superseded
     run(gw, "list", "--json", "--kind", "k2")
     assert ids(gw) == [3]
+    assert out_json(gw)["hidden"] == 1
     run(gw, "list", "--json", "--label", "env=ci")
     assert ids(gw) == [3, 2]
     run(gw, "list", "--json", "--label", "env=ci", "--label", "team=x")
@@ -149,6 +152,21 @@ def test_filters_repo_topic_kind_label(gw: FakeGateway) -> None:
     assert ids(gw) == [3, 2]
     run(gw, "list", "--json", "--label", "env=")  # empty value is a valid, absent pair
     assert ids(gw) == []
+
+
+def test_hidden_counts_expired_under_kind_and_topic_filters(gw: FakeGateway) -> None:
+    seed(
+        gw,
+        [
+            dict(id=1, topic="a", kind="k1"),
+            dict(id=2, topic="a", kind="k1", expires=NOW - 1),
+            dict(id=3, topic="b", kind="k2", expires=NOW - 1),
+        ],
+    )
+    run(gw, "list", "--json", "--kind", "k1")
+    assert (ids(gw), out_json(gw)["hidden"]) == ([1], 1)
+    run(gw, "list", "--json", "--topic", "a")
+    assert (ids(gw), out_json(gw)["hidden"]) == ([1], 1)
 
 
 def test_many_label_filters_do_not_grow_the_sql(gw: FakeGateway) -> None:
@@ -302,10 +320,15 @@ def test_foreign_database_is_corrupt(gw: FakeGateway) -> None:
 
 def test_read_never_creates_or_writes(gw: FakeGateway) -> None:
     seed(gw, [dict(id=1)]).close()
-    before = db_path(gw).read_bytes()
+    state_dir = db_path(gw).parent
+    before_bytes = db_path(gw).read_bytes()
+    before_listing = {p.name for p in state_dir.iterdir()}
     run(gw, "list")
     run(gw, "show", "1")
-    assert db_path(gw).read_bytes() == before
+    assert db_path(gw).read_bytes() == before_bytes
+    added = {p.name for p in state_dir.iterdir()} - before_listing
+    assert added <= {"state.db-wal", "state.db-shm"}
+    assert before_listing - {p.name for p in state_dir.iterdir()} == set()
 
 
 # --- show ------------------------------------------------------------------------------------
@@ -448,6 +471,7 @@ def test_goldens(gw: FakeGateway) -> None:
         "list/limited.txt": ("list", "--limit", "1"),
         "show/live.json": ("show", "3", "--json"),
         "show/superseded.json": ("show", "1", "--json"),
+        "show/expired.json": ("show", "2", "--json"),
         "show/live.txt": ("show", "3"),
         "show/superseded.txt": ("show", "1"),
         "show/expired.txt": ("show", "2"),

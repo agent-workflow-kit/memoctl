@@ -1,9 +1,11 @@
 """``memoctl list`` (interface.md, ``list``).
 
 Order: arguments are checked by the parser (grammars, ``--limit``), the store is opened
-read-only (a missing store is an empty result, never created), one pass reads and counts
-(``notes_read.scan``), the deadline is disarmed, then the output is written. Nothing is
-printed before the disarm point, so a deadline never leaves partial output.
+read-only (a missing store is an empty result; no state directory, ``state.db`` or row is
+created or modified, though SQLite may add ``-wal``/``-shm`` sidecars on a read-only WAL
+open), one pass reads and counts (``notes_read.scan``), the deadline is disarmed, then the
+output is written. Nothing is printed before the disarm point, so a deadline never leaves
+partial output.
 """
 
 from __future__ import annotations

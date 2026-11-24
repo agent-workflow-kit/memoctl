@@ -83,7 +83,9 @@ class ListResult:
 
 def open_read_store(gateway: Gateway) -> Store | None:
     """The store in ``READ`` mode with the deadline's hooks installed; ``None`` for an empty
-    store (no state directory, no ``state.db`` or an uninitialized one). Nothing is created."""
+    store (no state directory, no ``state.db`` or an uninitialized one). No state directory,
+    ``state.db`` or row is created or modified (SQLite may add ``-wal``/``-shm`` sidecars on a
+    read-only WAL open)."""
     state = open_state_dir(gateway, create=False)
     if state is None:
         return None
