@@ -6,6 +6,7 @@ from __future__ import annotations
 from memoctl import (
     cmd_add,
     cmd_context,
+    cmd_cron,
     cmd_delete,
     cmd_list,
     cmd_prune,
@@ -24,5 +25,5 @@ COMMANDS: tuple[Command, ...] = (
     cmd_context.COMMAND,
     cmd_delete.COMMAND,
     cmd_prune.COMMAND,
-    # todo(#33): cron
+    cmd_cron.COMMAND,
 )

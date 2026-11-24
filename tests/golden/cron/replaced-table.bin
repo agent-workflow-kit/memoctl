@@ -1,0 +1,6 @@
+MAILTO=me@example.com
+0 * * * * /usr/bin/true
+# memoctl managed
+17 3 * * * PATH=/home/example/.local/bin:/usr/local/bin:/usr/bin:/bin memoctl prune --quiet --actor auto:memoctl-cron
+# memoctl managed end
+# tail
