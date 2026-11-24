@@ -29,6 +29,7 @@ from memoctl.cli_errors import (
 from memoctl.deadline import Deadline, initial_seconds
 from memoctl.gateway import Gateway, RealGateway
 from memoctl.grammar import matches
+from memoctl.phases import Phases
 
 STANDARD_FDS = ((0, False), (1, True), (2, True))  # (descriptor, open for writing)
 
@@ -112,4 +113,7 @@ def _run(
             and not matches("actor", namespace.actor)
         ):
             raise UsageError("actor")
-        return by_name[namespace.command].run(namespace, gateway)
+        with Phases(gateway, enabled=bool(getattr(namespace, "verbose", False))) as phases:
+            code = by_name[namespace.command].run(namespace, gateway)
+            phases.flush()  # only a command that returned: a failure prints its error line alone
+        return code

@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from memoctl import deadline
+from memoctl import deadline, phases
 from memoctl.cli_args import Command
 from memoctl.cli_errors import NoteNotFoundError
 from memoctl.gateway import Gateway
@@ -32,18 +32,22 @@ def configure(parser: argparse.ArgumentParser) -> None:
 def run(args: argparse.Namespace, gateway: Gateway) -> int:
     now = int(gateway.now().timestamp())
     store = open_read_store(gateway)
+    phases.mark("open_store")
     document = None
     if store is not None:
         with store:
             document = fetch_note(store, args.id, now)
+    phases.mark("read")
     deadline.current().disarm()
     if document is None:
         raise NoteNotFoundError(args.id)
     if args.json:
         gateway.write_out(json.dumps(document, ensure_ascii=True, separators=(",", ":")) + "\n")
+        phases.mark("output")
         return 0
     rendered: Rendered = format_show(document)
     emit(gateway, rendered)
+    phases.mark("output")
     return 0
 
 

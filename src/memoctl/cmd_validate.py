@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from memoctl import deadline
+from memoctl import deadline, phases
 from memoctl.cli_args import Command
 from memoctl.gateway import Gateway
 from memoctl.render import emit, format_validate
@@ -26,8 +26,10 @@ from memoctl.validation import ValidateResult, validate_store
 
 def run(args: argparse.Namespace, gateway: Gateway) -> int:
     result = validate_store(gateway, configure=deadline.current().configure_store)
+    phases.mark("validate")
     deadline.current().disarm()
     print_result(args, gateway, result)
+    phases.mark("output")
     return result.exit_code
 
 

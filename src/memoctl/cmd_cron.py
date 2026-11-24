@@ -23,7 +23,7 @@ import argparse
 import json
 from typing import Any
 
-from memoctl import deadline
+from memoctl import deadline, phases
 from memoctl.cli_args import Command, add_global_flags
 from memoctl.config import ConfigError, resolve_home
 from memoctl.cron_block import (
@@ -54,17 +54,23 @@ def configure(parser: argparse.ArgumentParser) -> None:
 def run(args: argparse.Namespace, gateway: Gateway) -> int:
     if args.action == "install":
         home = _install_home(gateway)
+        phases.mark("home")
         table = _read(gateway)
+        phases.mark("read_crontab")
         outcome, new, block = plan_install(table, home)
     else:
         resolve_home(gateway)
+        phases.mark("home")
         table = _read(gateway)
+        phases.mark("read_crontab")
         outcome, new, block = plan_uninstall(table)
+    phases.mark("plan")
     if new is not None and not args.dry_run:
         try:
             gateway.crontab_write(new)
         except GatewayError as exc:
             raise CrontabFailedError from exc
+        phases.mark("write_crontab")
     deadline.current().disarm()
     shown = [_text(line) for line in block]
     document: dict[str, Any] = {"outcome": outcome, "dry_run": bool(args.dry_run), "block": shown}
@@ -75,6 +81,7 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
     else:
         rendered = format_cron(outcome, dry_run=args.dry_run)
         emit(gateway, Rendered("" if args.quiet else rendered.out))
+    phases.mark("output")
     return 0
 
 

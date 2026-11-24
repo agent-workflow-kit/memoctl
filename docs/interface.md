@@ -340,7 +340,7 @@ SIGTERM, SIGINT or SIGHUP exits 128+N with no output. Like a deadline during a c
 
 First, before anything else opens a file (and before the `--json` pre-scan), the tool checks descriptors 0, 1 and 2 with `fstat` through the gateway and opens `/dev/null` on each one that is not open (0 read-only, 1 and 2 write-only), in ascending order (0, then 1, then 2), and checks that each open returned exactly the descriptor it was meant to fill (when it returned another one, the tool places it with `os.dup2` and closes the extra). So no file SQLite or the tool opens can take a standard descriptor, a closed stdout is a write to `/dev/null` (the exit code stands), and `--body-file -` with a closed stdin reads an empty body (exit 2).
 
-stdout and stderr are written as UTF-8 with errors replaced, never through the locale; `context` writes with `os.write` so a closed stdout never raises. A failure to write after the result was fixed is ignored. Without `--json`, a command that prints data prints human text on stdout ([Human output](#human-output)); `context` always prints its block on stdout. Status lines go to stderr and contain no note text, topic or label value. Warnings print on stderr as `warning (<name>): <fixed message>`; a log record that could not be written after the commit of `add` is the warning `warning (log_failed): the note was stored but its log record was not written` (never suppressed by `--quiet`; the exit code stays 0; after `delete` the line is `warning (log_failed): the notes were deleted but their log records were not all written`; after `prune` it is `warning (log_failed): the notes were pruned but their log records were not all written`); `--quiet` suppresses every stderr line except errors and warnings, and, without `--json`, the stdout result line of `add`, `delete`, `prune` and `cron` (so `memoctl prune --quiet` prints nothing on success). It never suppresses data (`list`, `show`, `search`, `context`, `validate`) or `--json` output; `--verbose` adds one line per phase with the elapsed milliseconds and never prints a body.
+stdout and stderr are written as UTF-8 with errors replaced, never through the locale; `context` writes with `os.write` so a closed stdout never raises. A failure to write after the result was fixed is ignored. Without `--json`, a command that prints data prints human text on stdout ([Human output](#human-output)); `context` always prints its block on stdout. Status lines go to stderr and contain no note text, topic or label value. Warnings print on stderr as `warning (<name>): <fixed message>`; a log record that could not be written after the commit of `add` is the warning `warning (log_failed): the note was stored but its log record was not written` (never suppressed by `--quiet`; the exit code stays 0; after `delete` the line is `warning (log_failed): the notes were deleted but their log records were not all written`; after `prune` it is `warning (log_failed): the notes were pruned but their log records were not all written`); `--quiet` suppresses every stderr line except errors and warnings, and, without `--json`, the stdout result line of `add`, `delete`, `prune` and `cron` (so `memoctl prune --quiet` prints nothing on success). It never suppresses data (`list`, `show`, `search`, `context`, `validate`) or `--json` output; `--verbose` adds one line per phase with the elapsed milliseconds and never prints a body ([Verbose](#verbose)).
 
 Text that came from a note and is printed without `--json` follows [Terminal rendering](#terminal-rendering), so a note cannot drive the terminal. `--json` prints stored values as they are (JSON-escaped); a consumer treats every field the schemas mark `x-untrusted` as untrusted: `repo`, `topic`, `kind`, `labels`, `body` and `text`, every value a note's writer chose.
 
@@ -358,6 +358,24 @@ A warning is a stderr line `warning (<name>): <fixed message>`, printed after th
 | `log_failed` | `prune` | `warning (log_failed): the notes were pruned but their log records were not all written` |
 | `prune_busy` | `prune` | `warning (prune_busy): another writer held the lock; nothing was pruned` |
 
+### Verbose
+
+`--verbose` (after the subcommand, like every global flag; after `--` it is a positional) prints one stderr line per finished phase: `verbose (<phase>): <n> ms`, where `<phase>` is a fixed lowercase identifier from the table below and `<n>` the whole milliseconds since the previous phase ended (the first counts from the end of argument parsing; the monotonic clock). A line never holds a value from the call, a note, the environment, a path, a count or a crontab, so it needs no escaping, and `--json` does not change it (stdout is never touched; the lines are not JSON).
+
+All phase lines are written in one stderr write after the command's last step: after the stdout result and after any `warning (...)` lines, and so after the deadline disarm points (nothing is printed while the timer can still fire, and `delete` prints nothing before its prompt or its commit). A command that fails is not profiled: it prints its documented error line alone, with no phase lines, so `--verbose` never changes an error's stderr, exit code or envelope; a `validate` that reports a failed check and a `context` exit 10 are results, and print their lines. A deadline that fires prints only its pre-built line. The one stderr write happens after the disarm; when stderr is stalled it is bounded by the gateway's write wait (`WRITE_WAIT_SECONDS`, 3 seconds without progress) and a failure of it is ignored (the exit code stands). A `transaction` mark is taken after the deadline disarm that follows the commit, never between a commit and its disarm. `context` is no exception to the flag: with `--verbose` it prints the lines on stderr (its stdout, the model context, is byte for byte what it prints without), and `--quiet` with `--verbose` stays exit 2. A phase that does not run prints no line (`add --dry-run` stops after `clock`; `cron` prints `write_crontab` only when it writes). Disarm points are not phases. `search` prints no breakdown of skipped rows.
+
+| Command | Phases, in order |
+|---|---|
+| `add` | `parse`, `config`, `body`, `secret_check`, `clock`, `open_store`, `transaction`, `log`, `output` (`--dry-run`: through `clock`, then `output`) |
+| `list` | `open_store`, `scan`, `output` |
+| `show` | `open_store`, `read`, `output` |
+| `search` | `parse`, `open_store`, `scan`, `output` |
+| `context` | `config`, `open_store`, `select`, `render`, `output` (no repo, a repo over 255 characters, or no store: only the phases that ran, ending `render`, `output`) |
+| `delete` | `parse`, `lookup`, `prompt` (without `--yes`), `transaction`, `log`, `output` |
+| `prune` | `parse`, `open_store`, `transaction`, `log`, `output`; only the phases that ran print a line: `--dry-run`: `parse`, `select`, `output`; no state directory: `parse`, `output`; a state directory without `state.db` (or an uninitialized one): `parse`, `open_store`, `log`, `output` (no transaction ran); busy: `parse`, `output` when the lock was refused while opening the store, `parse`, `open_store`, `output` when it was refused at the write transaction |
+| `validate` | `validate`, `output` |
+| `cron install`, `cron uninstall` | `home`, `read_crontab`, `plan`, `write_crontab` (only when it writes), `output` |
+
 ### Output on failure
 
 The envelope is one JSON object followed by LF; nothing else is printed on stdout.
@@ -369,7 +387,7 @@ The envelope is one JSON object followed by LF; nothing else is printed on stdou
 | `add` | 10, 12, 20 | empty | envelope | one status line |
 | `list`, `search` | 12, 20 | empty | envelope | one status line |
 | `show` | 10, 12, 20 | empty | envelope | one status line |
-| `context` | 10 | empty | context document | nothing |
+| `context` | 10 | empty | context document | nothing (with `--verbose`: the [phase lines](#verbose)) |
 | `context` | 12, 20 | empty | envelope | one status line |
 | `delete` | 10, 12, 13, 20 | empty | envelope | one status line |
 | `prune` | 12, 20 | empty | envelope | one status line |

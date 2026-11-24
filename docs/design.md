@@ -129,6 +129,7 @@ Package `src/memoctl/` (design guide section 15):
 | `cmd_cron.py` | The `cron` command: nested `install` and `uninstall` (global flags on the leaf), the home check, one `crontab -l` and at most one `crontab -`, the deadline disarm before the output. |
 | `gateway.py` | The only module that reads the clock (wall and monotonic), randomness, the password database, the terminal, argv, the standard descriptors, the filesystem handles, stdin and `crontab`, and the only one that touches signals and threads (`alarm_arm`, `exit_now`); tests replace it. |
 | `deadline.py` | The command deadline policy on the gateway's alarm: one deadline per process, the pre-built timeout report, the disarm point, the SQLite progress callback and busy-timeout cap. |
+| `phases.py` | The `--verbose` recorder: phase marks with a fixed-identifier check (`[a-z][a-z_]*`), a monotonic clock through the gateway, one stderr flush after the command returns. |
 
 ## Data model
 

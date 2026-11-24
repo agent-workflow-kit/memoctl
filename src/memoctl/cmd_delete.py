@@ -25,7 +25,7 @@ import argparse
 import json
 from datetime import datetime
 
-from memoctl import deadline
+from memoctl import deadline, phases
 from memoctl.author import resolve_actor
 from memoctl.cli_args import Command
 from memoctl.cli_errors import NeedsHumanError, NoteNotFoundError, UsageError
@@ -96,12 +96,15 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
     if not 1 <= len(ids) <= MAX_IDS:
         raise UsageError("id")
     actor = resolve_actor(gateway, args.actor)
+    phases.mark("parse")
     targets = lookup(gateway, ids)
+    phases.mark("lookup")
     if not args.yes:
         with deadline.current().paused():
             answer = gateway.ask_tty(prompt_for(targets))
         if not confirmed(answer):
             raise NeedsHumanError
+        phases.mark("prompt")
     now = gateway.now()
     seconds = int(now.timestamp())
     state = open_state_dir(gateway, create=False)
@@ -122,10 +125,13 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
             # Right after the commit: a timeout is never reported once the change is durable
             # (when the timer ran out during the commit this call exits 12, with no log record).
             deadline.current().disarm()
+            phases.mark("transaction")
         finally:
             store.close()
         log_failed = append_records(state, plan, actor.actor, actor.source.value, now)
+        phases.mark("log")
     print_result(args, gateway, plan, log_failed=log_failed)
+    phases.mark("output")
     return 0
 
 
