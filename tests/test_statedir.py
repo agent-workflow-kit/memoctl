@@ -19,7 +19,7 @@ import pytest
 
 from memoctl.config import ConfigError
 from memoctl.gateway import DirHandle, GatewayError, RealGateway
-from memoctl.statedir import StateAccessError, UnsafeStateError, open_state_dir
+from memoctl.statedir import SETTLE_TRIES, StateAccessError, UnsafeStateError, open_state_dir
 from tests.fake_gateway import FakeGateway
 
 
@@ -600,3 +600,54 @@ def test_check_db_checks_the_file_inside_the_checked_directory(
         (_state(home) / "state.db").write_bytes(b"")
         (_state(home) / "state.db").chmod(0o666)
         assert sd.check_db() is True  # the held directory's own, safe, file
+
+
+# --- a creator that has not yet set the mode (first-run race, #20) ---------------------------
+
+
+class _SlowCreator(HomeGateway):
+    """The first ``pause`` plays the creator finishing: it sets 0700 on the named levels."""
+
+    def __init__(self, home: Path, levels: list[Path]) -> None:
+        super().__init__(home)
+        self.levels = levels
+        self.pauses: list[float] = []
+
+    def pause(self, seconds: float) -> None:
+        self.pauses.append(seconds)
+        for level in self.levels:
+            level.chmod(0o700)
+        self.levels = []
+
+
+@pytest.mark.parametrize("mode", [0o000, 0o100, 0o500, 0o300])
+def test_a_level_a_creator_has_not_yet_chmodded_is_waited_for_not_refused(
+    home: Path, mode: int
+) -> None:
+    levels = [home / ".local", home / ".local" / "state", _state(home)]
+    for level in levels:
+        level.mkdir()
+    for level in reversed(levels):  # the leaf first, so the parents stay reachable meanwhile
+        level.chmod(mode)
+    gw = _SlowCreator(home, levels)
+    with open_state_dir(gw, create=True) as sd:
+        assert sd is not None
+    assert gw.pauses  # it waited
+    for level in levels:
+        assert _mode(level) == 0o700
+
+
+def test_a_final_level_that_never_settles_is_still_handled_as_before(home: Path) -> None:
+    for level in (home / ".local", home / ".local" / "state", _state(home)):
+        level.mkdir()
+    _state(home).chmod(0o000)
+    gw = HomeGateway(home)
+    pauses: list[float] = []
+    gw.pause = pauses.append  # type: ignore[method-assign]
+    try:
+        with pytest.raises(UnsafeStateError) as info:
+            open_state_dir(gw, create=True)
+    finally:
+        _state(home).chmod(0o700)
+    assert info.value.reason == "mode"
+    assert len(pauses) == 2 * SETTLE_TRIES  # bounded: the wait runs twice

@@ -34,6 +34,7 @@ from memoctl.gateway import DirHandle, Gateway, PathInfo
 
 __all__ = [
     "DB_NAME",
+    "SETTLE_TRIES",
     "STATE_PARTS",
     "StateAccessError",
     "StateDir",
@@ -49,6 +50,11 @@ FILE_MODE = 0o600
 OWNER_USE = 0o500  # read and search, which opening a directory needs
 FORBIDDEN_BITS = 0o077
 ATTEMPTS = 3  # a rival may create or remove a level between our open and our mkdir
+# A creator makes a level with ``mkdir`` (the umask applies) and sets 0700 right after, so for a
+# moment the level has less than 0700. Another process that sees it waits for the creator,
+# for at most SETTLE_TRIES * SETTLE_PAUSE (0.3 s); a level that stays so is then handled as before.
+SETTLE_TRIES = 30
+SETTLE_PAUSE = 0.01
 
 # Errors from opening an existing final component that mean "something here is not a directory
 # we may use": a symlink (ELOOP, or EMLINK on some systems) or a non-directory (ENOTDIR).
@@ -185,13 +191,55 @@ def _open_final(cur: DirHandle, name: str, uid: int) -> DirHandle | None:
         raise
 
 
-def _descend(cur: DirHandle, name: str, *, final: bool, create: bool, uid: int) -> DirHandle | None:
+def _wait_for_creator(gateway: Gateway, cur: DirHandle, name: str, uid: int) -> None:
+    """Wait while ``name`` looks like a level whose creator has not yet set its mode: a directory
+    of the user, no group or other permission, and less than 0700 (what ``mkdir`` leaves under
+    a umask such as 0277 or 0777). The wait is bounded; nothing is changed or fixed here."""
+    for _ in range(SETTLE_TRIES):
+        info = cur.lstat(name)
+        if (
+            info is None
+            or info.kind != "dir"
+            or info.uid != uid
+            or info.mode & FORBIDDEN_BITS
+            or info.mode & DIR_MODE == DIR_MODE
+        ):
+            return
+        gateway.pause(SETTLE_PAUSE)
+
+
+def _wait_for_creator_of(gateway: Gateway, handle: DirHandle, uid: int) -> None:
+    """:func:`_wait_for_creator` for a level already open (a 0500 level opens, but nothing can be
+    made in it until its creator has set 0700)."""
+    for _ in range(SETTLE_TRIES):
+        info = handle.stat()
+        if (
+            info.kind != "dir"
+            or info.uid != uid
+            or info.mode & FORBIDDEN_BITS
+            or info.mode & DIR_MODE == DIR_MODE
+        ):
+            return
+        gateway.pause(SETTLE_PAUSE)
+
+
+def _descend(
+    gateway: Gateway, cur: DirHandle, name: str, *, final: bool, create: bool, uid: int
+) -> DirHandle | None:
     """Open ``name`` under ``cur`` (a parent follows a symlink, the final component does not);
     with ``create`` make it at 0700 when missing. ``None`` only when it is missing and not
     creating. Errors from making it propagate unchanged."""
     for _ in range(ATTEMPTS):
-        nxt = _open_final(cur, name, uid) if final else cur.open_dir(name, follow=True)
+        _wait_for_creator(gateway, cur, name, uid)
+        try:
+            nxt = _open_final(cur, name, uid) if final else cur.open_dir(name, follow=True)
+        except (PermissionError, UnsafeStateError):
+            # The creator may have made the level just after the wait above looked: wait for it
+            # again and try once more; a level that is really unusable fails the same way.
+            _wait_for_creator(gateway, cur, name, uid)
+            nxt = _open_final(cur, name, uid) if final else cur.open_dir(name, follow=True)
         if nxt is not None:
+            _wait_for_creator_of(gateway, nxt, uid)
             return nxt
         if not create:
             return None
@@ -242,14 +290,14 @@ def _open_state_dir(gateway: Gateway, *, create: bool) -> StateDir | None:
     try:
         for name in STATE_PARTS[:-1]:
             try:
-                nxt = _descend(cur, name, final=False, create=create, uid=uid)
+                nxt = _descend(gateway, cur, name, final=False, create=create, uid=uid)
             except NotADirectoryError as exc:
                 raise UnsafeStateError("parent") from exc
             if nxt is None:
                 return None
             cur.close()
             cur = nxt
-        nxt = _descend(cur, STATE_PARTS[-1], final=True, create=create, uid=uid)
+        nxt = _descend(gateway, cur, STATE_PARTS[-1], final=True, create=create, uid=uid)
         if nxt is None:
             return None
         cur.close()
