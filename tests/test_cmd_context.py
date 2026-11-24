@@ -1049,3 +1049,19 @@ def test_author_kinds_filter_applies_to_the_note_not_the_reader(
     write_config(gw, "context:\n  author_kinds: [unknown]\n")
     assert run(gw, "--repo", REPO) == 0
     assert "not allowed" in gw.terminal.stdout and "mine" not in gw.terminal.stdout
+
+
+def test_quiet_never_suppresses_the_block_or_an_error_line(gw: FakeGateway, store: Store) -> None:
+    store.add()
+    assert run(gw, "--repo", REPO, "--quiet") == 0
+    assert gw.terminal.stdout == HEAD1 + hdr(1) + "| hello\n"
+    assert run(gw, "--repo", "Bad", "--quiet") == 2
+    assert gw.terminal.stderr == "usage: invalid repo\n"
+    assert run(gw, "--repo", REPO, "--quiet", "--verbose") == 2
+    assert gw.terminal.stdout == ""
+
+
+def test_an_invalid_actor_is_a_usage_error_before_anything_is_read(gw: FakeGateway) -> None:
+    write_config(gw, "limits:\n  total: 0\n")
+    assert run(gw, "--repo", REPO, "--actor", "bad actor") == 2
+    assert gw.terminal.stderr == "usage: invalid actor\n"

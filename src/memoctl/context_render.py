@@ -1,8 +1,9 @@
 """Rendering a context :class:`~memoctl.selection.Selection` (interface.md, Context block).
 
 Pure functions, no I/O: the plain block, the ``--fence`` form and the ``--json`` document.
-``context`` (``memoctl.cmd_context``) calls them and writes the bytes. This is model-context text, not terminal
-text: it is not escaped by :mod:`memoctl.render` (which shows stored text to a person).
+``context`` (``memoctl.cmd_context``) calls them and writes the bytes. This is model-context
+text, not terminal text: it is not escaped by :mod:`memoctl.render` (which shows stored text
+to a person).
 
 What is printed is exactly what selection counted: the block is ``head`` + each selected note's
 ``text`` (selection's ``note_text``, built from the sanitizer's output) + ``omit``. Nothing is
