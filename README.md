@@ -39,7 +39,7 @@ memoctl delete 1
 | `memoctl context --repo=<id> [--label=k=v]… [--fence]` | Print the notes block for a session start; exit 10 when there is nothing to show. |
 | `memoctl delete <id>… [--yes]` | Delete a note after a confirmation on your terminal; deleting the only replacement of a note makes it live again (after a stack of replacements, one `delete` names every member). |
 | `memoctl prune [--dry-run]` | Delete expired notes. |
-| `memoctl validate` | Offline checks of the config and the state; never prompts. |
+| `memoctl validate` | Offline, read-only checks of the config, the state directory, the database and the schema; exit 0, or 2, 12 or 20 for the first failed check; never prompts. |
 | `memoctl cron install\|uninstall [--dry-run]` | Install or remove the daily `prune` in your crontab. |
 
 Global flags: `--json`, `--dry-run`, `--actor`, `--verbose`, `--quiet`, `--version` ([Global flags](docs/interface.md#global-flags)). They go after the subcommand (`memoctl list --json`). There is no `--config`: the config and the state are found from your home directory in the password database.
