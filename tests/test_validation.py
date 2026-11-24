@@ -25,8 +25,6 @@ from tests.fake_gateway import FakeGateway
 
 SHA = "a" * 64
 
-# todo(#60): human-form goldens for validate (the rendered text) once render.py lands.
-GOLDEN_DIR = Path(__file__).parent / "golden" / "validate"
 SCHEMA = json.loads(
     (Path(__file__).parent.parent / "schemas" / "cli" / "validate.json").read_text()
 )
@@ -667,7 +665,7 @@ def test_os_error_while_checking_a_missing_state_dir_is_unsafe_state(
     assert r.checks[1].message == "the state directory cannot be created"
 
 
-def test_database_lstat_error_is_unsafe_state(
+def test_database_lstat_error_is_db_unreadable(
     gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from memoctl import gateway as gateway_module
@@ -682,9 +680,9 @@ def test_database_lstat_error_is_unsafe_state(
 
     monkeypatch.setattr(gateway_module._RealDirHandle, "lstat", lstat)
     r = checked(gw)
-    assert r.exit_code == 20 and names(r) == ["config", "state_dir", "database"]
-    assert r.checks[2].reason == "unsafe_state"
-    assert r.checks[2].message == "the database file is not safe to use"
+    assert r.exit_code == 12 and names(r) == ["config", "state_dir", "database"]
+    assert r.checks[2].reason == "db_unreadable"
+    assert r.checks[2].message == "the database cannot be read"
 
 
 class _RealHome:
@@ -829,79 +827,3 @@ def test_real_read_mountinfo_limit_and_missing(monkeypatch: pytest.MonkeyPatch) 
     assert real.read_mountinfo(100) is None
     fake = FakeGateway(Path("/tmp") / "unused-fake-never-created")
     assert fake.read_mountinfo(0) is None  # no mountinfo served
-
-
-# --- goldens (--json documents) -------------------------------------------------------------
-
-
-def _g_clean(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
-    make_store(gw)
-
-
-def _g_config_invalid(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
-    write_config(gw, "limits:\n  total: 0\n")
-
-
-def _g_unsafe_state(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
-    make_state(gw).chmod(0o755)
-
-
-def _g_db_unreadable(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
-    make_store(gw)
-    mp.setattr("memoctl.store.MIN_SQLITE", (99, 0, 0))
-
-
-def _g_db_corrupt(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
-    db = make_store(gw)
-    db.write_bytes(os.urandom(8192))
-    db.chmod(0o600)
-
-
-def _g_schema_newer(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
-    c = raw(make_store(gw))
-    c.execute("PRAGMA user_version = 99")
-    c.close()
-
-
-def _g_unsafe_filesystem(gw: FakeGateway, mp: pytest.MonkeyPatch) -> None:
-    make_store(gw)
-    gw.mountinfo = MOUNTINFO.format(mnt=gw.home().resolve(), fs="nfs").encode()
-
-
-GOLDEN_CASES = {
-    "clean": _g_clean,
-    "config_invalid": _g_config_invalid,
-    "unsafe_state": _g_unsafe_state,
-    "db_unreadable": _g_db_unreadable,
-    "db_corrupt": _g_db_corrupt,
-    "schema_newer": _g_schema_newer,
-    "unsafe_filesystem": _g_unsafe_filesystem,
-}
-
-
-@pytest.mark.parametrize("case", sorted(GOLDEN_CASES))
-def test_golden_json_document(gw: FakeGateway, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
-    GOLDEN_CASES[case](gw, monkeypatch)
-    doc = checked(gw).document()
-    golden = json.loads((GOLDEN_DIR / f"{case}.json").read_text())
-    VALIDATOR.validate(golden)
-    assert doc == golden
-
-
-def test_golden_json_db_locked(gw: FakeGateway) -> None:
-    c = raw(make_store(gw))
-    c.execute("PRAGMA journal_mode = DELETE")
-    c.execute("BEGIN EXCLUSIVE")
-    try:
-        doc = checked(gw).document()
-    finally:
-        c.execute("ROLLBACK")
-        c.close()
-    golden = json.loads((GOLDEN_DIR / "db_locked.json").read_text())
-    VALIDATOR.validate(golden)
-    assert doc == golden
-
-
-def test_golden_files_are_all_used() -> None:
-    expected = {f"{c}.json" for c in GOLDEN_CASES} | {"db_locked.json"}
-    assert {p.name for p in GOLDEN_DIR.glob("*.json")} == expected

@@ -752,7 +752,7 @@ def _read_fd(fd: int, nbytes: int) -> bytes:
         except BlockingIOError:
             # A non-blocking descriptor (the caller set O_NONBLOCK on the open file
             # description) with no data yet: wait until it is readable, then retry.
-            # todo(#10): the deadline of the command interrupts this wait.
+            # the deadline of the command (deadline.py) interrupts this wait.
             select.select([fd], [], [])
             continue
         if not chunk:
@@ -986,7 +986,7 @@ class RealGateway:
         are refused; a pipe, socket, file or device (``/dev/zero``) is read up to ``nbytes``.
         The read blocks while a pipe stays open and silent: the deadline of the command is
         what ends it.
-        todo(#10): the deadline timer that interrupts this read.
+        The timer that interrupts this read is in deadline.py.
         """
         try:
             mode = os.fstat(0).st_mode
@@ -996,7 +996,7 @@ class RealGateway:
                 raise BodySourceError("not_regular")
             return _read_fd(0, nbytes)
         except (TimeoutError, InterruptedError):
-            raise  # the deadline (todo(#10)) or a signal handler, not an unreadable source
+            raise  # the deadline (deadline.py) or a signal handler, not an unreadable source
         except OSError:
             raise BodySourceError("unreadable") from None
 

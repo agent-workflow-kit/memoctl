@@ -1,0 +1,3 @@
+ok  config  configuration is valid
+ok  state_dir  state directory is private
+FAIL  database  the database is damaged or not memoctl's

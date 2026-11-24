@@ -1,0 +1,2 @@
+ok  config  configuration is valid
+FAIL  state_dir  the state directory is not safe to use

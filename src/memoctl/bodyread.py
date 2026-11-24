@@ -17,7 +17,7 @@ from memoctl.gateway import BodySourceError, Gateway
 
 STDIN = "-"
 
-# Fixed messages, one per reason. todo(#6): the CLI maps BodyError to exit 2 ``usage`` with
+# Fixed messages, one per reason. The CLI maps BodyError to exit 2 ``usage`` with
 # ``details`` (field, and limit for too_long).
 _MESSAGES = {
     "too_long": "the body is over the size limit",
@@ -68,8 +68,6 @@ def read_body(
     Reads ``max_bytes + 1`` so that exactly the limit is accepted and one more is refused;
     nothing is ever truncated. Raises ``BodyError``.
     """
-    # todo(#5): cap max_bytes to the configured range (256 to 65536); the reader only
-    # requires a positive int.
     if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 1:
         raise ValueError("max_bytes must be a positive integer")
     try:

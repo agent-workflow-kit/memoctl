@@ -1,0 +1,1 @@
+FAIL  config  the configuration is invalid

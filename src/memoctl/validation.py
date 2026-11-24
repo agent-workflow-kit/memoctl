@@ -21,13 +21,8 @@ A deadline (``StoreError("timeout")``, raised when the progress handler installe
 ``configure`` fires) is not a check failure: it propagates so the CLI prints the error
 envelope (exit 12 ``timeout``).
 
-todo(#6): register ``validate`` (no ``--dry-run``) with one line in ``COMMANDS`` in
-``cli_commands.py`` (PR #56): a ``Command`` whose ``run(args, gateway)`` calls
-:func:`validate_store`, prints ``json.dumps(result.document())`` with ``--json`` and returns
-:attr:`ValidateResult.exit_code`; a ``StoreError`` with reason ``timeout`` goes to the
-envelope path. First branch that merges #56 and #60 adds it.
-todo(#21): human output through ``format_validate`` (``render.py``, PR #60) and ``emit``.
-todo(#10): pass the deadline's ``configure`` hook (PR #59) as ``configure=``.
+The command (argv, output, status line, deadline disarm) is ``cmd_validate.py``.
+
 todo(#35): the live WSL/network-mount check of ``unsafe_filesystem`` is a human step.
 """
 
@@ -290,9 +285,11 @@ def _check_store(gateway: Gateway, configure: Callable[[Store], None] | None) ->
 def _check_open(state: Any, configure: Callable[[Store], None] | None) -> list[CheckResult]:
     try:
         store = open_store(state, Mode.READ, configure=configure)
-    except (UnsafeStateError, StateAccessError, OSError):
-        # a refused file, or one whose lstat failed (I/O error): not safe to use either
+    except UnsafeStateError:
         return [_fail("database", "unsafe_state", "the database file is not safe to use")]
+    except (StateAccessError, OSError):
+        # an I/O failure (not a refusal), such as a failed lstat: db_unreadable, as everywhere else
+        return [_fail("database", "db_unreadable", "the database cannot be read")]
     except SchemaNewerError:
         # application_id and identity were accepted before the version was refused; the rows
         # of a newer layout cannot be read, so they are not checked

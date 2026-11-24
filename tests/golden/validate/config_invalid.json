@@ -1,12 +1,1 @@
-{
-  "ok": false,
-  "checks": [
-    {
-      "name": "config",
-      "ok": false,
-      "reason": "config_invalid",
-      "message": "the configuration is invalid"
-    }
-  ],
-  "warnings": []
-}
+{"ok":false,"checks":[{"name":"config","ok":false,"reason":"config_invalid","message":"the configuration is invalid"}],"warnings":[]}
