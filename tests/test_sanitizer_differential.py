@@ -26,9 +26,11 @@ unassigned, private-use and surrogate ones, and whole-range chunks for the contr
 from __future__ import annotations
 
 import random
+import re
 import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -386,13 +388,9 @@ def corpus(n: int = 3000, seed: int = 29) -> list[str]:
 
 
 def hostile() -> list[str]:
-    """The hostile bodies of the context tests (their raw text, not the rendered block)."""
+    """Raw hostile texts: ``HOSTILE_BODIES`` of test_cmd_context and ``BAD_TEXTS`` of
+    test_context_render, both imported (test_context_render's own ``HOSTILE_BODIES`` is not)."""
     return [*HOSTILE_BODIES.values(), *BAD_TEXTS.values()]
-
-
-@pytest.fixture(scope="module")
-def sweep_seen() -> set[str]:
-    return set()
 
 
 def test_the_output_is_unchanged_by_claude_session_for_every_code_point_with_neighbours() -> None:
@@ -523,7 +521,7 @@ def _no_guard_unescaped_closing(text: str) -> str:
 
 
 def _escape_first(text: str) -> str:
-    """`<` escaped before the strips: a removal can then assemble a tag."""
+    """`<` escaped before the strips (the other order; also safe against claude-session)."""
     return san._strip(unicodedata.normalize("NFKC", text.replace("<", "&lt;")))
 
 
@@ -550,8 +548,109 @@ def test_the_fixed_point_is_not_a_property_of_one_pass() -> None:
     assert contract_violations(_single_pass, list(_neighbours())[:200_000]) != []
 
 
-def test_an_escape_before_the_strips_would_let_a_removal_assemble_a_tag() -> None:
-    # `<`, a format character and `/untrusted`: escaping first leaves the tail for claude-session.
+def test_escaping_before_or_after_the_strips_is_safe_against_claude_sessions_closing_pattern() -> (
+    None
+):
+    # Either order gives `&lt;/untrusted` for `<`, a format character and `/untrusted`, which
+    # claude-session's closing pattern (`<` first) never matches. D-19's "last" is about the
+    # later fence and rendering steps, not about this pattern.
     assert contract_violations(_escape_first, ["<\u200b/untrusted"]) == []
     assert memoctl_sanitize("<\u200b/untrusted") == "&lt;/untrusted"
     assert claude_session_sanitize("<\u200b/untrusted") == "&lt;/untrusted"
+
+
+# --- the residue check: nothing hides behind a listed feature ------------------------------
+#
+# The sweeps above accept a difference when ANY listed feature is present, so a new difference
+# that co-occurs with a listed one (say memoctl wrongly drops `x` whenever the text has U+2800)
+# is hidden. This check names the whole expected output instead: the documented rewrites applied
+# to the input, then claude-session's own sanitizer (minus its closing-tag step, which memoctl's
+# total `<` escape replaces) repeated to a fixed point, then tab and `<`.
+
+
+def _claude_session_without_closing_step() -> Callable[[str], str]:
+    module = sanitizer_pin.load()
+    # Never matches: the one step memoctl's total `<` escape replaces.
+    module._CLOSING = re.compile(r"(?!)(untrusted)")  # type: ignore[attr-defined]
+    return module.sanitize  # type: ignore[no-any-return]
+
+
+_cs_open = _claude_session_without_closing_step()
+_FOREIGN_ONLY = {"Co", "Cn", "Cs"}
+
+
+def _kept(text: str) -> str:
+    """The text without the characters memoctl removes and claude-session keeps or turns to LF."""
+    return "".join(
+        c
+        for c in text
+        if unicodedata.category(c) not in _FOREIGN_ONLY and c not in "\u2800\u2028\u2029"
+    )
+
+
+def expected_output(text: str) -> str:
+    """What memoctl must print, derived from claude-session's behaviour and the listed rewrites."""
+    cur = _kept(text)
+    while (nxt := _cs_open(cur)) != cur:
+        cur = nxt
+    return cur.replace("\t", "    ").replace("<", "&lt;")
+
+
+def residue_mismatches(sanitize: Callable[[str], str], texts: Iterable[str]) -> list[str]:
+    """Texts whose output is not ``expected_output``.
+
+    Left out: a text whose characters, once the ones both sanitizers remove are gone, hold a run
+    of more than 30 combining marks: there memoctl's guard drops code points by design.
+    """
+    bad = []
+    for text in texts:
+        # Skipped here; the combining_mark_run_guard witness and the contract sweeps cover them.
+        if body.has_long_combining_run(_cs_open(_kept(text))):
+            continue
+        if sanitize(text) != expected_output(text):
+            bad.append(text)
+    return bad
+
+
+def test_the_output_is_exactly_the_documented_rewrites_of_claude_sessions_for_every_text() -> None:
+    texts = [*_all_code_points(), *_neighbours(), *_chunks(), *corpus(), *hostile()]
+    assert residue_mismatches(memoctl_sanitize, texts) == []
+
+
+def test_the_residue_check_sees_a_difference_that_hides_behind_a_listed_feature() -> None:
+    def hides(text: str) -> str:  # drops `x` only when U+2800 is also there: a listed feature
+        out = memoctl_sanitize(text)
+        return out.replace("x", "") if "\u2800" in text else out
+
+    text = "a\u2800x"
+    assert hides(text) != claude_session_sanitize(text)
+    assert features(text)  # the old check accepts the difference: a listed feature is present ...
+    assert memoctl_sanitize(text) == "ax"
+    assert residue_mismatches(hides, [text]) == [text]  # ... this one does not
+
+
+# --- the golden blocks ---------------------------------------------------------------------------
+
+GOLDEN_CONTEXT = sorted((Path(__file__).parent / "golden" / "context").glob("*.txt"))
+
+
+def test_the_golden_context_files_were_found() -> None:
+    assert GOLDEN_CONTEXT
+    assert any("fenced" in p.name for p in GOLDEN_CONTEXT)
+    assert any("fenced" not in p.name for p in GOLDEN_CONTEXT)
+
+
+@pytest.mark.parametrize("path", [p for p in GOLDEN_CONTEXT if "fenced" not in p.name], ids=str)
+def test_a_golden_plain_block_is_unchanged_by_claude_session(path: Path) -> None:
+    # claude-session calls `context` without --fence (interface.md, Context block) and fences the
+    # block itself, so the plain block is what it sanitizes.
+    text = path.read_text(encoding="utf-8")
+    assert claude_session_sanitize(text) == text
+
+
+@pytest.mark.parametrize("path", [p for p in GOLDEN_CONTEXT if "fenced" in p.name], ids=str)
+def test_a_golden_fenced_block_is_changed_by_claude_session(path: Path) -> None:
+    # The negative companion: the fence's own closing line is what its pattern rewrites, which is
+    # why claude-session is never given a `--fence` block.
+    text = path.read_text(encoding="utf-8")
+    assert claude_session_sanitize(text) != text

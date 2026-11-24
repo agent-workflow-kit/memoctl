@@ -12,6 +12,8 @@ import ast
 import hashlib
 import sys
 
+import pytest
+
 from tests import sanitizer_pin
 
 PINNED_VERSION = "0.38.4"
@@ -64,7 +66,9 @@ def test_loading_the_pinned_module_imports_nothing_new_outside_the_standard_libr
     before = set(sys.modules)
     sanitizer_pin.load()
     new = {name.split(".")[0] for name in set(sys.modules) - before}
-    assert new <= set(sys.stdlib_module_names) | {"pinned_claude_session_sanitizer"}
+    # The loader never registers the pinned module in sys.modules, so nothing is allowed beyond
+    # the standard library.
+    assert new <= set(sys.stdlib_module_names)
 
 
 def _call_name(node: ast.expr) -> tuple[str, str] | None:
@@ -74,16 +78,108 @@ def _call_name(node: ast.expr) -> tuple[str, str] | None:
     return None
 
 
-def test_the_pinned_module_runs_nothing_at_import_but_pure_constructors() -> None:
+def _is_literal(node: ast.expr | None) -> bool:
+    """A constant, a module-level name or ``re.FLAG``, or a container or ``|`` of those."""
+    if node is None or isinstance(node, (ast.Constant, ast.Name)):
+        return True
+    if isinstance(node, ast.Attribute):
+        return isinstance(node.value, ast.Name)
+    if isinstance(node, ast.Dict):
+        return all(
+            _is_literal(k) and _is_literal(v) for k, v in zip(node.keys, node.values, strict=True)
+        )
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return all(_is_literal(e) for e in node.elts)
+    if isinstance(node, ast.BinOp):
+        return _is_literal(node.left) and _is_literal(node.right)
+    return False
+
+
+def _import_time_expressions(node: ast.stmt) -> list[ast.expr]:
+    """The expressions a top-level statement evaluates when the module is imported."""
+    if isinstance(node, ast.Assign):
+        return [node.value]
+    if isinstance(node, ast.FunctionDef):
+        args = node.args
+        every = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+        every += [a for a in (args.vararg, args.kwarg) if a is not None]
+        if node.decorator_list:  # a decorator is called at import, a bare name included
+            return [ast.Call(func=ast.Name(id="<decorator>"), args=[], keywords=[])]
+        found = [*args.defaults, *(d for d in args.kw_defaults if d)]
+        found += [a.annotation for a in every if a.annotation is not None]
+        if node.returns is not None:
+            found.append(node.returns)
+        return found
+    return []
+
+
+def import_time_violations(source: str) -> list[str]:
+    """What module-level code would run beyond pure constructors (empty: nothing)."""
+    bad: list[str] = []
     allowed = (ast.Import, ast.ImportFrom, ast.Assign, ast.FunctionDef)
-    for node in ast.parse(_source()).body:
+    for node in ast.parse(source).body:
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
             continue  # a docstring
-        assert isinstance(node, allowed), ast.dump(node)[:80]
-        if isinstance(node, ast.Assign):
-            for sub in ast.walk(node.value):
+        if not isinstance(node, allowed):
+            bad.append(f"statement: {ast.dump(node)[:60]}")
+            continue
+        for expr in _import_time_expressions(node):
+            for sub in ast.walk(expr):
                 if isinstance(sub, ast.Call):
-                    assert _call_name(sub) in TOP_LEVEL_CALLS, ast.dump(sub)[:80]
+                    if _call_name(sub) not in TOP_LEVEL_CALLS:
+                        bad.append(f"call: {ast.dump(sub)[:60]}")
+                    elif not all(_is_literal(a) for a in sub.args) or not all(
+                        _is_literal(k.value) for k in sub.keywords
+                    ):
+                        bad.append(f"non-literal argument: {ast.dump(sub)[:60]}")
+    return bad
+
+
+def test_the_pinned_module_runs_nothing_at_import_but_pure_constructors() -> None:
+    assert import_time_violations(_source()) == []
+
+
+def test_the_import_time_check_accepts_the_constructors_with_literal_arguments() -> None:
+    source = (
+        "import re\nA = re.compile('x', re.I | re.M)\nB = str.maketrans({'a': 'b'})\n"
+        "def f(a: int = 1) -> str:\n    return open('x').read()\n"
+    )
+    assert import_time_violations(source) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import os\nos.system('x')\n",
+        "@print\ndef f(): pass\n",
+        "@open('x').read\ndef f(): pass\n",
+        "def f(a=open('x')): pass\n",
+        "def f(*, a=open('x')): pass\n",
+        "def f() -> open('x'): pass\n",
+        "def f(a: open('x')): pass\n",
+        "import re\nA = re.compile(open('x').read())\n",
+        "import re\nA = re.compile('x', flags=print('y'))\n",
+        "import re\nA = re.compile({1: print(2)})\n",
+        "A = [print(1)]\n",
+        "class C:\n    x = print(1)\n",
+    ],
+    ids=[
+        "call",
+        "decorator-name",
+        "decorator-call",
+        "default",
+        "kw-default",
+        "return-annotation",
+        "arg-annotation",
+        "compile-arg",
+        "compile-keyword",
+        "compile-nested",
+        "list-call",
+        "class",
+    ],
+)
+def test_the_import_time_check_rejects_each_way_to_run_code_at_import(source: str) -> None:
+    assert import_time_violations(source) != []
 
 
 def test_loading_the_pinned_module_has_no_side_effects() -> None:
