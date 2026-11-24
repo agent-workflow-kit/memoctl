@@ -226,6 +226,11 @@ def format_warnings(names: Iterable[str]) -> str:
     return "".join(f"warning ({name}): {WARNING_MESSAGES[name]}\n" for name in names)
 
 
+DELETE_LOG_FAILED = (
+    "warning (log_failed): the notes were deleted but their log records were not all written\n"
+)
+
+
 def format_add(note_id: int, *, created: bool, warnings: Iterable[str] = ()) -> Rendered:
     """``note <id> created`` or ``note <id> exists``, then the warnings on stderr."""
     return Rendered(
@@ -250,7 +255,7 @@ def format_delete(
     ``reinstated`` maps a deleted id to ``(t, expired)``; a key that is not in ``deleted``
     raises ``ValueError``. The ``--json`` document (schemas/cli/delete.json) has a flat
     ``reinstated`` list, so the command derives this association; this function only prints it.
-    TODO(#30): the command derives which deleted note each reinstated note belongs to."""
+    ``cmd_delete`` derives which deleted note each reinstated note belongs to."""
     reinstated = reinstated or {}
     unknown = sorted(set(reinstated) - set(deleted))
     if unknown:

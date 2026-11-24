@@ -153,6 +153,14 @@ class NoteNotFoundError(Exception):
         self.note_id = note_id
 
 
+class NeedsHumanError(Exception):
+    """``delete`` was not confirmed (exit 13 ``needs_human``): no terminal, another answer or
+    end of input. Nothing was deleted."""
+
+    def __init__(self) -> None:
+        super().__init__("deletion not confirmed")
+
+
 class SupersedeMismatchError(Exception):
     """``--supersedes`` names a note of another repo (exit 20 ``supersede_mismatch``)."""
 
@@ -352,6 +360,10 @@ def _register_defaults() -> None:
     register_error(
         NoteNotFoundError,
         lambda e: Failure(NOT_FOUND, "not_found", "note not found", details={"id": e.note_id}),
+    )
+    register_error(
+        NeedsHumanError,
+        lambda e: Failure(NEEDS_HUMAN, "needs_human", "deletion not confirmed: nothing deleted"),
     )
     register_error(
         SupersedeMismatchError,

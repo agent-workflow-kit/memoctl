@@ -91,6 +91,12 @@ class FakeTerminal:
     # A ``BodySourceError`` reason raised by ``read_stdin_bounded`` (terminal, not_regular,
     # unreadable), to model a stdin the real gateway refuses.
     stdin_error: str | None = None
+    # ``ask_tty``: the scripted answer (None: /dev/tty cannot be used or the input ended), the
+    # prompts seen, and a hook that runs while the person "thinks" (advance the clock, change
+    # the store).
+    tty_answer: str | None = None
+    tty_prompts: list[str] = field(default_factory=list)
+    tty_hook: Callable[[], None] | None = None
 
 
 @dataclass
@@ -258,6 +264,12 @@ class FakeGateway:
 
     def write_err(self, text: str, *, bound: float | None = None) -> None:
         self.terminal.stderr += text
+
+    def ask_tty(self, prompt: str) -> str | None:
+        self.terminal.tty_prompts.append(prompt)
+        if self.terminal.tty_hook is not None:
+            self.terminal.tty_hook()
+        return self.terminal.tty_answer
 
     def isatty(self, fd: int) -> bool:
         return self.terminal.tty.get(fd, False)

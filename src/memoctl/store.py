@@ -50,12 +50,13 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, LiteralString, NamedTuple
 
-from memoctl.grammar import matches
+from memoctl.grammar import is_add_repo_id, matches
 from memoctl.statedir import StateDir, UnsafeStateError
 
 __all__ = [
     "APPLICATION_ID",
     "MIGRATIONS",
+    "DeleteTarget",
     "NoteRow",
     "Mode",
     "SchemaNewerError",
@@ -76,6 +77,8 @@ MAX_SCHEMA_OBJECTS = 64  # the real schema has 11; reading stops past this and r
 MAX_LABELS = 8  # config limits.max_labels is 0 to 8
 MAX_TIMESTAMP = 253_402_300_799  # 9999-12-31T23:59:59Z, the last second the output can print
 MAX_ID = 999_999_999_999_999_999
+# SQLite's default SQLITE_MAX_LENGTH (setlimit clamps to it); see ``Store.delete_note``
+DELETE_LENGTH_LIMIT = 1_000_000_000
 MAX_REPO_LENGTH = 255
 MAX_BODY_BYTES = 65536
 MAX_SIZE = 65536
@@ -88,7 +91,7 @@ TIMEOUT = "timeout"
 _RETRYABLE = {DB_LOCKED, TIMEOUT}
 
 # SQLite primary result codes (sqlite.org/rescode.html).
-_BUSY, _LOCKED, _INTERRUPT = 5, 6, 9
+_BUSY, _LOCKED, _INTERRUPT, _TOOBIG = 5, 6, 9, 18
 _UNREADABLE_CODES = {3, 7, 8, 10, 13, 14, 15, 23, 24}  # PERM NOMEM READONLY IOERR FULL CANTOPEN
 # PROTOCOL AUTH FORMAT. Everything else (CORRUPT, NOTADB, TOOBIG, ERROR, CONSTRAINT, ...) is
 # corruption: the statement is ours and fixed, so a failure means the file is not what we wrote.
@@ -101,6 +104,7 @@ class StoreError(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(f"store failure: {reason}")
         self.reason = reason
+        self.too_big = False  # a value over the length limit (SQLITE_TOOBIG); set by translate
 
     @property
     def retryable(self) -> bool:
@@ -132,7 +136,9 @@ def translate(exc: sqlite3.Error) -> StoreError:
         return StoreError(TIMEOUT)
     if primary in _UNREADABLE_CODES:
         return StoreError(DB_UNREADABLE)
-    return StoreError(DB_CORRUPT)
+    error = StoreError(DB_CORRUPT)
+    error.too_big = primary == _TOOBIG
+    return error
 
 
 def _failure(exc: sqlite3.Error, owner: Store | None = None) -> BaseException:
@@ -260,6 +266,25 @@ class NoteRow:
     expires: int
     superseded_by: int | None
     labels: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteTarget:
+    """A note as ``delete`` sees it (no body); a ``None`` field failed its row check."""
+
+    id: int
+    repo: str | None
+    topic: str | None
+    kind: str | None
+    size: int | None
+    body_sha256: str | None  # the first 16 hex characters, as the log records them
+    superseded_by: int | None
+    expires: int | None
+    pointer_invalid: bool = False  # superseded_by is set but is not a valid id
+
+
+def _is_sha256(text: str) -> bool:
+    return len(text) == 64 and set(text) <= _HEX64
 
 
 NOTE_COLUMNS: Final = (
@@ -723,6 +748,106 @@ class Store:
         found = cursor.fetchone()
         cursor.close()
         return found[0] if found is not None and type(found[0]) is int else None
+
+    # -- delete (the rules are notes.py's; these are the statements)
+    def _field(self, sql: LiteralString, note_id: int) -> object:
+        """One value of note ``note_id`` (``sql`` selects it); ``None`` when the value cannot be
+        handed over (over the 1 MiB statement limit, which fails that read only)."""
+        try:
+            cursor = self.execute(sql, (note_id,))
+            try:
+                raw = cursor.fetchone()
+            finally:
+                cursor.close()
+        except StoreError as exc:
+            if exc.reason == DB_CORRUPT and exc.too_big:
+                return None
+            raise
+        return None if raw is None else raw[0]
+
+    def delete_target(self, note_id: int) -> DeleteTarget | None:
+        """What ``delete`` knows about note ``note_id``, read column by column and without the
+        body: ``None`` when no such row exists. A column that fails its check (or is over the
+        1 MiB limit) is ``None`` in the result (the log record then carries null there); the
+        row is deleted like any other. ``size`` is kept only when it equals the body's length
+        in bytes (computed in SQL, the body is never read here)."""
+        cursor = self.execute("SELECT superseded_by, expires FROM notes WHERE id = ?", (note_id,))
+        raw = cursor.fetchone()
+        cursor.close()
+        if raw is None:
+            return None
+        by, expires = raw
+        repo = self._field("SELECT repo FROM notes WHERE id = ?", note_id)
+        topic = self._field("SELECT topic FROM notes WHERE id = ?", note_id)
+        kind = self._field("SELECT kind FROM notes WHERE id = ?", note_id)
+        sha = self._field("SELECT body_sha256 FROM notes WHERE id = ?", note_id)
+        size = self._field(
+            "SELECT CASE WHEN size = length(CAST(body AS BLOB)) THEN size END"
+            " FROM notes WHERE id = ?",
+            note_id,
+        )
+        pointer = _as_int(by, 1, MAX_ID)
+        return DeleteTarget(
+            id=note_id,
+            repo=repo if type(repo) is str and is_add_repo_id(repo) else None,
+            topic=topic if type(topic) is str and matches("topic", topic) else None,
+            kind=kind if type(kind) is str and matches("kind", kind) else None,
+            size=_as_int(size, 1, MAX_SIZE),
+            body_sha256=sha[:16] if type(sha) is str and _is_sha256(sha) else None,
+            superseded_by=pointer,
+            expires=_as_int(expires, 0, MAX_TIMESTAMP),
+            pointer_invalid=by is not None and pointer is None,
+        )
+
+    def pointing_at(self, note_id: int) -> list[tuple[int, int | None]]:
+        """``(id, expires)`` of every note whose ``superseded_by`` is ``note_id``, ascending by
+        id (one at most in a store the tool wrote). ``expires`` is ``None`` when it fails its
+        check. An id outside the output range is left out."""
+        cursor = self.execute(
+            "SELECT id, expires FROM notes WHERE superseded_by = ? AND id <= ? ORDER BY id",
+            (note_id, MAX_ID),
+        )
+        out = [(row[0], _as_int(row[1], 0, MAX_TIMESTAMP)) for row in self._rows(cursor)]
+        cursor.close()
+        return [(i, e) for i, e in out if type(i) is int and i >= 1]
+
+    def note_exists(self, note_id: int) -> bool:
+        cursor = self.execute("SELECT 1 FROM notes WHERE id = ?", (note_id,))
+        found = cursor.fetchone()
+        cursor.close()
+        return found is not None
+
+    def set_pointer(self, note_id: int, by: int | None) -> None:
+        """Set ``superseded_by`` of note ``note_id`` (``None`` clears it): ``delete``'s repoint
+        and reinstatement, inside :meth:`write`. One row must change, else
+        ``StoreError("db_corrupt")`` and the transaction rolls back."""
+        if self.mode is Mode.READ:
+            raise RuntimeError("update on a read-only store")
+        cursor = self.execute("UPDATE notes SET superseded_by = ? WHERE id = ?", (by, note_id))
+        changed = cursor.rowcount
+        cursor.close()
+        if changed != 1:
+            raise StoreError(DB_CORRUPT)
+
+    def delete_note(self, note_id: int) -> None:
+        """Delete note ``note_id`` and its labels (never its rate rows), inside :meth:`write`.
+        One note row must go, else ``StoreError("db_corrupt")`` and the transaction rolls
+        back (the caller looked the note up under the same lock)."""
+        if self.mode is Mode.READ:
+            raise RuntimeError("delete on a read-only store")
+        self.execute("DELETE FROM note_labels WHERE note_id = ?", (note_id,)).close()
+        # Removing the row edits the (repo, id) index entry, which reads the repo: a value over
+        # the 1 MiB limit would fail the statement, and ``delete`` is the way to remove such a
+        # row. The limit is raised for this one statement only, and restored.
+        self._conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, DELETE_LENGTH_LIMIT)
+        try:
+            cursor = self.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+            changed = cursor.rowcount
+            cursor.close()
+        finally:
+            self._conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, LENGTH_LIMIT)
+        if changed != 1:
+            raise StoreError(DB_CORRUPT)
 
     # -- rows
     def notes(
