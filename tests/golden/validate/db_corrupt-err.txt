@@ -1,0 +1,1 @@
+failed (db_corrupt): the database is damaged or not memoctl's

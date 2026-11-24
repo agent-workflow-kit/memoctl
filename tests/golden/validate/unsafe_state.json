@@ -1,18 +1,1 @@
-{
-  "ok": false,
-  "checks": [
-    {
-      "name": "config",
-      "ok": true,
-      "reason": null,
-      "message": "configuration is valid"
-    },
-    {
-      "name": "state_dir",
-      "ok": false,
-      "reason": "unsafe_state",
-      "message": "the state directory is not safe to use"
-    }
-  ],
-  "warnings": []
-}
+{"ok":false,"checks":[{"name":"config","ok":true,"reason":null,"message":"configuration is valid"},{"name":"state_dir","ok":false,"reason":"unsafe_state","message":"the state directory is not safe to use"}],"warnings":[]}

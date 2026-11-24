@@ -1,0 +1,4 @@
+ok  config  configuration is valid
+ok  state_dir  state directory is private
+ok  database  database is consistent
+ok  schema  schema version is supported

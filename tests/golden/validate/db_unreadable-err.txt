@@ -1,0 +1,1 @@
+failed (db_unreadable): the database cannot be read

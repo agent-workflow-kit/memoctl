@@ -1,0 +1,4 @@
+ok  config  configuration is valid
+ok  state_dir  state directory is private
+ok  database  identity ok; newer schema, rows not checked
+FAIL  schema  the schema is newer than this version supports
