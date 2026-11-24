@@ -216,6 +216,7 @@ WARNING_MESSAGES = {
     "expires_extended": "the lifetime was raised to the expiry of the note this one replaces",
     "kind_not_shown": "context will not show this note: its kind is not an allowed author kind",
     "log_failed": "the note was stored but its log record was not written",
+    "prune_busy": "another writer held the lock; nothing was pruned",
 }
 
 
@@ -228,6 +229,10 @@ def format_warnings(names: Iterable[str]) -> str:
 
 DELETE_LOG_FAILED = (
     "warning (log_failed): the notes were deleted but their log records were not all written\n"
+)
+
+PRUNE_LOG_FAILED = (
+    "warning (log_failed): the notes were pruned but their log records were not all written\n"
 )
 
 
@@ -270,14 +275,14 @@ def format_delete(
     return Rendered("".join(f"{line}\n" for line in lines))
 
 
-BUSY_WARNING = "warning (prune_busy): another writer held the lock; nothing was pruned"
+BUSY_WARNING = format_warnings(["prune_busy"]).rstrip("\n")
 
 
 def format_prune(result: Mapping[str, Any]) -> Rendered:
     """Human output of ``prune`` from its ``--json`` document (counts or ``{outcome: busy}``);
     the busy outcome adds the warning on stderr, which ``--quiet`` does not suppress."""
     if result.get("outcome") == "busy":
-        return Rendered("prune skipped: store busy\n", warnings=f"{BUSY_WARNING}\n")
+        return Rendered("prune skipped: store busy\n", warnings=format_warnings(["prune_busy"]))
     expired, remaining = int(result["expired"]), int(result["remaining"])
     if result["dry_run"]:
         return Rendered(

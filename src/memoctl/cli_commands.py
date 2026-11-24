@@ -8,6 +8,7 @@ from memoctl import (
     cmd_context,
     cmd_delete,
     cmd_list,
+    cmd_prune,
     cmd_search,
     cmd_show,
     cmd_validate,
@@ -22,6 +23,6 @@ COMMANDS: tuple[Command, ...] = (
     cmd_validate.COMMAND,
     cmd_context.COMMAND,
     cmd_delete.COMMAND,
-    # todo(#31): prune
+    cmd_prune.COMMAND,
     # todo(#33): cron
 )
