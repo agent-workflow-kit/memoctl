@@ -17,6 +17,7 @@ import pytest
 from memoctl import store as store_mod
 from memoctl.store import NoteRow
 from tests import private_home
+from tests.child_env import child_path
 from tests.fake_gateway import FakeGateway
 from tests.golden_files import check_golden
 from tests.test_cmd_add import (
@@ -507,7 +508,7 @@ def _env(home: Path) -> dict[str, str]:
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
         "XDG_STATE_HOME": str(home / ".state"),
-        "PATH": "/usr/bin:/bin",
+        "PATH": child_path(home.parent),
         "LC_ALL": "C",
     }
 

@@ -125,7 +125,8 @@ Package `src/memoctl/` (design guide section 15):
 | `cmd_validate.py` | The `validate` command: argv (`--json`), the checks from `validation.py`, the output and the one status line, and the deadline disarm before the output is written. |
 | `statedir.py` | The state directory check and the `0600` creation. |
 | `logfile.py` | `log.jsonl` append and rotation. |
-| `crontab.py` | The managed block logic (pure; the calls are in the gateway). |
+| `cron_block.py` | The managed block logic (pure functions on bytes: parse, plan install and uninstall; the calls are in the gateway). |
+| `cmd_cron.py` | The `cron` command: nested `install` and `uninstall` (global flags on the leaf), the home check, one `crontab -l` and at most one `crontab -`, the deadline disarm before the output. |
 | `gateway.py` | The only module that reads the clock (wall and monotonic), randomness, the password database, the terminal, argv, the standard descriptors, the filesystem handles, stdin and `crontab`, and the only one that touches signals and threads (`alarm_arm`, `exit_now`); tests replace it. |
 | `deadline.py` | The command deadline policy on the gateway's alarm: one deadline per process, the pre-built timeout report, the disarm point, the SQLite progress callback and busy-timeout cap. |
 

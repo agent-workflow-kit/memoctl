@@ -1,0 +1,1 @@
+{"outcome":"removed","dry_run":true,"block":["# memoctl managed","17 3 * * * PATH=/home/example/.local/bin:/usr/local/bin:/usr/bin:/bin memoctl prune --quiet --actor auto:memoctl-cron","# memoctl managed end"]}

@@ -22,6 +22,7 @@ from typing import Any
 from memoctl.body import BodyTextError
 from memoctl.bodyread import BodyError
 from memoctl.config import ConfigError
+from memoctl.cron_block import BlockMalformedError, CrontabFailedError
 from memoctl.grammar import GrammarError
 from memoctl.lifetime import ClockError
 from memoctl.secretscan import SecretDetected
@@ -402,8 +403,20 @@ def _register_defaults() -> None:
     register_error(ClockError, lambda e: internal_failure())
     # Tracebacks must never render locals: the frames of BodyTextError and SecretDetected hold
     # the caller's text. Nothing here renders a traceback at all.
-    # todo(#33): a crontab GatewayError -> exit 12 failed, reason crontab_failed. A
-    #   GatewayError is internal elsewhere (a bug or an environment fault).
+    # ``cron`` wraps a crontab GatewayError in CrontabFailedError; any other GatewayError is
+    # still internal (a bug or an environment fault).
+    register_error(
+        CrontabFailedError,
+        lambda e: Failure(
+            FAILED, "failed", "the crontab could not be read or written", "crontab_failed"
+        ),
+    )
+    register_error(
+        BlockMalformedError,
+        lambda e: Failure(
+            REFUSED, "refused", "the crontab has a malformed memoctl block", "cron_block_malformed"
+        ),
+    )
     # The deadline's own timer writes a pre-built envelope and exits 12 (memoctl.deadline); a
     # progress-handler interrupt arrives as StoreError("timeout") and maps to the same failure.
     register_error(StoreError, _store_failure)

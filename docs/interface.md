@@ -294,7 +294,7 @@ Offline, read-only and never prompting. Checks in order: `config` (every key val
 
 `memoctl cron install [--dry-run] [--json]` and `memoctl cron uninstall [--dry-run] [--json]`
 
-The block is exactly these three lines, each ending in LF, where `<home>` is the home from the password database:
+The block is exactly these three lines, each ending in LF, where `<home>` is the home from the password database as the tool resolves it (normalised as a path: no trailing slash, no doubled slash, no `.` component), so another writer that reproduces the line must normalise the same way:
 
 ```text
 # memoctl managed

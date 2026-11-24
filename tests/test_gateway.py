@@ -15,6 +15,7 @@ import pytest
 
 from memoctl import gateway
 from memoctl.gateway import GatewayError, RealGateway
+from tests.child_env import child_path
 from tests.conftest import CrontabGuardError
 
 
@@ -312,9 +313,9 @@ def test_embedded_nul_in_argv_is_a_gateway_error() -> None:
         gateway._run(["/bin/true", "a\x00b"])
 
 
-def test_embedded_nul_in_env_is_a_gateway_error() -> None:
+def test_embedded_nul_in_env_is_a_gateway_error(tmp_path: Path) -> None:
     with pytest.raises(GatewayError, match="could not run"):
-        gateway._exec(["/bin/true"], None, None, {"A": "b\x00c"})
+        gateway._exec(["/bin/true"], None, None, {"A": "b\x00c", "PATH": child_path(tmp_path)})
 
 
 def test_crontab_no_crontab_message_must_start_stderr(

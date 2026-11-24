@@ -26,6 +26,7 @@ import pytest
 
 from memoctl.gateway import WRITE_WAIT_SECONDS
 from tests import private_home
+from tests.child_env import child_path
 from tests.fake_gateway import FakeGateway
 from tests.test_cmd_context import SHA, Store, assert_block
 from tests.test_validation import make_store, raw, state_path, write_config
@@ -53,7 +54,12 @@ def seeded(gw: FakeGateway, *, keep: bool = False, **over: Any) -> Store:
 
 
 def env_for(home: Path) -> dict[str, str]:
-    return {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "HOME": str(home), "XDG_CONFIG_HOME": str(home)}
+    return {
+        "PATH": child_path(home.resolve().parents[1], tools=["sh"]),  # outside the fake root
+        "LC_ALL": "C",
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home),
+    }
 
 
 def child(
@@ -94,7 +100,9 @@ def test_block_exact_bytes_and_exit_0(gw: FakeGateway) -> None:
 
 def test_ci_like_environment_is_enough(gw: FakeGateway) -> None:
     seeded(gw)
-    r = child(gw.home(), [f"--repo={REPO}"], env={"LC_ALL": "C"})
+    r = child(
+        gw.home(), [f"--repo={REPO}"], env={"LC_ALL": "C", "PATH": child_path(gw.root.parent)}
+    )
     assert (r.returncode, r.stdout) == (0, BLOCK1.encode())
 
 
@@ -195,7 +203,7 @@ def test_home_and_xdg_variables_are_never_read(gw: FakeGateway, tmp_path: Path) 
     (evil / ".config" / "memoctl").mkdir(parents=True)
     (evil / ".config" / "memoctl" / "config.yaml").write_text("context: {max_notes: 1}\nbad: [\n")
     env = {
-        "PATH": "/usr/bin:/bin",
+        "PATH": child_path(tmp_path),
         "LC_ALL": "C",
         "HOME": str(evil),
         "XDG_CONFIG_HOME": str(evil / ".config"),

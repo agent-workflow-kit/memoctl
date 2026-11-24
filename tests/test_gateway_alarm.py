@@ -22,6 +22,7 @@ import pytest
 
 from memoctl import gateway as gateway_module
 from memoctl.gateway import GatewayError, RealGateway
+from tests.child_env import child_path
 
 WAIT = 10.0  # generous: only an upper bound on waiting for a signal that must arrive
 
@@ -264,7 +265,7 @@ def _env(tmp_path: Path) -> dict[str, str]:
     return {
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
-        "PATH": "/usr/bin:/bin",
+        "PATH": child_path(tmp_path, tools=["sh", "sleep"]),
         "LC_ALL": "C",
     }
 

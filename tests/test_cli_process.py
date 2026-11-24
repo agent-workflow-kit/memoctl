@@ -17,6 +17,7 @@ import pytest
 
 from memoctl import __version__
 from tests import private_home
+from tests.child_env import child_path
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
@@ -26,7 +27,7 @@ def _env(tmp_path: Path) -> dict[str, str]:
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
         "XDG_STATE_HOME": str(home / ".state"),
-        "PATH": "/usr/bin:/bin",
+        "PATH": child_path(tmp_path, tools=["sh"]),
         "LC_ALL": "C",
     }
 

@@ -4,7 +4,7 @@ Uncommitted shared knowledge that agents leave for each other: short notes about
 
 ## Status
 
-Designed (interface 0.1.0-design); partly implemented: `add`, `context`, `list`, `search`, `show` and `validate` exist; `cron` does not yet. The normative specification is [docs/interface.md](docs/interface.md); decisions are in [docs/design.md](docs/design.md).
+Designed (interface 0.1.0-design); partly implemented: `add`, `context`, `cron`, `list`, `search`, `show` and `validate` exist. The normative specification is [docs/interface.md](docs/interface.md); decisions are in [docs/design.md](docs/design.md).
 
 ## Layer
 

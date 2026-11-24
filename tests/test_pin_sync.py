@@ -7,11 +7,11 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import pytest
+from tests.child_env import child_path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check-pin-sync.sh"
 PIN = "check-jsonschema==0.38.2"
-SYSTEM_PATH = "/usr/bin:/bin"
+TOOLS = ["bash", "sed", "head", "grep", "sort", "dirname", "env"]  # what the script needs
 
 
 def _run(tmp_path: Path, path: str, pin: str = PIN) -> subprocess.CompletedProcess[str]:
@@ -29,7 +29,7 @@ def _fake_gh(tmp_path: Path, body: str) -> str:
     gh = fake / "gh"
     gh.write_text(f"#!/bin/sh\n{body}\n")
     gh.chmod(0o755)
-    return f"{fake}:{SYSTEM_PATH}"
+    return str(fake) + os.pathsep + child_path(tmp_path, tools=TOOLS)
 
 
 def test_a_matching_pin_passes(tmp_path: Path) -> None:
@@ -58,9 +58,9 @@ def test_an_offline_gh_is_a_notice_not_a_failure(tmp_path: Path) -> None:
 
 
 def test_a_missing_gh_is_a_notice_not_a_failure(tmp_path: Path) -> None:
-    if shutil.which("gh", path=SYSTEM_PATH):
-        pytest.skip("gh is installed in the system path")
-    r = _run(tmp_path, SYSTEM_PATH)
+    path = child_path(tmp_path, tools=TOOLS)  # no gh on it, whatever the machine has
+    assert shutil.which("gh", path=path) is None
+    r = _run(tmp_path, path)
     assert r.returncode == 0
     assert "gh not found" in r.stdout
     assert os.access(SCRIPT, os.X_OK)

@@ -44,7 +44,7 @@ Status: 0.1.0-design, 2026-11-18. This plan implements [interface.md](interface.
 | `render.py` | 4 | Terminal rendering of stored text for `list`, `show` and the other human output (not `context`). |
 | `context_render.py` | 5 | The context block (plain and fenced) and the `--json` document, pure functions over a `Selection`. |
 | `selection.py` | 5 | Context selection: candidates, order, the two-pass kind-share walk, the reserved lines. |
-| `crontab.py` | 6 | The managed block: parsing, the three exact lines, install and uninstall outcomes (pure; calls go through the gateway). |
+| `cron_block.py`, `cmd_cron.py` | 6 | The managed block: parsing, the three exact lines, install and uninstall outcomes (pure; calls go through the gateway). |
 
 ## Stage 0: Scaffold, gateway, config, grammars, command line
 

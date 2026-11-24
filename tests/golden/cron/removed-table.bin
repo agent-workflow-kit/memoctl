@@ -1,0 +1,3 @@
+MAILTO=me@example.com
+0 * * * * /usr/bin/true
+# tail

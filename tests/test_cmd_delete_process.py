@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from tests import private_home
+from tests.child_env import child_path
 
 REPO = "example.com/a/b"
 HOLD = Path(__file__).with_name("delete_hold_wrapper.py")
@@ -29,7 +30,7 @@ def env(home: Path) -> dict[str, str]:
     return {
         "HOME": str(home),
         "XDG_CONFIG_HOME": str(home / ".config"),
-        "PATH": "/usr/bin:/bin",
+        "PATH": child_path(home.parent),
         "LC_ALL": "C",
     }
 
