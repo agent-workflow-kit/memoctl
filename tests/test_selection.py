@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from memoctl.config import Context
+from memoctl.sanitize import sanitize
 from memoctl.selection import (
     Candidate,
     SelectionConfig,
@@ -54,13 +55,17 @@ def _refused(c: str) -> bool:
     return unicodedata.category(c)[0] == "C" or ord(c) in _IGNORABLE or c in "\u2028\u2029"
 
 
-def sanitize(text: str) -> str:
-    """A stand-in for the #24 sanitizer, written independently here.
+def ref_sanitize(text: str) -> str:
+    """An independent stand-in for the sanitizer, used only by the reference below.
+
+    ``select_context`` is driven with the real ``memoctl.sanitize.sanitize``; the two agree on
+    every fixture here (a test pins that).
 
     Follows docs/interface.md, Sanitizer: NFKC and removal of every refused character (category
     C*, U+2028/2029 and the default-ignorables of Body rules item 3) until stable, tab to four
     spaces, then ``<`` to ``&lt;``. It does not model the real sanitizer's combining-mark run
-    limit (Body rules item 4); no fixture here holds such a run.
+    limit (Body rules item 4). The real sanitizer counts a run in its NFKD form, so the two
+    differ only for a run of more than 30 marks in NFKD form; no fixture here holds one.
     """
     out = text
     while True:
@@ -145,7 +150,7 @@ def _ref_u16(s: str) -> int:
 
 
 def _ref_text(n: dict[str, Any], cap: int) -> str:
-    body = sanitize(n["body"])
+    body = ref_sanitize(n["body"])
     pieces = body.split("\n")
     if pieces[-1] == "":
         pieces = pieces[:-1]
@@ -190,7 +195,7 @@ def reference_select(
         n for n in notes
         if n["repo"] == repo and n["superseded_by"] is None and n["expires"] > NOW
         and n["kind"] in c.author_kinds and set(n["labels"]) <= labels
-        and sanitize(n["body"]).strip() != ""
+        and ref_sanitize(n["body"]).strip() != ""
     ]  # fmt: skip
     cands.sort(key=lambda n: -n["id"])
     e = len(cands)
@@ -279,11 +284,13 @@ def test_whitespace_only_sanitized_body_is_not_a_candidate(db: Db) -> None:
     assert ids(sel) == [ok] and sel.eligible == 1
 
 
-def test_the_stand_in_sanitizer_removes_what_the_interface_lists() -> None:
+def test_the_stand_in_and_the_real_sanitizer_agree_on_what_the_interface_lists() -> None:
     gone = "\u2028\u2029\u034f\u115f\u1160\u180b\u180d\u2800\u3164\ufe0f\uffa0\U000e0100\u200b"
-    assert sanitize("a" + gone + "b") == "ab"
-    assert sanitize("a\tb<") == "a    b&lt;"
-    assert sanitize("\u2800") == ""
+    for fn in (ref_sanitize, sanitize):
+        assert fn("a" + gone + "b") == "ab"
+        assert fn("a\tb<") == "a    b&lt;"
+        assert fn("\u2800") == ""
+        assert fn("\uff46\uff55\uff4c\uff4ce\u200b\u0301") == fn("\uff46\uff55\uff4c\uff4c\u00e9")
 
 
 def test_measured_on_the_sanitizer_output_not_nfkc_of_the_stored_text(db: Db) -> None:
@@ -575,6 +582,11 @@ def random_fixture(rng: random.Random) -> tuple[list[dict[str, Any]], SelectionC
                 "   \n",
                 "<b>&lt;</b>\ttab",
                 "\n".join(f"line{j}" for j in range(rng.randint(1, 80))),
+                "\uff46\uff55\uff4c\uff4c\u200b" * rng.randint(1, 100),  # fullwidth + removed
+                "\ufb01" * rng.randint(1, 300),  # ligature: NFKC makes two characters
+                "e\u200b\u0301" * rng.randint(1, 200),  # removed char, then a mark
+                "\u2800x\n" * rng.randint(1, 100),  # removed braille blank
+                "\uff21" * rng.randint(1, 900),  # fullwidth capital A
             ]
         )
         notes.append(
@@ -597,6 +609,13 @@ def random_fixture(rng: random.Random) -> tuple[list[dict[str, Any]], SelectionC
     )
     labels = set(rng.sample(labelpool, rng.randint(0, 3)))
     return notes, c, labels
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_the_stand_in_equals_the_real_sanitizer_on_every_fixture_body(seed: int) -> None:
+    notes, _, _ = random_fixture(random.Random(seed))
+    for n in notes:
+        assert ref_sanitize(n["body"]) == sanitize(n["body"])
 
 
 @pytest.mark.parametrize("seed", range(40))
@@ -819,6 +838,7 @@ def test_from_config_defaults() -> None:
     [
         dict(max_chars=True), dict(max_chars=1.5), dict(max_chars=-1), dict(max_bytes="1"),
         dict(max_notes=-1), dict(max_per_topic=2.0), dict(note_max_chars=-5),
+        dict(note_max_chars=0), dict(note_max_chars=1),
         dict(max_kind_share=0.5), dict(max_kind_share=Fraction(-1, 10)),
         dict(max_kind_share=Fraction(11, 10)), dict(max_kind_share=True),
         dict(author_kinds=["a"]), dict(author_kinds=(1,)),
@@ -830,5 +850,15 @@ def test_selection_config_refuses_values_the_walk_is_not_defined_for(over: dict[
 
 
 def test_selection_config_accepts_the_edges() -> None:
+    cfg(note_max_chars=2)
     cfg(max_notes=0, max_per_topic=0, max_kind_share=Fraction(0))
     cfg(max_kind_share=Fraction(1), author_kinds=())
+
+
+@pytest.mark.parametrize("out", ["\ud800ab", "ab\udfff", "\U0001f600\ud800"])
+def test_unencodable_sanitizer_output_raises_a_fixed_value_error(db: Db, out: str) -> None:
+    db.add(body="secret note text")
+    with pytest.raises(ValueError) as e:
+        db.select(sanitize=lambda t: out)
+    assert str(e.value) == "sanitizer output is not encodable"
+    assert not isinstance(e.value, UnicodeEncodeError)

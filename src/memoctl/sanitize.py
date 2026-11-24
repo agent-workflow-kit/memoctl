@@ -11,7 +11,8 @@ with tab turned into four spaces and every ``<`` written as ``&lt;``. For any ot
 (only possible in a database written by something else) the output is the same after removing
 the refused characters.
 
-todo(#26): context applies sanitize to every note text.
+``context`` applies it to every note text through ``selection.select_context``; the rendered
+block is checked to be unchanged by it (``memoctl.context_render``).
 
 Two properties go beyond the three documented steps, because the interface promises that the
 output is unchanged by a later sanitizer and that its cost is linear:

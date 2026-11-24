@@ -1,0 +1,4 @@
+memoctl notes for example.com/a/b (1 of 1 shown)
+--- note 1 | topic: wide | kind: implement | 2023-11-14 ---
+| wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
+[memoctl: note 1 cut]

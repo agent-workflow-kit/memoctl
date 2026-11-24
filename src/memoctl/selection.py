@@ -23,14 +23,15 @@ How it works:
 Counting rule (what selection measures): the ``u16`` and ``b8`` of ``note_text`` (header, kept
 body lines, cut line), computed from the sanitizer's output, never from NFKC of the stored text
 (a foreign row's sanitized text can differ from NFKC of it). ``u16`` is UTF-16 code units and
-``b8`` UTF-8 bytes. If #26 renders a note differently from :func:`note_text`, it must change
-:func:`note_text`, the one place both read, so the sizes stay what is printed.
+``b8`` UTF-8 bytes. The renderer (``memoctl.context_render``) must not render a note
+differently from :func:`note_text`, the one place both read, so the sizes stay what is printed.
 
 ``max_kind_share`` is read as the decimal the config holds (the shortest ``repr`` of the float,
 so ``0.3`` is exactly 3/10), never as a binary float product.
 
-todo(#26): the sanitizer (#24) is passed in as ``sanitize``; #26 passes the real one and prints
-the block from :class:`Selection`.
+The sanitizer is passed in as ``sanitize`` (``memoctl.sanitize.sanitize`` in production); the
+block is printed from a :class:`Selection` by ``memoctl.context_render``, which checks that each
+note text has the documented shape and the sizes selection counted.
 todo(#27): the CLI wraps this in its exit paths and deadline; the progress handler of the store
 interrupts a long scan.
 todo(#28): flood and performance fixtures (the scan is linear in the repo's live notes).
@@ -104,6 +105,8 @@ class SelectionConfig:
         for name, value in counts.items():
             if type(value) is not int or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
+        if self.note_max_chars < 2:  # a kept first line is "| " plus one character at least
+            raise ValueError("note_max_chars must be at least 2")
         share = self.max_kind_share
         if not isinstance(share, Fraction) or not 0 <= share <= 1:
             raise ValueError("max_kind_share must be a Fraction from 0 to 1")
@@ -362,6 +365,17 @@ def select_context(
         return _select(store, repo, session, config, params, sanitize)
 
 
+def _sanitized(sanitize: Callable[[str], str], body: str) -> str:
+    """``sanitize(body)``, which must be encodable (UTF-8 and UTF-16); the error has no text."""
+    out = sanitize(body)
+    if not out.isascii():
+        try:
+            out.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("sanitizer output is not encodable") from None
+    return out
+
+
 def _select(
     store: Store,
     repo: str,
@@ -375,7 +389,7 @@ def _select(
     for row in store.notes(_CANDIDATE_WHERE, params, labels=True, descending=True):
         if not all(pair in session for pair in row.labels):
             continue
-        sanitized = sanitize(row.body)
+        sanitized = _sanitized(sanitize, row.body)
         if not sanitized.strip():  # no non-whitespace character
             continue
         text, _ = note_text(row, sanitized, config.note_max_chars)
@@ -392,7 +406,7 @@ def _select(
         if len(rows) != 1:  # only possible outside one snapshot
             raise StoreError("db_corrupt")
         row = rows[0]
-        text, cut = note_text(row, sanitize(row.body), config.note_max_chars)
+        text, cut = note_text(row, _sanitized(sanitize, row.body), config.note_max_chars)
         if (u16(text), b8(text)) != (cand.c, cand.b):
             raise StoreError("db_corrupt")
         notes.append(SelectedNote(row.id, row.topic, row.kind, text, cand.c, cand.b, cut))
