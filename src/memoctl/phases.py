@@ -33,12 +33,15 @@ class Phases:
         self._last = 0.0
         self._lines: list[str] = []
         self._installed = False
+        self._previous: Phases | None = None
 
     def __enter__(self) -> Phases:
         global _CURRENT
+        # The clock first: when it raises, no recorder is left installed.
+        self._last = self._gateway.monotonic() if self._enabled else 0.0
+        self._previous = _CURRENT
         _CURRENT = self
         self._installed = True
-        self._last = self._gateway.monotonic() if self._enabled else 0.0
         return self
 
     def __exit__(
@@ -50,7 +53,8 @@ class Phases:
         global _CURRENT
         if self._installed:
             self._installed = False
-            _CURRENT = None
+            _CURRENT = self._previous
+            self._previous = None
 
     def mark(self, phase: str) -> None:
         """End ``phase``: record the milliseconds since the previous mark (or the start)."""

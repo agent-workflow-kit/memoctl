@@ -122,10 +122,10 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
                     raise NoteNotFoundError(missing)
                 plan = plan_delete(store, found, seconds)
                 apply_delete(store, plan)
-            phases.mark("transaction")
             # Right after the commit: a timeout is never reported once the change is durable
             # (when the timer ran out during the commit this call exits 12, with no log record).
             deadline.current().disarm()
+            phases.mark("transaction")
         finally:
             store.close()
         log_failed = append_records(state, plan, actor.actor, actor.source.value, now)

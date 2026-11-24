@@ -30,7 +30,7 @@ import json
 import math
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from memoctl import deadline, phases
 from memoctl.author import resolve_actor
@@ -73,7 +73,9 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
             phases.mark("output")
             return 0
         deadline.current().disarm()  # right after the commit (see cmd_delete)
-        targets, remaining = outcome
+        targets, remaining = outcome.targets, outcome.remaining
+        if outcome.wrote:  # an empty store ran no transaction: no mark
+            phases.mark("transaction")
         failed = append_records(state, targets, actor.actor, actor.source.value, now)
         phases.mark("log")
     print_result(
@@ -101,26 +103,31 @@ def dry_run(gateway: Gateway, seconds: int) -> tuple[int, int]:
         return count_prune(store, seconds)
 
 
-def write_run(state: StateDir, seconds: int) -> tuple[list[DeleteTarget], int] | None:
+class WriteOutcome(NamedTuple):
+    targets: list[DeleteTarget]
+    remaining: int
+    wrote: bool  # False: no ``state.db`` (or an uninitialized one), no transaction ran
+
+
+def write_run(state: StateDir, seconds: int) -> WriteOutcome | None:
     """The write transaction; ``None`` when the lock was not obtained. An empty store (no
     ``state.db``, or an uninitialized one) is ``([], 0)``: nothing is created or migrated."""
     try:
         store = open_store(state, Mode.WRITE, configure=deadline.current().configure_store)
         phases.mark("open_store")
         if store is None:
-            return [], 0
+            return WriteOutcome([], 0, wrote=False)
         try:
             with store.write():
                 targets = apply_prune(store, seconds)
                 remaining = store.count_all_notes()
-            phases.mark("transaction")
         finally:
             store.close()
     except StoreError as exc:
         if exc.reason == DB_LOCKED:
             return None
         raise
-    return targets, remaining
+    return WriteOutcome(targets, remaining, wrote=True)
 
 
 def append_records(

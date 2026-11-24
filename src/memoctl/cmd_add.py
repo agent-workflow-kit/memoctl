@@ -438,8 +438,8 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
             # Right after the commit and before the log append and the output: a timeout is
             # never reported once the change is durable. When the timer ran out during the
             # commit, this call ends the process with exit 12 (no log record).
-            phases.mark("transaction")
             deadline.current().disarm()
+            phases.mark("transaction")
         finally:
             store.close()
         assert result.id is not None  # only a dry run has no id, and it returned above

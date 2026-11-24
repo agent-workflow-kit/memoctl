@@ -27,6 +27,7 @@ Status: 0.1.0-design, 2026-11-18. This plan implements [interface.md](interface.
 | `cli_errors.py` | 0 | Exit codes, the error envelope (schema rules enforced), the exception-to-exit-code table. |
 | `statedir.py` | 1 | The state directory check on a descriptor, creation modes, `lstat` of `state.db`. |
 | `deadline.py` | 1 | The command deadline: arm, re-arm and disarm points, the pre-built timeout report, the progress callback and busy-timeout cap for the store. |
+| `phases.py` | 1 | The `--verbose` recorder: fixed-identifier phase marks (checked against `[a-z][a-z_]*`), elapsed time from the gateway's monotonic clock, one stderr write by `flush` after the command returns. |
 | `store.py` | 1 | Opening SQLite (modes, pragmas, the progress handler, `setlimit`), migrations, row checks, every query. |
 | `bodyread.py` | 2 | The bounded reader for `--body-file` and standard input (size cap, symlink and special-file refusals). |
 | `body.py` | 2 | Body validation (six classes, combining runs, NFKC bound). |
