@@ -134,7 +134,7 @@ The tables are in [Database](interface.md#database). `status` is derived at read
 
 ## Concurrency
 
-All writes (`add`, `delete`, `prune`, migration) take `BEGIN IMMEDIATE`; the limits, the dedupe check, the supersede checks and the insert happen under that one lock, so two concurrent adds cannot both pass a limit. `context` reads in one read transaction on a WAL snapshot and never takes a write lock, so it never blocks a writer and sees a note and its labels consistently. `prune` is one transaction (`prune --dry-run` is a read transaction and takes no write lock); a second `prune` that cannot get the lock within the busy timeout reports `busy` (another writer holds it). The log append is a single `O_APPEND` write; rotation takes `log.lock` with `flock`.
+All writes (`add`, `delete`, `prune`, migration) take `BEGIN IMMEDIATE`; the limits, the dedupe check, the supersede checks and the insert happen under that one lock, so two concurrent adds cannot both pass a limit. `context` reads in one read transaction on a WAL snapshot and never takes a write lock, so it never blocks a writer and sees a note and its labels consistently. `prune` is one transaction (`prune --dry-run` is a read transaction and takes no write lock; a 100000-note store with half of it expired prunes in a few seconds, well inside the 30 s deadline, and a deadline that does pass rolls the whole transaction back); a second `prune` that cannot get the lock within the busy timeout reports `busy` (another writer holds it). The log append is a single `O_APPEND` write; rotation takes `log.lock` with `flock`.
 
 ## Error handling
 
