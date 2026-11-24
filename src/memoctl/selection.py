@@ -29,8 +29,9 @@ body lines, cut line), computed from the sanitizer's output, never from NFKC of 
 ``max_kind_share`` is read as the decimal the config holds (the shortest ``repr`` of the float,
 so ``0.3`` is exactly 3/10), never as a binary float product.
 
-todo(#26): the sanitizer (#24) is passed in as ``sanitize``; #26 passes the real one and prints
-the block from :class:`Selection`.
+The sanitizer is passed in as ``sanitize`` (``memoctl.sanitize.sanitize`` in production); the
+block is printed from a :class:`Selection` by ``memoctl.context_render``, which checks that each
+note text has the documented shape and the sizes selection counted.
 todo(#27): the CLI wraps this in its exit paths and deadline; the progress handler of the store
 interrupts a long scan.
 todo(#28): flood and performance fixtures (the scan is linear in the repo's live notes).

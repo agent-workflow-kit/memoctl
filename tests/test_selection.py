@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from memoctl.config import Context
+from memoctl.sanitize import sanitize
 from memoctl.selection import (
     Candidate,
     SelectionConfig,
@@ -54,8 +55,11 @@ def _refused(c: str) -> bool:
     return unicodedata.category(c)[0] == "C" or ord(c) in _IGNORABLE or c in "\u2028\u2029"
 
 
-def sanitize(text: str) -> str:
-    """A stand-in for the #24 sanitizer, written independently here.
+def ref_sanitize(text: str) -> str:
+    """An independent stand-in for the sanitizer, used only by the reference below.
+
+    ``select_context`` is driven with the real ``memoctl.sanitize.sanitize``; the two agree on
+    every fixture here (a test pins that).
 
     Follows docs/interface.md, Sanitizer: NFKC and removal of every refused character (category
     C*, U+2028/2029 and the default-ignorables of Body rules item 3) until stable, tab to four
@@ -145,7 +149,7 @@ def _ref_u16(s: str) -> int:
 
 
 def _ref_text(n: dict[str, Any], cap: int) -> str:
-    body = sanitize(n["body"])
+    body = ref_sanitize(n["body"])
     pieces = body.split("\n")
     if pieces[-1] == "":
         pieces = pieces[:-1]
@@ -190,7 +194,7 @@ def reference_select(
         n for n in notes
         if n["repo"] == repo and n["superseded_by"] is None and n["expires"] > NOW
         and n["kind"] in c.author_kinds and set(n["labels"]) <= labels
-        and sanitize(n["body"]).strip() != ""
+        and ref_sanitize(n["body"]).strip() != ""
     ]  # fmt: skip
     cands.sort(key=lambda n: -n["id"])
     e = len(cands)
@@ -279,11 +283,13 @@ def test_whitespace_only_sanitized_body_is_not_a_candidate(db: Db) -> None:
     assert ids(sel) == [ok] and sel.eligible == 1
 
 
-def test_the_stand_in_sanitizer_removes_what_the_interface_lists() -> None:
+def test_the_stand_in_and_the_real_sanitizer_agree_on_what_the_interface_lists() -> None:
     gone = "\u2028\u2029\u034f\u115f\u1160\u180b\u180d\u2800\u3164\ufe0f\uffa0\U000e0100\u200b"
-    assert sanitize("a" + gone + "b") == "ab"
-    assert sanitize("a\tb<") == "a    b&lt;"
-    assert sanitize("\u2800") == ""
+    for fn in (ref_sanitize, sanitize):
+        assert fn("a" + gone + "b") == "ab"
+        assert fn("a\tb<") == "a    b&lt;"
+        assert fn("\u2800") == ""
+        assert fn("\uff46\uff55\uff4c\uff4ce\u200b\u0301") == fn("\uff46\uff55\uff4c\uff4c\u00e9")
 
 
 def test_measured_on_the_sanitizer_output_not_nfkc_of_the_stored_text(db: Db) -> None:

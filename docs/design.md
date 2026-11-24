@@ -99,7 +99,8 @@ Package `src/memoctl/` (design guide section 15):
 | `notes.py` | The rules of `add`, `delete`, `prune`: supersede, dedupe, limits, chain repointing and reinstatement on `delete`. |
 | `selection.py` | Context selection and fairness. |
 | `sanitize.py` | The read-time sanitizer. |
-| `render.py` | The block (plain and fenced) and terminal rendering. |
+| `context_render.py` | The context block (plain and fenced) and the `--json` document, pure functions over a `Selection`; refuses, with a fixed message, anything that is not the documented block shape (repo grammar, header and line forms, no `<`, unchanged by the sanitizer). Model-context text, never terminal text. |
+| `render.py` | Terminal rendering of stored text for `list`, `show` and the other human output (not `context`). |
 | `search.py` | Term parsing and matching. |
 | `statedir.py` | The state directory check and the `0600` creation. |
 | `logfile.py` | `log.jsonl` append and rotation. |

@@ -1,0 +1,1 @@
+{"text":"memoctl notes for example.com/a/b (2 of 4 shown)\n--- note 5 | topic: t | kind: implement | 2023-11-14 ---\n| hello\n|\n| world\n--- note 2 | topic: t | kind: implement | 2023-11-14 | a=b, c=d ---\n| x\n[memoctl: 2 more notes not shown; use memoctl list --repo example.com/a/b]\n","note_ids":[5,2],"shown":2,"eligible":4,"omitted":2}
