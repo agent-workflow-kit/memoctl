@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
 from typing import Any, NamedTuple
 
@@ -211,16 +211,34 @@ def format_show(note: Mapping[str, Any]) -> Rendered:
     return Rendered("".join(f"{line}\n" for line in lines))
 
 
-def format_add(note_id: int, *, created: bool) -> Rendered:
-    """``note <id> created`` or ``note <id> exists``."""
-    return Rendered(f"note {int(note_id)} {'created' if created else 'exists'}\n")
+WARNING_MESSAGES = {
+    "expires_capped": "the requested lifetime was cut to the maximum age",
+    "expires_extended": "the lifetime was raised to the expiry of the note this one replaces",
+    "kind_not_shown": "context will not show this note: its kind is not an allowed author kind",
+    "log_failed": "the note was stored but its log record was not written",
+}
+
+
+def format_warnings(names: Iterable[str]) -> str:
+    """The stderr warning lines ``warning (<name>): <fixed message>``, one per name, in order.
+    The text is a fixed string of the tool (never a value from a call); an unknown name is a
+    bug and raises ``KeyError``. ``--quiet`` never suppresses these lines."""
+    return "".join(f"warning ({name}): {WARNING_MESSAGES[name]}\n" for name in names)
+
+
+def format_add(note_id: int, *, created: bool, warnings: Iterable[str] = ()) -> Rendered:
+    """``note <id> created`` or ``note <id> exists``, then the warnings on stderr."""
+    return Rendered(
+        f"note {int(note_id)} {'created' if created else 'exists'}\n",
+        warnings=format_warnings(warnings),
+    )
 
 
 DRY_RUN_ADD = "dry run: valid; a note would be created unless it exists or a limit refuses it"
 
 
-def format_add_dry_run() -> Rendered:
-    return Rendered(f"{DRY_RUN_ADD}\n")
+def format_add_dry_run(warnings: Iterable[str] = ()) -> Rendered:
+    return Rendered(f"{DRY_RUN_ADD}\n", warnings=format_warnings(warnings))
 
 
 def format_delete(

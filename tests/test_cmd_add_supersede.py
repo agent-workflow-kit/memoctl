@@ -20,6 +20,7 @@ from tests import private_home
 from tests.fake_gateway import FakeGateway
 from tests.golden_files import check_golden
 from tests.test_cmd_add import (
+    KIND_LINE,
     REPO,
     add,
     error_of,
@@ -100,7 +101,7 @@ def test_a_hit_writes_nothing_no_note_no_rate_row_no_log_record(gw: FakeGateway)
 def test_a_hit_prints_the_exists_line(gw: FakeGateway) -> None:
     add(gw)
     code, out, err = add(gw, json_mode=False)
-    assert (code, out, err) == (0, "note 1 exists\n", "")
+    assert (code, out, err) == (0, "note 1 exists\n", KIND_LINE)
     check_golden("add/exists.txt", out.encode())
 
 
@@ -237,7 +238,7 @@ def test_a_planted_corrupt_matching_row_is_skipped_not_returned(gw: FakeGateway)
 def test_supersede_creates_the_note_and_marks_the_target(gw: FakeGateway) -> None:
     add(gw, body="old")
     code, out, err = add(gw, "--supersedes", "1", body="new")
-    assert (code, err) == (0, "")
+    assert (code, err) == (0, KIND_LINE)
     doc = json.loads(out)
     assert doc["id"] == 2 and doc["created"] is True and doc["supersedes"] == 1
     check_golden("add/superseded.json", out.encode(), schema="cli/add")

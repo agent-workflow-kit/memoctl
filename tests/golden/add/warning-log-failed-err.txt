@@ -1,0 +1,1 @@
+warning (log_failed): the note was stored but its log record was not written

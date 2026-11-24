@@ -32,6 +32,10 @@ from tests.schema_check import validate_json_output
 
 DAY = 86400
 REPO = "example.com/team/app"
+KIND_LINE = (
+    "warning (kind_not_shown): context will not show this note: "
+    "its kind is not an allowed author kind\n"
+)  # the stderr line of the default kind (unknown), which no default allow list shows
 
 
 @pytest.fixture
@@ -144,7 +148,7 @@ def test_add_prints_the_human_line_and_nothing_on_stderr(gw: FakeGateway) -> Non
 
 def test_quiet_suppresses_the_result_line_but_not_json(gw: FakeGateway) -> None:
     code, out, err = add(gw, "--quiet", json_mode=False)
-    assert (code, out, err) == (0, "", "")
+    assert (code, out, err) == (0, "", KIND_LINE)  # a warning is never suppressed
     assert len(stored(gw)) == 1
     code, out, _ = add(gw, "--quiet", body="another body")
     assert code == 0 and json.loads(out)["id"] == 2
@@ -290,7 +294,8 @@ def test_a_malformed_kind_variable_becomes_unknown_and_is_never_echoed(
     gw.environ["CSESSION_KIND"] = value
     code, out, err = add(gw)
     assert code == 0 and json.loads(out)["kind"] == "unknown"
-    assert value[:8] not in out + err or value == ""
+    assert err == KIND_LINE
+    assert value[:8] not in out + err.replace(KIND_LINE, "") or value == ""
 
 
 def test_the_kind_variable_name_comes_from_config(gw: FakeGateway) -> None:
@@ -525,15 +530,6 @@ def test_flags_before_the_subcommand_and_after_double_dash_are_usage_argv(gw: Fa
     assert stored(gw) == [] and gw.stdin_reads == 0
 
 
-def test_dry_run_is_not_yet_accepted_so_a_note_is_never_written_by_mistake(
-    gw: FakeGateway,
-) -> None:
-    # TODO(#19): replaced by the dry-run tests when --dry-run lands.
-    code, out, _ = add(gw, "--dry-run")
-    assert code == 2 and error_of(out)["details"] == {"field": "argv"}
-    assert stored(gw) == []
-
-
 # -- secrets ---------------------------------------------------------------------------------------
 
 
@@ -758,7 +754,7 @@ def test_a_log_failure_after_the_commit_warns_and_keeps_exit_0(
     monkeypatch.setattr(cmd_add, "append_record", broken)
     code, out, err = add(gw)
     assert code == 0 and json.loads(out)["id"] == 1
-    assert err == f"{cmd_add.LOG_FAILED_WARNING}\n"
+    assert err == f"{KIND_LINE}{cmd_add.LOG_FAILED_WARNING}\n"
     assert len(stored(gw)) == 1
 
 
@@ -771,7 +767,7 @@ def test_an_os_error_from_the_log_is_the_same_warning(
     monkeypatch.setattr(cmd_add, "append_record", broken)
     code, out, err = add(gw, json_mode=False)
     assert (code, out) == (0, "note 1 created\n") and "No space" not in err
-    assert err == f"{cmd_add.LOG_FAILED_WARNING}\n"
+    assert err == f"{KIND_LINE}{cmd_add.LOG_FAILED_WARNING}\n"
 
 
 @pytest.mark.parametrize("exc", [ValueError("x"), RuntimeError("y")])
@@ -784,7 +780,7 @@ def test_any_other_error_from_the_log_append_is_the_same_warning_and_exit_0(
     monkeypatch.setattr(cmd_add, "append_record", broken)
     code, out, err = add(gw)
     assert code == 0 and json.loads(out)["id"] == 1
-    assert err == f"{cmd_add.LOG_FAILED_WARNING}\n"
+    assert err == f"{KIND_LINE}{cmd_add.LOG_FAILED_WARNING}\n"
     assert len(stored(gw)) == 1
 
 
@@ -795,7 +791,7 @@ def test_a_log_file_that_is_not_a_regular_file_warns_without_failing(gw: FakeGat
     (sd / "log.jsonl").mkdir()
     code, out, err = add(gw)
     assert code == 0 and len(stored(gw)) == 1
-    assert err == f"{cmd_add.LOG_FAILED_WARNING}\n"
+    assert err == f"{KIND_LINE}{cmd_add.LOG_FAILED_WARNING}\n"
 
 
 def test_a_failed_insert_leaves_no_note_label_rate_row_or_log_record(

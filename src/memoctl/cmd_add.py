@@ -15,8 +15,11 @@ can run before an earlier refusal. The rules of the order:
   before the log append and the output, so a timeout is never reported after the change is
   durable.
 
-Seams owned by later issues are marked with ``TODO(#N)`` at the exact step: #19
-(``--dry-run`` and the warning lines), #20 (concurrency).
+``--dry-run`` stops after step 7: it never reaches step 8, so it never looks at the state
+directory or ``state.db``, and it runs no dedupe, supersede check or limit. The deadline is
+disarmed before its output, like a real add.
+
+Seams owned by later issues are marked with ``TODO(#N)`` at the exact step: #20 (concurrency).
 
 A crash (or a signal) between the commit of step 13 and the log append of step 14 leaves a stored
 note with no log record, as the interface documents; the retry then finds the note and
@@ -60,14 +63,21 @@ from memoctl.lifetime import (
 from memoctl.logfile import LogRecord, append_record
 from memoctl.notes import NoteKey, check_supersede_target, evaluate_limits, find_duplicate
 from memoctl.notes_read import LIVE, note_status
-from memoctl.render import emit, format_add
+from memoctl.render import (
+    WARNING_MESSAGES,
+    Rendered,
+    emit,
+    format_add,
+    format_add_dry_run,
+    format_warnings,
+)
 from memoctl.secretscan import check_secrets
 from memoctl.statedir import StateDir, open_state_dir
 from memoctl.store import Mode, Store, open_store
 
 __all__ = ["COMMAND", "run"]
 
-LOG_FAILED_WARNING = "warning (log_failed): the note was stored but its log record was not written"
+LOG_FAILED_WARNING = f"warning (log_failed): {WARNING_MESSAGES['log_failed']}"
 
 
 # -- the stages a step hands to the next --------------------------------------------------------
@@ -87,6 +97,7 @@ class Call:
     body_source: Path | str  # a path, or "-" for standard input
     json_mode: bool
     quiet: bool
+    dry_run: bool
 
 
 @dataclass(frozen=True)
@@ -108,7 +119,7 @@ class Plan:
 class Result:
     """What the command prints: the stored note's fields (the schema ``cli/add``)."""
 
-    id: int
+    id: int | None  # None exactly for a dry run
     created: bool
     repo: str
     topic: str
@@ -119,12 +130,13 @@ class Result:
     size: int
     body_sha256: str
     warnings: tuple[str, ...]
+    dry_run: bool = False
 
     def document(self) -> dict[str, object]:
         return {
             "id": self.id,
             "created": self.created,
-            "dry_run": False,
+            "dry_run": self.dry_run,
             "repo": self.repo,
             "topic": self.topic,
             "kind": self.kind,
@@ -163,7 +175,7 @@ def step1_parse(args: argparse.Namespace, gateway: Gateway) -> Call:
     source: Path | str = STDIN if args.body_file == STDIN else Path(args.body_file)
     return Call(
         args.repo, args.topic, labels, args.kind, supersedes, actor, requested, source,
-        bool(args.json), bool(args.quiet),
+        bool(args.json), bool(args.quiet), bool(args.dry_run),
     )  # fmt: skip
 
 
@@ -218,6 +230,18 @@ def step7_read_clock(
     created = seconds_since_epoch(now)
     lifetime = compute_lifetime(created, effective.retention.max_age, call.requested)
     return now, created, lifetime
+
+
+def dry_run_result(plan: Plan) -> Result:
+    """The output of ``--dry-run``: the call's own validated fields, ``id`` null, ``created``
+    true, ``supersedes`` the requested target unchecked, ``expires`` the call's own lifetime
+    (never raised by a target, so never ``expires_extended``)."""
+    call = plan.call
+    return Result(
+        None, True, call.repo, call.topic, plan.kind.kind, call.labels, plan.lifetime.expires,
+        call.supersedes, plan.size, plan.body_sha256,
+        build_warnings(plan, plan.lifetime, hit=False), dry_run=True,
+    )  # fmt: skip
 
 
 def step8_open_state_dir(gateway: Gateway) -> StateDir:
@@ -332,11 +356,13 @@ def build_warnings(plan: Plan, lifetime: Lifetime, *, hit: bool) -> tuple[str, .
     return tuple(out)
 
 
-def step14_append_log(state: StateDir, plan: Plan, result: Result, gateway: Gateway) -> None:
+def step14_append_log(state: StateDir, plan: Plan, result: Result) -> bool:
     """Step 14 (the log part): append the record after the commit. A failure never changes the
-    exit code; it is one stderr warning with no value in it. A dedupe hit writes no record."""
+    exit code; it returns True (the ``log_failed`` warning, printed with the output) and puts no
+    value in it. A dedupe hit writes no record."""
+    assert result.id is not None  # a dry run never gets here
     if not result.created:
-        return
+        return False
     call = plan.call
     record = LogRecord(
         event="add",
@@ -353,17 +379,26 @@ def step14_append_log(state: StateDir, plan: Plan, result: Result, gateway: Gate
     try:
         append_record(state, record, plan.now)
     except Exception:  # noqa: BLE001 - the note is durable: any failure here is only a warning
-        gateway.write_err(f"{LOG_FAILED_WARNING}\n")
+        return True
+    return False
 
 
-def print_result(call: Call, result: Result, gateway: Gateway) -> None:
-    """Step 14 (the output part): the JSON document, or ``note <id> created|exists`` (not with
-    ``--quiet``). TODO(#19): the stderr warning lines (``warning (<name>): <fixed message>``)."""
+def print_result(call: Call, result: Result, gateway: Gateway, *, log_failed: bool = False) -> None:
+    """Step 14 (the output part): the JSON document, or ``note <id> created|exists`` (the dry-run
+    line for a dry run); the human line is not printed with ``--quiet``. The warning lines
+    (``warning (<name>): <fixed message>``) follow on stderr in the order of the ``warnings``
+    array, then ``log_failed``; ``--quiet`` never suppresses them. ``log_failed`` is not in
+    the JSON ``warnings`` (it is about the log, not the note)."""
+    names = (*result.warnings, *(("log_failed",) if log_failed else ()))
     if call.json_mode:
         line = json.dumps(result.document(), ensure_ascii=True, separators=(",", ":")) + "\n"
-        gateway.write_out(line)
-    elif not call.quiet:
-        emit(gateway, format_add(result.id, created=result.created))
+        emit(gateway, Rendered(line, warnings=format_warnings(names)))
+        return
+    if result.id is None:
+        shown = format_add_dry_run(names)
+    else:
+        shown = format_add(result.id, created=result.created, warnings=names)
+    emit(gateway, Rendered("" if call.quiet else shown.out, warnings=shown.warnings))
 
 
 # -- the command ----------------------------------------------------------------------------------
@@ -382,7 +417,12 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
         call, effective, kind, body, hashlib.sha256(data).hexdigest(), len(data), now, created,
         lifetime,
     )  # fmt: skip
-    # TODO(#19): --dry-run stops here (after step 7) and prints the dry-run document.
+    if call.dry_run:
+        # Stops after step 7: no state directory, no state.db, no dedupe, supersede check or
+        # limit, no log. Disarm before the output, as after the commit of a real add.
+        deadline.current().disarm()
+        print_result(call, dry_run_result(plan), gateway)
+        return 0
     with step8_open_state_dir(gateway) as state:
         store = step9_open_store(state)
         try:
@@ -398,8 +438,8 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
             deadline.current().disarm()
         finally:
             store.close()
-        step14_append_log(state, plan, result, gateway)
-    print_result(call, result, gateway)
+        log_failed = step14_append_log(state, plan, result)
+    print_result(call, result, gateway, log_failed=log_failed)
     return 0
 
 
@@ -420,5 +460,5 @@ COMMAND = Command(
     "leave a note for the next agent",
     run,
     configure,
-    dry_run=False,  # TODO(#19): True once --dry-run stops after step 7
+    dry_run=True,
 )

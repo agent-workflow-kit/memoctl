@@ -1,0 +1,1 @@
+{"id":null,"created":true,"dry_run":true,"repo":"example.com/team/app","topic":"build","kind":"implement","labels":["a=1","b=2"],"expires":"2026-01-31T00:00:00Z","supersedes":null,"size":12,"body_sha256":"ef32f2f23c4fe447b60c83fe7f9a34a5c7a0be4161b5b053e361709510819cdd","warnings":[]}
