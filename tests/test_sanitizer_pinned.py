@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import sys
+from collections.abc import Iterator
 
 import pytest
 
@@ -98,7 +99,10 @@ def _is_literal(node: ast.expr | None) -> bool:
 def _import_time_expressions(node: ast.stmt) -> list[ast.expr]:
     """The expressions a top-level statement evaluates when the module is imported."""
     if isinstance(node, ast.Assign):
-        return [node.value]
+        found = [node.value]
+        for target in node.targets:  # `x[print(1)] = 2` and `f().a = 1` run at import too
+            found.append(target)
+        return found
     if isinstance(node, ast.FunctionDef):
         args = node.args
         every = [*args.posonlyargs, *args.args, *args.kwonlyargs]
@@ -113,6 +117,18 @@ def _import_time_expressions(node: ast.stmt) -> list[ast.expr]:
     return []
 
 
+def _walk_skipping_lambdas(expr: ast.expr) -> Iterator[ast.AST]:
+    """``ast.walk`` that does not enter a lambda: its body runs on a call, not at import."""
+    todo: list[ast.AST] = [expr]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, ast.Lambda):  # only its own defaults run at import
+            todo.extend([*node.args.defaults, *(d for d in node.args.kw_defaults if d)])
+            continue
+        yield node
+        todo.extend(ast.iter_child_nodes(node))
+
+
 def import_time_violations(source: str) -> list[str]:
     """What module-level code would run beyond pure constructors (empty: nothing)."""
     bad: list[str] = []
@@ -124,7 +140,7 @@ def import_time_violations(source: str) -> list[str]:
             bad.append(f"statement: {ast.dump(node)[:60]}")
             continue
         for expr in _import_time_expressions(node):
-            for sub in ast.walk(expr):
+            for sub in _walk_skipping_lambdas(expr):
                 if isinstance(sub, ast.Call):
                     if _call_name(sub) not in TOP_LEVEL_CALLS:
                         bad.append(f"call: {ast.dump(sub)[:60]}")
@@ -147,6 +163,14 @@ def test_the_import_time_check_accepts_the_constructors_with_literal_arguments()
     assert import_time_violations(source) == []
 
 
+def test_the_import_time_check_does_not_run_a_lambda_body_in_a_default() -> None:
+    assert import_time_violations("def f(a=lambda: print(1)): pass\n") == []
+
+
+def test_the_import_time_check_accepts_a_plain_name_target() -> None:
+    assert import_time_violations("A = 1\nB = C = 2\n") == []
+
+
 @pytest.mark.parametrize(
     "source",
     [
@@ -162,6 +186,9 @@ def test_the_import_time_check_accepts_the_constructors_with_literal_arguments()
         "import re\nA = re.compile({1: print(2)})\n",
         "A = [print(1)]\n",
         "class C:\n    x = print(1)\n",
+        "A = {}\nA[print(1)] = 2\n",
+        "def f(): pass\nf().a = 1\n",
+        "def f(a=lambda x=print(1): x): pass\n",
     ],
     ids=[
         "call",
@@ -176,6 +203,9 @@ def test_the_import_time_check_accepts_the_constructors_with_literal_arguments()
         "compile-nested",
         "list-call",
         "class",
+        "subscript-target",
+        "call-target",
+        "lambda-default-argument",
     ],
 )
 def test_the_import_time_check_rejects_each_way_to_run_code_at_import(source: str) -> None:

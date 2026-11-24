@@ -588,24 +588,31 @@ def _kept(text: str) -> str:
     )
 
 
-def expected_output(text: str) -> str:
-    """What memoctl must print, derived from claude-session's behaviour and the listed rewrites."""
+def _fixed_point(text: str) -> str:
+    """The text with the listed removals, then claude-session's steps repeated until stable."""
     cur = _kept(text)
     while (nxt := _cs_open(cur)) != cur:
         cur = nxt
-    return cur.replace("\t", "    ").replace("<", "&lt;")
+    return cur
+
+
+def expected_output(text: str) -> str:
+    """What memoctl must print, derived from claude-session's behaviour and the listed rewrites."""
+    return _fixed_point(text).replace("\t", "    ").replace("<", "&lt;")
 
 
 def residue_mismatches(sanitize: Callable[[str], str], texts: Iterable[str]) -> list[str]:
     """Texts whose output is not ``expected_output``.
 
     Left out: a text whose characters, once the ones both sanitizers remove are gone, hold a run
-    of more than 30 combining marks: there memoctl's guard drops code points by design.
+    of more than 30 combining marks at the fixed point (the same text ``expected_output`` is
+    built from, so a run that only appears after a second pass is skipped too): there memoctl's
+    guard drops code points by design.
     """
     bad = []
     for text in texts:
         # Skipped here; the combining_mark_run_guard witness and the contract sweeps cover them.
-        if body.has_long_combining_run(_cs_open(_kept(text))):
+        if body.has_long_combining_run(_fixed_point(text)):
             continue
         if sanitize(text) != expected_output(text):
             bad.append(text)
@@ -627,6 +634,19 @@ def test_the_residue_check_sees_a_difference_that_hides_behind_a_listed_feature(
     assert features(text)  # the old check accepts the difference: a listed feature is present ...
     assert memoctl_sanitize(text) == "ax"
     assert residue_mismatches(hides, [text]) == [text]  # ... this one does not
+
+
+def test_the_residue_gate_uses_the_fixed_point_not_one_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def one_bar_per_pass(text: str) -> str:  # a stand-in step: each pass removes one `|`
+        return text.replace("|", "", 1)
+
+    monkeypatch.setitem(globals(), "_cs_open", one_bar_per_pass)
+    text = "e" + "\u0301" * 15 + "||" + "\u0301" * 16
+    assert not body.has_long_combining_run(one_bar_per_pass(_kept(text)))  # one pass: no run
+    assert body.has_long_combining_run(_fixed_point(text))  # the fixed point: a run of 31
+    assert residue_mismatches(lambda t: t, [text]) == []  # skipped, not a false failure
 
 
 # --- the golden blocks ---------------------------------------------------------------------------
