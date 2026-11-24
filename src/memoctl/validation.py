@@ -21,13 +21,8 @@ A deadline (``StoreError("timeout")``, raised when the progress handler installe
 ``configure`` fires) is not a check failure: it propagates so the CLI prints the error
 envelope (exit 12 ``timeout``).
 
-todo(#6): register ``validate`` (no ``--dry-run``) with one line in ``COMMANDS`` in
-``cli_commands.py`` (PR #56): a ``Command`` whose ``run(args, gateway)`` calls
-:func:`validate_store`, prints ``json.dumps(result.document())`` with ``--json`` and returns
-:attr:`ValidateResult.exit_code`; a ``StoreError`` with reason ``timeout`` goes to the
-envelope path. First branch that merges #56 and #60 adds it.
-todo(#21): human output through ``format_validate`` (``render.py``, PR #60) and ``emit``.
-todo(#10): pass the deadline's ``configure`` hook (PR #59) as ``configure=``.
+The command (argv, output, status line, deadline disarm) is ``cmd_validate.py``.
+
 todo(#35): the live WSL/network-mount check of ``unsafe_filesystem`` is a human step.
 """
 
