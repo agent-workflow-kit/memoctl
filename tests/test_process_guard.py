@@ -272,25 +272,46 @@ def test_a_symlink_to_a_real_crontab_in_a_tmp_dir_is_refused(decoy: Path, tmp_pa
     assert not _ran(decoy)
 
 
-def test_a_memoctl_child_with_the_system_path_is_refused(tmp_path: Path, decoy_bin: str) -> None:
+def _run_memoctl_cron_with_path(tmp_path: Path, path: str) -> None:
+    subprocess.run(
+        private_home.argv(tmp_path, "cron", "install"),
+        input=b"", capture_output=True, env={"PATH": path, "HOME": str(tmp_path)},
+        timeout=60, check=False,
+    )  # fmt: skip
+
+
+def test_a_memoctl_child_with_a_decoy_path_is_refused(tmp_path: Path, decoy_bin: str) -> None:
     """The incident: ``memoctl cron`` in a child with a PATH that holds a real crontab."""
-    for path in (decoy_bin, _system_crontab_path()):
-        with pytest.raises(CrontabGuardError, match="PATH"):
-            subprocess.run(
-                private_home.argv(tmp_path, "cron", "install"),
-                input=b"", capture_output=True, env={"PATH": path, "HOME": str(tmp_path)},
-                timeout=60, check=False,
-            )  # fmt: skip
+    with pytest.raises(CrontabGuardError, match="PATH"):
+        _run_memoctl_cron_with_path(tmp_path, decoy_bin)
 
 
-def test_the_session_tripwire_is_on_the_process_path_and_fails() -> None:
+def test_a_memoctl_child_with_the_system_path_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(CrontabGuardError, match="PATH"):
+        _run_memoctl_cron_with_path(tmp_path, _system_crontab_path())  # skipped without one
+
+
+def test_the_session_tripwire_is_on_the_process_path_and_fails(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     from tests.conftest import session_tripwire
 
     tripwire = session_tripwire()
     assert tripwire is not None and (tripwire / "crontab").exists()
+    assert tmp_path_factory.getbasetemp().resolve() in tripwire.parents  # never in /tmp itself
     assert str(tripwire) in os.environ["PATH"].split(os.pathsep)
     assert "exit 97" in (tripwire / "crontab").read_text()  # the guard refuses to run it here
     assert os.access(tripwire / "crontab", os.X_OK)
+
+
+def test_a_vanished_tripwire_stub_is_restored_before_the_next_test() -> None:
+    from tests import conftest
+
+    tripwire = conftest.session_tripwire()
+    assert tripwire is not None
+    (tripwire / "crontab").unlink()
+    conftest.ensure_session_tripwire()
+    assert (tripwire / "crontab").read_text() == conftest.TRIPWIRE_SCRIPT
 
 
 def test_child_env_helper_builds_a_path_that_passes(tmp_path: Path) -> None:
@@ -314,3 +335,103 @@ def test_child_env_helper_puts_the_fake_first(fake_crontab: tuple[str, Path]) ->
     assert shutil.which("sh", path=path) is not None
     result = subprocess.run([script, "-l"], env={"PATH": path, "FAKE_CRONTAB_DIR": str(state)})
     assert result.returncode == 1  # the fake: no table stored
+
+
+# --- wrappers that set the child's environment inside argv ------------------------------------
+
+SYSTEM_PATH = "/usr/bin:/bin"
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        ["env"],
+        ["/usr/bin/env"],
+        ["nohup"],
+        ["timeout", "5"],
+        ["nice", "-n", "1"],
+        ["setsid"],
+        ["stdbuf", "-o0"],
+        ["sudo", "-n"],
+        ["doas"],
+        ["command"],
+        ["exec"],
+        ["xargs"],
+    ],
+)
+def test_a_wrapper_assigning_a_path_with_a_crontab_is_refused(
+    decoy_bin: str, wrapper: list[str]
+) -> None:
+    argv = [*wrapper, f"PATH={decoy_bin}", "sh", "-c", "true"]
+    with pytest.raises(CrontabGuardError, match="PATH"):
+        subprocess.run(argv, check=False)
+    with pytest.raises(CrontabGuardError, match="PATH"):
+        EarlyPopen(argv)
+
+
+def test_env_with_the_system_path_is_refused_before_exec() -> None:
+    _system_crontab_path()  # skipped when there is no system crontab
+    with pytest.raises(CrontabGuardError, match="PATH"):
+        subprocess.run(["/usr/bin/env", f"PATH={SYSTEM_PATH}", "sh", "-c", "command -v crontab"])
+
+
+def test_a_wrapper_assigning_a_path_without_a_crontab_is_allowed(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    result = subprocess.run(
+        ["env", f"PATH={empty}", sys.executable, "-c", "pass"], check=False
+    )  # fmt: skip
+    assert result.returncode == 0
+
+
+@pytest.mark.parametrize(
+    "option",
+    [["-i"], ["--ignore-environment"], ["-"], ["-S", "sh"], ["--split-string=sh"], ["-u", "PATH"],
+     ["--unset=PATH"], ["-uPATH"], ["-iu", "HOME"], ["-0i"], ["-C", "/", "-i"]],
+)  # fmt: skip
+def test_env_options_that_reset_the_environment_are_refused(option: list[str]) -> None:
+    with pytest.raises(CrontabGuardError, match="env"):
+        subprocess.run(["/usr/bin/env", *option, "sh", "-c", "command -v crontab"], check=False)
+
+
+def test_env_options_after_the_command_are_not_env_options() -> None:
+    result = subprocess.run(["env", sys.executable, "-u", "-c", "pass"], check=False)
+    assert result.returncode == 0
+
+
+@pytest.mark.parametrize(
+    "shell_argv",
+    [
+        ["sh", "-c", "PATH=/usr/bin:/bin command -v crontab"],
+        ["bash", "-c", "export PATH=/usr/bin:/bin; command -v crontab"],
+        ["dash", "-c", "PATH=/usr/bin:/bin; command -v crontab"],
+        ["bash", "-lc", "PATH+=:/usr/bin; true"],
+        ["env", "sh", "-c", "PATH=/usr/bin:/bin true"],
+        ["timeout", "5", "bash", "-c", "PATH=/usr/bin:/bin true"],
+    ],
+)
+def test_a_shell_command_string_assigning_path_is_refused(shell_argv: list[str]) -> None:
+    with pytest.raises(CrontabGuardError, match="PATH"):
+        subprocess.run(shell_argv, check=False)
+
+
+def test_a_shell_command_string_that_does_not_assign_path_is_allowed() -> None:
+    assert subprocess.run(["sh", "-c", "echo $HOME > /dev/null"], check=False).returncode == 0
+
+
+# --- the os functions that start a process ----------------------------------------------------
+
+
+def test_forkpty_is_blocked() -> None:
+    with pytest.raises(CrontabGuardError, match="not allowed"):
+        os.forkpty()
+    import pty
+
+    with pytest.raises(CrontabGuardError, match="not allowed"):
+        pty.fork()
+
+
+def test_openpty_is_harmless_and_stays_available() -> None:
+    master, slave = os.openpty()  # opens a pair of descriptors, starts nothing
+    os.close(master)
+    os.close(slave)

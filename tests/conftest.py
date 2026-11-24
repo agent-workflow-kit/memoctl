@@ -31,9 +31,22 @@ Autouse guards:
   relative ``PATH`` entries mean the child's working directory. There is no switch to disable it.
   ``tests/child_env.py`` builds a ``PATH`` that passes.
 
-Session backstop: ``pytest_sessionstart`` also puts a tripwire directory with a ``crontab`` that
-always exits 97 first on ``os.environ["PATH"]`` for the whole session (restored at the end), so
-code that runs outside the per-test fixtures finds the stub, never the real crontab.
+Wrappers: ``env``, ``nohup``, ``timeout``, ``xargs``, ``nice``, ``sudo`` and the like (see
+``WRAPPERS``) can set the child's ``PATH`` inside argv, after the environment above was checked.
+An argument ``PATH=...`` after such a wrapper is checked like an ``env=`` ``PATH``; ``env -i``,
+``-S``/``--split-string``, ``-u``/``--unset`` (and ``-``) are refused outright; a ``sh -c`` string
+that assigns ``PATH`` is refused. ``os.forkpty`` is blocked with ``os.fork`` (``os.openpty`` only
+opens descriptors and stays available).
+
+Out of scope: ``multiprocessing``, ``ctypes`` and a direct ``_posixsubprocess.fork_exec`` call
+bypass every wrapper above. They are not used by the tests; the tripwires first on ``PATH`` (the
+session one and one per test) are the backstop for a lookup that escapes the guard.
+
+Session backstop: ``pytest_sessionstart`` creates a tripwire directory with a ``crontab`` that
+always exits 97 below the session's pytest base temporary directory (not a bare ``/tmp``
+directory, which a cleaner may prune) and puts it first on ``os.environ["PATH"]`` for the whole
+session (restored and removed at the end; each test re-creates the stub if it vanished), so code
+that runs outside the per-test fixtures finds the stub, never the real crontab.
 ``pytest_sessionstart`` and ``pytest_sessionfinish`` compare the real
 ``~/.local/state/memoctl`` and ``~/.config/memoctl`` before and after the run and fail the
 session (exit status 1) when either was absent at the start and exists at the end.
@@ -47,10 +60,10 @@ from __future__ import annotations
 
 import os
 import pwd
+import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -79,6 +92,16 @@ def _write_tripwire(directory: Path) -> None:
 def session_tripwire() -> Path | None:
     """The session-wide directory whose ``crontab`` always fails (``None`` outside a session)."""
     return _SESSION.get("tripwire")
+
+
+def ensure_session_tripwire() -> None:
+    """Rewrite the session stub when it vanished (it lives below the session's base temp dir)."""
+    tripwire = session_tripwire()
+    if tripwire is not None:
+        tripwire.mkdir(parents=True, exist_ok=True)
+        stub = tripwire / "crontab"
+        if not stub.exists() or stub.read_text() != TRIPWIRE_SCRIPT or not os.access(stub, os.X_OK):
+            _write_tripwire(tripwire)
 
 
 def _path_of(env: Mapping[Any, Any] | list[Any] | None) -> str:
@@ -123,6 +146,7 @@ def check_child_path(
 def _private_environment(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> Path:
+    ensure_session_tripwire()
     root = tmp_path_factory.mktemp("env")
     home = root / "home"
     home.mkdir()
@@ -158,7 +182,11 @@ _BEFORE: dict[str, int | None] = {}
 
 def pytest_sessionstart(session: pytest.Session) -> None:
     _BEFORE.update(passwd_guard.real_state_snapshot())
-    tripwire = Path(tempfile.mkdtemp(prefix="memoctl-session-tripwire-")).resolve()
+    # Below the session's pytest base temporary directory (not a bare /tmp directory a cleaner
+    # may prune), so the guard's single allowed base covers the tripwire too.
+    factory = session.config._tmp_path_factory  # type: ignore[attr-defined]
+    tripwire = (factory.getbasetemp() / "session-tripwire").resolve()
+    tripwire.mkdir(parents=True, exist_ok=True)
     _write_tripwire(tripwire)
     _SESSION["tripwire"] = tripwire
     _SESSION["path"] = os.environ.get("PATH")
@@ -187,6 +215,7 @@ SHELLS = {"sh", "bash", "dash", "zsh", "ksh"}
 OS_BLOCKED = (
     "system",
     "fork",
+    "forkpty",
     "posix_spawn",
     "posix_spawnp",
     *(f"exec{s}" for s in ("l", "le", "lp", "lpe", "v", "ve", "vp", "vpe")),
@@ -199,6 +228,62 @@ def _under(path: str, base: Path) -> bool:
     return os.sep in path and base in Path(path).resolve().parents
 
 
+WRAPPERS = {
+    "env", "nohup", "timeout", "xargs", "nice", "ionice", "setsid", "stdbuf", "sudo", "doas",
+    "chroot", "unshare", "command", "exec", "busybox", "flock", "time", "taskset", "chrt",
+    "runuser", "su", "nsenter", "setpriv", "strace", "ltrace", "watch", "script",
+}  # fmt: skip
+_ASSIGNS_PATH = re.compile(r"(?<![A-Za-z0-9_])PATH\+?=")
+_SHELL_C = re.compile(r"-[A-Za-z]*c[A-Za-z]*$")
+# env options that reset or edit the environment, or take a value that hides what follows
+_ENV_REFUSED_LONG = ("--ignore-environment", "--split-string", "--unset")
+
+
+def _check_wrapper_environment(argv: list[str], base: Path) -> None:
+    """Refuse a wrapper or shell that sets the child's ``PATH`` from inside argv.
+
+    ``check_child_path`` sees only the environment handed to ``Popen``; ``env PATH=... sh`` or
+    ``sh -c 'PATH=...'`` replaces it afterwards, so the assigned ``PATH`` is checked the same
+    way, and the forms that cannot be checked are refused.
+    """
+    names = [os.path.basename(a) for a in argv]
+    if not argv or not (set(names) & (WRAPPERS | SHELLS)):
+        return
+    if names[0] == "env":
+        _check_env_options(argv)
+    for i, name in enumerate(names):
+        if name in WRAPPERS:
+            for arg in argv[i + 1 :]:
+                if arg.startswith("PATH="):
+                    check_child_path([arg], None, [base])
+        if name in SHELLS:
+            rest = argv[i + 1 :]
+            if any(_SHELL_C.match(a) for a in rest) and any(_ASSIGNS_PATH.search(a) for a in rest):
+                raise CrontabGuardError(f"refusing a shell command that assigns PATH: {argv!r}")
+
+
+def _check_env_options(argv: list[str]) -> None:
+    """``env -i/-S/-u`` (and ``-``) reset or hide the environment: a test never needs them."""
+    values = {"-C", "-P", "--chdir"}  # options whose value is the next argument
+    skip = False
+    for arg in argv[1:]:
+        if skip:
+            skip = False
+            continue
+        if arg == "--":
+            return
+        if arg == "-" or arg.startswith(_ENV_REFUSED_LONG):
+            raise CrontabGuardError(f"refusing env option {arg!r} (it resets the PATH): {argv!r}")
+        if arg.startswith("-") and not arg.startswith("--"):
+            if set(arg[1:]) & {"i", "S", "u"}:
+                raise CrontabGuardError(f"refusing env option {arg!r} (edits the PATH): {argv!r}")
+            skip = arg in values
+        elif arg.startswith("--"):
+            skip = arg in values
+        elif "=" not in arg:
+            return  # the command: what follows are its own arguments
+
+
 def check_process(argv: list[str], executables: list[str], base: Path) -> None:
     """Refuse anything that could reach the real crontab.
 
@@ -209,6 +294,7 @@ def check_process(argv: list[str], executables: list[str], base: Path) -> None:
     if os.path.basename(program) in SHELLS and "-c" in argv[1:]:
         if any("crontab" in a for a in argv[1:]):
             raise CrontabGuardError(f"refusing shell command mentioning crontab: {argv!r}")
+    _check_wrapper_environment(argv, base)
     # A wrapper (env, nohup, timeout, xargs, ...) may run a crontab given later in argv.
     for arg in argv[1:]:
         if os.path.basename(arg) == "crontab" and not _under(arg, base):
@@ -233,7 +319,7 @@ def _process_guard(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[None]:
     base = tmp_path_factory.getbasetemp().resolve()
-    bases = [base, *([session_tripwire()] if session_tripwire() else [])]
+    bases = [base]  # the session tripwire lives below the base too
     real_popen = subprocess.Popen
     real_fork_exec = subprocess._fork_exec  # type: ignore[attr-defined]
     real_posix_spawn = os.posix_spawn
