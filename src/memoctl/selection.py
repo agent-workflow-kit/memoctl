@@ -34,7 +34,10 @@ block is printed from a :class:`Selection` by ``memoctl.context_render``, which 
 note text has the documented shape and the sizes selection counted.
 ``memoctl.cmd_context`` wraps this in its exit paths and the deadline; the progress handler of
 the store interrupts a long scan.
-todo(#28): flood and performance fixtures (the scan is linear in the repo's live notes).
+Cost: the scan is linear in the repo's live notes (``eligible`` fixes the reserved lines before
+the walk). The flood and performance fixtures are tests/test_context_flood.py; a store of 100k live
+notes in one repo scans in about 1.7 to 2.5 s, over the default 2 s deadline (exit 12, fail
+closed), a decision for the maintainer (see issue 81), not a defect of the scan.
 """
 
 from __future__ import annotations

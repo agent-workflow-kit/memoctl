@@ -15,7 +15,7 @@ Uncommitted shared knowledge that agents leave for each other. Layer: L1 (primit
 ## Dependencies (justified)
 
 - `pyyaml`: the config is YAML (design guide section 3). Used with `safe_load` through a duplicate-key-rejecting loader ([Config](interface.md#config)).
-- `pydantic`: validates the config and the `--json` output models (guide section 3). Importing it costs about 100 ms on a cold start, well inside the `context` deadline; a design-time measurement put `context` on a 10 000-note store at 30 to 40 ms without it.
+- `pydantic`: validates the config and the `--json` output models (guide section 3). Importing it costs about 100 ms on a cold start, well inside the `context` deadline; a design-time measurement put `context` on a 10 000-note store at 30 to 40 ms without it. The end-to-end measurement with the import and the config load is about 0.13 s (10 000 notes of 400 B).
 - `jsonschema` and `types-pyyaml` are dev-only: the first checks `config.example.yaml` and the loader against `schemas/config.json` in tests, the second supplies PyYAML type stubs. Neither is a runtime dependency.
 - `regress` is dev-only: the ECMAScript regular-expression engine that CI's `check-jsonschema` uses, so a test compiles every schema pattern with the engine CI judges them by (Python's `re` accepts patterns that engine rejects). It is not a runtime dependency.
 - Everything else is the standard library: `sqlite3` (WAL), `argparse`, `unicodedata`, `hashlib`, `secrets`, `signal`, `fcntl`.
