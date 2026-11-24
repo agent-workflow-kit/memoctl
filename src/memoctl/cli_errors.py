@@ -167,6 +167,32 @@ class AlreadySupersededError(Exception):
         super().__init__("supersede target is already superseded")
 
 
+class RepoFullError(Exception):
+    """The repo has too many live notes (exit 20 ``repo_full``); carries the limit only."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__("repo is full")
+        self.limit = limit
+
+
+class StoreFullError(Exception):
+    """The store has too many notes (exit 20 ``store_full``); carries the limit only."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__("store is full")
+        self.limit = limit
+
+
+class RateLimitedError(Exception):
+    """Too many adds in the window (exit 20 ``rate_limited``, retryable)."""
+
+    def __init__(self, retry_after_s: int, limit: int, scope: str) -> None:
+        super().__init__("rate limited")
+        self.retry_after_s = retry_after_s
+        self.limit = limit
+        self.scope = scope
+
+
 @dataclass(frozen=True)
 class Failure:
     """One failed command, ready to render. Built only from fixed strings and identifiers."""
@@ -339,6 +365,27 @@ def _register_defaults() -> None:
             REFUSED, "refused", "supersede target is already superseded", "already_superseded"
         ),
     )
+    register_error(
+        RepoFullError,
+        lambda e: Failure(
+            REFUSED, "refused", "the repo has reached its live note limit", "repo_full",
+            {"limit": e.limit},
+        ),
+    )  # fmt: skip
+    register_error(
+        StoreFullError,
+        lambda e: Failure(
+            REFUSED, "refused", "the store has reached its note limit", "store_full",
+            {"limit": e.limit},
+        ),
+    )  # fmt: skip
+    register_error(
+        RateLimitedError,
+        lambda e: Failure(
+            REFUSED, "refused", "too many notes were added recently", "rate_limited",
+            {"retry_after_s": e.retry_after_s, "limit": e.limit, "scope": e.scope},
+        ),
+    )  # fmt: skip
     # A bad clock is an environment fault with no code of its own (interface.md, Exit codes).
     register_error(ClockError, lambda e: internal_failure())
     # Tracebacks must never render locals: the frames of BodyTextError and SecretDetected hold

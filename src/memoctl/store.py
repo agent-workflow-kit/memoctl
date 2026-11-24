@@ -34,8 +34,9 @@ todo(#15): the change log is appended after :meth:`Store.write` returns (after t
 ``add``'s write is :meth:`Store.insert_note` (the note, its labels and its rate row), run inside
 ``Store.write()``. The dedupe and supersede queries (:meth:`Store.live_with_key`,
 :meth:`Store.get_note`, :meth:`Store.replaced_note_id`, :meth:`Store.mark_superseded`) run inside
-the same transaction; the rules that use them are ``notes.py``'s. todo(#18): the limit queries
-are added here by their issue.
+the same transaction, as do the limit queries (:meth:`Store.count_live`,
+:meth:`Store.count_notes`, :meth:`Store.count_rate`, :meth:`Store.rate_instant`); the rules that
+use them are ``notes.py``'s.
 """
 
 from __future__ import annotations
@@ -642,6 +643,67 @@ class Store:
             labels=True,
             descending=True,
         )
+
+    # -- the limit counts (read inside the write transaction; interface.md, Limits)
+    def count_live(self, repo: str, now: int, cap: int) -> int:
+        """Live notes of ``repo`` at ``now`` (not superseded, ``expires`` after ``now``), counted
+        up to ``cap``. The plan visits the repo's rows through the index ``notes_repo_topic``, so
+        the work is bounded by the repo's rows (at most ``limits.total``); only the returned count
+        is capped at ``cap``."""
+        cursor = self.execute(
+            "SELECT count(*) FROM (SELECT 1 FROM notes WHERE repo = ? AND superseded_by IS NULL"
+            " AND expires > ? LIMIT ?)",
+            (repo, now, cap),
+        )
+        return self._count(cursor)
+
+    def count_notes(self, cap: int) -> int:
+        """Notes of any status in the store, counted up to ``cap``."""
+        cursor = self.execute("SELECT count(*) FROM (SELECT 1 FROM notes LIMIT ?)", (cap,))
+        return self._count(cursor)
+
+    def count_rate(self, repo: str | None, now: int, window: int) -> int:
+        """Rate rows (of ``repo``, or of every repo when ``None``) with ``now - window < at <=
+        now``: an index range scan; rows dated after ``now`` are not counted."""
+        low = now - window
+        if repo is None:
+            cursor = self.execute("SELECT count(*) FROM rate WHERE at > ? AND at <= ?", (low, now))
+        else:
+            cursor = self.execute(
+                "SELECT count(*) FROM rate WHERE repo = ? AND at > ? AND at <= ?",
+                (repo, low, now),
+            )
+        return self._count(cursor)
+
+    def rate_instant(self, repo: str | None, now: int, window: int, index: int) -> int:
+        """The ``at`` of the row at 0-based ``index`` among the rows counted by
+        :meth:`count_rate`, oldest first. ``StoreError("db_corrupt")`` when there is none (the
+        count and this read share one transaction, so that means the table changed under us)."""
+        low = now - window
+        if repo is None:
+            cursor = self.execute(
+                "SELECT at FROM rate WHERE at > ? AND at <= ? ORDER BY at LIMIT 1 OFFSET ?",
+                (low, now, index),
+            )
+        else:
+            cursor = self.execute(
+                "SELECT at FROM rate WHERE repo = ? AND at > ? AND at <= ? ORDER BY at"
+                " LIMIT 1 OFFSET ?",
+                (repo, low, now, index),
+            )
+        found = cursor.fetchone()
+        cursor.close()
+        if found is None or type(found[0]) is not int:
+            raise StoreError(DB_CORRUPT)
+        return found[0]
+
+    @staticmethod
+    def _count(cursor: Cursor) -> int:
+        found = cursor.fetchone()
+        cursor.close()
+        if found is None or type(found[0]) is not int or found[0] < 0:
+            raise StoreError(DB_CORRUPT)
+        return found[0]
 
     def replaced_note_id(self, note_id: int, repo: str | None = None) -> int | None:
         """The smallest valid id of a note whose ``superseded_by`` is ``note_id`` (one at most

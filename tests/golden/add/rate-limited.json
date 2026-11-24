@@ -1,0 +1,1 @@
+{"error": {"code": "refused", "message": "too many notes were added recently", "reason": "rate_limited", "details": {"retry_after_s": 500, "limit": 1, "scope": "repo"}, "retryable": true}}
