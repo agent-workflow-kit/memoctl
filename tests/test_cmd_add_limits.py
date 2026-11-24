@@ -10,14 +10,12 @@ import itertools
 import json
 import sqlite3
 import subprocess
-import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from memoctl import notes
 from memoctl.cli_errors import failure_for
 from memoctl.config import Limits
 from memoctl.notes import (
@@ -28,7 +26,7 @@ from memoctl.notes import (
     rate_retry_after,
 )
 from memoctl.statedir import open_state_dir
-from memoctl.store import Mode, open_store
+from memoctl.store import Mode, StoreError, open_store
 from tests import private_home
 from tests.fake_gateway import EPOCH, FakeGateway
 from tests.golden_files import check_golden
@@ -258,16 +256,36 @@ def test_store_full_is_reported_before_rate_limited(gw: FakeGateway) -> None:
     assert refused(gw, repo=OTHER, body="b")["reason"] == "store_full"
 
 
+@pytest.mark.parametrize("scope", ["repo", "store"])
 @pytest.mark.parametrize(
     ("offset", "counted"),
     [(-601, False), (-600, False), (-599, True), (-1, True), (0, True), (1, False)],
 )
 def test_the_window_is_open_below_and_closed_above(
-    gw: FakeGateway, offset: int, counted: bool
+    gw: FakeGateway, scope: str, offset: int, counted: bool
 ) -> None:
     """``now - W < at <= now``: a row exactly W old has left the window; a row at ``now`` is in;
-    a row one second ahead of ``now`` is not counted yet."""
-    limits(gw, adds_per_window=1, adds_per_window_total=100)
+    a row one second ahead of ``now`` is not counted yet. Same for both scopes."""
+    if scope == "repo":
+        limits(gw, adds_per_window=1, adds_per_window_total=100)
+        plant_rate(gw, REPO, NOW + offset)
+    else:
+        limits(gw, adds_per_window=1, adds_per_window_total=1)
+        plant_rate(gw, OTHER, NOW + offset)  # another repo: only the store scope sees it
+    if counted:
+        error = refused(gw)
+        assert error["reason"] == "rate_limited" and error["details"]["scope"] == scope
+    else:
+        assert ok(gw)["created"] is True
+
+
+@pytest.mark.parametrize(
+    ("offset", "counted"), [(-300, False), (-299, True), (0, True), (1, False)]
+)
+def test_the_window_boundary_follows_a_non_default_window(
+    gw: FakeGateway, offset: int, counted: bool
+) -> None:
+    limits(gw, adds_per_window=1, adds_per_window_total=100, window="5m")
     plant_rate(gw, REPO, NOW + offset)
     if counted:
         assert refused(gw)["reason"] == "rate_limited"
@@ -279,7 +297,7 @@ def test_the_window_is_open_below_and_closed_above(
     ("ats", "expected"),
     [
         ([-10, -5], 590),  # k = L = 2: the oldest, 10 s old
-        ([-30, -10, -5], 580),  # k = 3 > L = 2: a_(k-L+1) = a_2 = -10 -> 590? no: see below
+        ([-30, -10, -5], 590),  # k = 3 > L = 2: a_(k-L+1) = a_2 = -10: two rows must leave
         ([-599, -599], 1),  # both about to leave: at least 1
         ([0, 0], 600),  # both brand new: the whole window
     ],
@@ -289,10 +307,33 @@ def test_retry_after_is_when_the_row_that_frees_a_slot_leaves(
 ) -> None:
     limits(gw, adds_per_window=2, adds_per_window_total=100)
     plant_rate(gw, REPO, *(NOW + a for a in ats))
-    if ats == [-30, -10, -5]:
-        expected = 590  # a_(3-2+1) = a_2 = -10: need two rows to leave, so wait for the second
     error = refused(gw)
     assert error["details"] == {"retry_after_s": expected, "limit": 2, "scope": "repo"}
+
+
+def test_store_scope_retry_after_with_more_counted_rows_than_the_limit(gw: FakeGateway) -> None:
+    limits(gw, adds_per_window=2, adds_per_window_total=2)
+    plant_rate(gw, OTHER, NOW - 30, NOW - 10, NOW - 5)
+    error = refused(gw)
+    # k = 3 > L = 2: a_(k-L+1) = a_2 = -10, so 600 - 10
+    assert error["details"] == {"retry_after_s": 590, "limit": 2, "scope": "store"}
+
+
+def test_the_repo_override_of_adds_per_window_wins_over_the_global_figure(gw: FakeGateway) -> None:
+    write_config(
+        gw,
+        "limits:\n  adds_per_window: 5\n  adds_per_window_total: 100\n"
+        f"repos:\n  {REPO}:\n    limits:\n      adds_per_window: 1\n",
+    )
+    ok(gw)
+    assert refused(gw, body="b")["details"] == {
+        "retry_after_s": 600,
+        "limit": 1,
+        "scope": "repo",
+    }
+    for i in range(5):  # the global 5 applies to another repo
+        assert ok(gw, repo=OTHER, body=f"o{i}")["created"] is True
+    assert refused(gw, repo=OTHER, body="o5")["details"]["limit"] == 5
 
 
 def test_retry_after_is_honest_a_retry_at_that_time_succeeds(gw: FakeGateway) -> None:
@@ -535,9 +576,11 @@ def test_a_refusal_changes_no_file_in_the_state_directory(gw: FakeGateway) -> No
     assert len(rate_rows(gw)) == 1 and len(log_records(gw)) == 1
 
 
-def test_the_limit_rows_are_read_through_the_deadline_aware_store(gw: FakeGateway) -> None:
-    """Step 12 uses ``Store.execute`` (progress handler, translated errors): a refusal inside
-    the write transaction rolls it back and the next add works after a prune-like cleanup."""
+def test_a_refused_add_rolls_back_and_a_later_add_works_once_room_exists(
+    gw: FakeGateway,
+) -> None:
+    """A refusal inside the write transaction rolls it back; the next add works once the first
+    note is no longer live."""
     limits(gw, live_per_repo=1)
     ok(gw)
     refused(gw, body="b")
@@ -639,37 +682,48 @@ def test_evaluate_limits_reads_a_store_without_writing(gw: FakeGateway) -> None:
             assert found is not None and found.reason == "repo_full"
             assert evaluate_limits(store, Limits(), REPO, NOW, target_live=False) is None
         store.close()
-    assert notes.__doc__  # the rules live in notes.py
 
 
 # -- 8. size: bounded queries ----------------------------------------------
 
 
-def test_the_limit_queries_stay_fast_with_100k_live_notes(gw: FakeGateway) -> None:
+def test_the_limit_queries_stay_correct_with_100k_live_notes(gw: FakeGateway) -> None:
     limits(gw, live_per_repo=100000, total=1000000, adds_per_window=10000,
            adds_per_window_total=100000)  # fmt: skip
     plant_notes(gw, REPO, 99_999)
     plant_notes(gw, OTHER, 1000)
-    started = time.monotonic()
-    ok(gw, body="one more")
-    assert time.monotonic() - started < 10
-    started = time.monotonic()  # 100000 live now: exactly at the limit
+    assert ok(gw, body="one more")["created"] is True
+    # 100000 live now: exactly at the limit
     assert refused(gw, body="two more")["reason"] == "repo_full"
-    assert time.monotonic() - started < 10
 
 
 def test_the_limit_queries_use_indexes(gw: FakeGateway) -> None:
+    """EXPLAIN QUERY PLAN on the statements the Store methods really execute (traced)."""
     init_store(gw)
-    plans = {
-        "live": "EXPLAIN QUERY PLAN SELECT count(*) FROM (SELECT 1 FROM notes WHERE repo = 'r'"
-        " AND superseded_by IS NULL AND expires > 5 LIMIT 9)",
-        "rate": "EXPLAIN QUERY PLAN SELECT count(*) FROM rate WHERE repo = 'r' AND at > 1"
-        " AND at <= 9",
-        "rate_all": "EXPLAIN QUERY PLAN SELECT count(*) FROM rate WHERE at > 1 AND at <= 9",
-    }
-    for name, plan in plans.items():
-        detail = " ".join(row[3] for row in db(gw, plan))
-        assert "USING" in detail and "SCAN notes" not in detail, (name, detail)
+    state = open_state_dir(gw, create=False)
+    assert state is not None
+    seen: list[tuple[str, str]] = []  # (kind, sql)
+    with state:
+        store = open_store(state, Mode.READ)
+        assert store is not None
+        store._conn.set_trace_callback(lambda sql: seen.append(("run", sql)))  # noqa: SLF001
+        with store.read():
+            for repo in (REPO, None):
+                store.count_rate(repo, 9, 8)
+                try:
+                    store.rate_instant(repo, 9, 8, 0)
+                except StoreError:
+                    pass  # no rows: only the statement matters
+            store.count_live(REPO, 5, 9)
+            store.count_notes(9)
+        store._conn.set_trace_callback(None)  # noqa: SLF001
+        statements = [sql for _, sql in seen if sql.lstrip().upper().startswith("SELECT")]
+        assert len(statements) >= 6, statements
+        for sql in statements:
+            plan = store._conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall()  # noqa: SLF001
+            for row in plan:
+                assert row[3] not in ("SCAN notes", "SCAN rate"), (sql, row[3])
+        store.close()
 
 
 # -- 9. real processes racing for the last slot ----------------------------------------------

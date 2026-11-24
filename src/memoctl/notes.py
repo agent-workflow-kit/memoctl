@@ -163,7 +163,8 @@ def evaluate_limits(
     later counts) and return the first refusal with its ``retry_after_s``, else ``None``. Reads
     only; call it inside the caller's transaction.
 
-    The note counts are capped one above their limit, so the work is bounded by the limit; the
+    The note counts are capped one above their limit; the live count visits the repo's rows via
+    the index, so its work is bounded by the repo's rows, at most ``limits.total``. The
     rate counts are exact because ``retry_after_s`` needs the position of the row that frees a
     slot (the rows counted are the ones inside the window, which the limits bound)."""
     window = limits.window

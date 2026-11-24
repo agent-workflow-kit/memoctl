@@ -34,8 +34,9 @@ todo(#15): the change log is appended after :meth:`Store.write` returns (after t
 ``add``'s write is :meth:`Store.insert_note` (the note, its labels and its rate row), run inside
 ``Store.write()``. The dedupe and supersede queries (:meth:`Store.live_with_key`,
 :meth:`Store.get_note`, :meth:`Store.replaced_note_id`, :meth:`Store.mark_superseded`) run inside
-the same transaction; the rules that use them are ``notes.py``'s. todo(#18): the limit queries
-are added here by their issue.
+the same transaction, as do the limit queries (:meth:`Store.count_live`,
+:meth:`Store.count_notes`, :meth:`Store.count_rate`, :meth:`Store.rate_instant`); the rules that
+use them are ``notes.py``'s.
 """
 
 from __future__ import annotations
