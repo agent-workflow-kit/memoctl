@@ -140,6 +140,7 @@ def test_the_wal_switch_waits_are_capped_too(state: StateDir) -> None:
     assert seen[0] == "PRAGMA busy_timeout = 30"
 
 
+# The child below overrides home() in its own gateway subclass (no password database read).
 # -- R6: acceptance criterion 1, with a real lock holder and a real child ----------------------
 
 CHILD = """\

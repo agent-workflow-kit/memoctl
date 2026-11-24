@@ -995,6 +995,34 @@ def _s11(gw: FakeGateway, argv: list[str]) -> None:
     argv += ["--supersedes", "5"]  # no such note
 
 
+def _seed_target(gw: FakeGateway, repo: str, superseded_by: int | None) -> None:
+    state = open_state_dir(gw, create=True)
+    with state:
+        store = open_store(state, Mode.INIT)
+        assert store is not None
+        with store.write():
+            store.insert_note(
+                repo=repo, topic="build", kind="unknown", body="x", body_sha256="0" * 64,
+                size=1, created=1, expires=2, labels=(),
+            )  # fmt: skip
+        store.close()
+    if superseded_by is not None:
+        conn = sqlite3.connect(state_dir(gw) / "state.db")
+        conn.execute("UPDATE notes SET superseded_by = ?", (superseded_by,))
+        conn.commit()
+        conn.close()
+
+
+def _s11_mismatch(gw: FakeGateway, argv: list[str]) -> None:
+    _seed_target(gw, "example.com/team/other", None)
+    argv += ["--supersedes", "1"]
+
+
+def _s11_superseded(gw: FakeGateway, argv: list[str]) -> None:
+    _seed_target(gw, REPO, 77)
+    argv += ["--supersedes", "1"]
+
+
 Scenario = tuple[
     str, Callable[[FakeGateway, list[str]], None], Callable[[int, dict[str, Any]], bool]
 ]
@@ -1011,11 +1039,13 @@ SCENARIOS: list[Scenario] = [
     ("9c", _s9_corrupt, lambda c, e: c == 12 and e["reason"] == "db_corrupt"),
     ("10", _seed_corrupt_target, lambda c, e: c == 12 and e["reason"] == "db_corrupt"),
     ("11", _s11, lambda c, e: c == 10 and e["details"] == {"id": 5}),
+    ("11m", _s11_mismatch, lambda c, e: c == 20 and e["reason"] == "supersede_mismatch"),
+    ("11s", _s11_superseded, lambda c, e: c == 20 and e["reason"] == "already_superseded"),
 ]
 
 
 def _step(scenario: Scenario) -> int:
-    return int(scenario[0].rstrip("lc"))  # "9l" and "9c" are step 9 too
+    return int(scenario[0].rstrip("lcms"))  # "9l", "9c", "11m", "11s" share their step
 
 
 def _without_sidecars(files: dict[str, tuple[Any, ...]]) -> dict[str, tuple[Any, ...]]:
@@ -1052,6 +1082,8 @@ def test_of_two_failing_steps_the_earlier_wins_and_nothing_was_written(
         for _, setup, _ in (second, first):  # order of setup must not matter
             setup(gw, argv)
         before = snapshot(gw.home())
+        unreadable = {8, 9} & {_step(first), _step(second)}  # an unsafe or newer store
+        seeded = [] if unreadable else stored(gw)  # rows a scenario planted (steps 10 and 11)
         gw.terminal.stdout = ""
         code = main(argv, gw)
     finally:
@@ -1067,8 +1099,8 @@ def test_of_two_failing_steps_the_earlier_wins_and_nothing_was_written(
         # not even the state directory (the blocker's own -wal/-shm files go with its connection)
         assert _without_sidecars(snapshot(gw.home())) == _without_sidecars(before)
     assert log_records(gw) == []
-    if not {8, 9} & {_step(first), _step(second)}:  # an unsafe or newer store cannot be read back
-        assert stored(gw) == []
+    if not unreadable:  # cannot be read back
+        assert stored(gw) == seeded
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s[0])

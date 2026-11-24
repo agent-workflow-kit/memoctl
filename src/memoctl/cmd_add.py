@@ -19,7 +19,7 @@ Seams owned by later issues are marked with ``TODO(#N)`` at the exact step: #18 
 (``--dry-run`` and the warning lines), #20 (concurrency).
 
 A crash (or a signal) between the commit of step 13 and the log append of step 14 leaves a stored
-note with no log record, as the interface documents; the retry then finds the note (#17) and
+note with no log record, as the interface documents; the retry then finds the note and
 writes no record either (a dedupe hit).
 
 Nothing here renders an exception: failures leave as typed exceptions that ``cli_errors`` maps
@@ -245,9 +245,14 @@ def step10_dedupe(store: Store, plan: Plan) -> Result | None:
     row = find_duplicate(store, key, plan.created, call.supersedes)
     if row is None:
         return None
+    # Under (b) the target is the note this retry replaced; under (a) the pointer is looked up
+    # in the hit's own repo only, so a planted row of another repo never shows its id.
+    supersedes = (
+        call.supersedes if call.supersedes is not None else store.replaced_note_id(row.id, row.repo)
+    )
     return Result(
         row.id, False, row.repo, row.topic, row.kind, row.labels, row.expires,
-        store.replaced_note_id(row.id), row.size, row.body_sha256,
+        supersedes, row.size, row.body_sha256,
         build_warnings(plan, plan.lifetime, hit=True),
     )  # fmt: skip
 

@@ -643,13 +643,21 @@ class Store:
             descending=True,
         )
 
-    def replaced_note_id(self, note_id: int) -> int | None:
+    def replaced_note_id(self, note_id: int, repo: str | None = None) -> int | None:
         """The smallest valid id of a note whose ``superseded_by`` is ``note_id`` (one at most
-        in a store the tool wrote): the note ``note_id`` replaced."""
-        cursor = self.execute(
-            "SELECT id FROM notes WHERE superseded_by = ? AND id <= ? ORDER BY id LIMIT 1",
-            (note_id, MAX_ID),
-        )
+        in a store the tool wrote): the note ``note_id`` replaced. With ``repo`` only a note of
+        that repo counts, so a planted pointer from another repo never shows its id."""
+        if repo is None:
+            cursor = self.execute(
+                "SELECT id FROM notes WHERE superseded_by = ? AND id <= ? ORDER BY id LIMIT 1",
+                (note_id, MAX_ID),
+            )
+        else:
+            cursor = self.execute(
+                "SELECT id FROM notes WHERE superseded_by = ? AND id <= ? AND repo = ?"
+                " ORDER BY id LIMIT 1",
+                (note_id, MAX_ID, repo),
+            )
         found = cursor.fetchone()
         cursor.close()
         return found[0] if found is not None and type(found[0]) is int else None

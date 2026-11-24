@@ -12,11 +12,24 @@ Autouse guards:
   ``os.posix_spawn*`` and ``os.fork`` raise when called directly. Every process a test
   starts is recorded so the exact ones still running at teardown are killed (by the ``Popen``
   object that launched them, never by name or pattern).
+- ``_passwd_guard``: the tool takes its home from the password database, not from ``HOME``, so
+  ``pwd.getpwuid`` and ``pwd.getpwnam`` are patched to return entries whose ``pw_dir`` raises
+  ``AssertionError`` when it is the real home (``tests/passwd_guard.py``). Other fields still
+  work. A test that must read the real value (it only compares it) takes the ``real_passwd``
+  marker; a test that patches ``pwd.getpwuid`` itself replaces the guard.
+
+Session backstop: ``pytest_sessionstart`` and ``pytest_sessionfinish`` compare the real
+``~/.local/state/memoctl`` and ``~/.config/memoctl`` before and after the run and fail the
+session (exit status 1) when either appeared or changed. This also covers child processes.
+
+A real child process that needs a home uses ``tests/private_home.py`` (``argv(home, ...)``): a
+wrapper that gives ``pwd.getpwuid`` a private ``pw_dir`` and runs ``python -m memoctl``.
 """
 
 from __future__ import annotations
 
 import os
+import pwd
 import shutil
 import subprocess
 import sys
@@ -25,6 +38,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from tests import passwd_guard
 
 FAKEBIN = Path(__file__).parent / "fakebin"
 
@@ -52,6 +67,33 @@ def _private_environment(
     monkeypatch.setenv("LC_ALL", "C")
     monkeypatch.setenv("PATH", f"{tripwire}{os.pathsep}{os.environ.get('PATH', '')}")
     return home
+
+
+@pytest.fixture(autouse=True)
+def _passwd_guard(
+    request: pytest.FixtureRequest, _private_environment: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if request.node.get_closest_marker("real_passwd") is not None:
+        return
+    monkeypatch.setattr(pwd, "getpwuid", passwd_guard.guarded(pwd.getpwuid))
+    monkeypatch.setattr(pwd, "getpwnam", passwd_guard.guarded(pwd.getpwnam))
+
+
+_BEFORE: dict[str, int | None] = {}
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    _BEFORE.update(passwd_guard.real_state_snapshot())
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    changed = passwd_guard.changed_paths(_BEFORE, passwd_guard.real_state_snapshot())
+    if changed:
+        sys.stderr.write(
+            f"\nISOLATION BREACH: {', '.join(changed)} below {passwd_guard.REAL_HOME} appeared "
+            "or changed during the test session; a test reached the real home.\n"
+        )
+        session.exitstatus = 1
 
 
 SHELLS = {"sh", "bash", "dash", "zsh", "ksh"}

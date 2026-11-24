@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from memoctl import __version__
+from tests import private_home
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
@@ -36,9 +37,10 @@ def _run(
     *,
     shell_prefix: str = "",
     stdin: int | None = None,
-    entry: Sequence[str] = (sys.executable, "-I", "-m", "memoctl"),
+    entry: Sequence[str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    argv: list[bytes | str] = [*entry, *args]
+    # The default entry is the real one with a private home (tests/private_home.py).
+    argv: list[bytes | str] = [*(entry or private_home.argv(tmp_path / "home")), *args]
     cmd: list[bytes | str] = argv
     if shell_prefix:
         cmd = ["sh", "-c", f'exec "$0" "$@" {shell_prefix}', *argv]
@@ -102,7 +104,7 @@ def test_broken_pipe_on_stdout_keeps_the_exit_code(tmp_path: Path) -> None:
     os.close(read_end)  # a reader that is gone: every write is EPIPE
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-I", "-m", "memoctl", "bogus", "--json"],
+            [*private_home.argv(tmp_path / "home"), "bogus", "--json"],
             stdin=subprocess.DEVNULL,
             stdout=write_end,
             stderr=subprocess.PIPE,
@@ -154,7 +156,7 @@ sys.exit(main(None, None, (Command("probe", "probe", run),)))
 def test_a_command_never_gets_a_standard_descriptor_for_its_own_files(
     tmp_path: Path, closed: tuple[int, ...]
 ) -> None:
-    script = tmp_path / "probe.py"
+    script = tmp_path / "probe.py"  # a probe that never asks for the home: no wrapper needed
     script.write_text(PROBE)
     prefix = " ".join({0: "<&-", 1: ">&-", 2: "2>&-"}[fd] for fd in closed)
     r = _run(tmp_path, ["probe"], shell_prefix=prefix, entry=(sys.executable, "-I", str(script)))

@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
-import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -17,6 +16,7 @@ import pytest
 
 from memoctl import store as store_mod
 from memoctl.store import NoteRow
+from tests import private_home
 from tests.fake_gateway import FakeGateway
 from tests.golden_files import check_golden
 from tests.test_cmd_add import (
@@ -387,18 +387,20 @@ def test_a_failed_mark_rolls_back_the_new_note(
 def test_the_target_is_checked_inside_the_write_transaction(
     gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Another process supersedes the target after this one opened the store but before it took
-    the lock: the checks see the committed state."""
+    """Both the dedupe and the supersede checks read the target while the write lock is held
+    (``BEGIN IMMEDIATE``), so another writer cannot change it between check and mark."""
     add(gw, body="old")
-    original = store_mod.Store.write
+    original = store_mod.Store.get_note
+    seen: list[bool] = []
 
-    def racing(self: Any) -> Any:
-        sql(gw, "UPDATE notes SET superseded_by = 55 WHERE id = 1")  # the other writer commits
-        return original(self)
+    def spy(self: Any, note_id: int) -> Any:
+        seen.append(self.in_transaction)
+        return original(self, note_id)
 
-    monkeypatch.setattr(store_mod.Store, "write", racing)
-    code, out, _ = add(gw, "--supersedes", "1", body="new")
-    assert (code, error_of(out)["reason"]) == (20, "already_superseded")
+    monkeypatch.setattr(store_mod.Store, "get_note", spy)
+    assert add(gw, "--supersedes", "1", body="new")[0] == 0
+    assert len(seen) >= 2  # the dedupe lookup and the supersede check
+    assert all(seen)
 
 
 # -- retry of a supersede (dedupe b) -------------------------------------------------------------
@@ -494,18 +496,8 @@ def test_with_supersedes_a_missing_target_is_not_found_even_when_the_body_exists
 # -- the real process: two adds of the same body at once ----------------------------------------
 
 
-# The tool takes the home from the password database, never from HOME, so a child runs the real
-# gateway with its home replaced: a test process never touches the real home.
-_CHILD = (
-    "import sys\n"
-    "from pathlib import Path\n"
-    "from memoctl.cli import main\n"
-    "from memoctl.gateway import RealGateway\n"
-    "class G(RealGateway):\n"
-    "    def home(self):\n"
-    "        return Path(sys.argv[1])\n"
-    "sys.exit(main(sys.argv[2:], G()))\n"
-)
+# A child runs the real entry point with its home replaced (tests/private_home.py): the tool
+# takes the home from the password database, so a test process never touches the real home.
 
 
 def _env(home: Path) -> dict[str, str]:
@@ -518,14 +510,12 @@ def _env(home: Path) -> dict[str, str]:
     }
 
 
-def _argv(home: Path, *args: str) -> list[str]:
-    return [sys.executable, "-I", "-c", _CHILD, str(home), *args]
-
-
 def test_two_processes_adding_the_same_body_insert_once(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    argv = _argv(home, "add", "--repo", REPO, "--topic", "t", "--body-file", "-", "--json")
+    argv = private_home.argv(
+        home, "add", "--repo", REPO, "--topic", "t", "--body-file", "-", "--json"
+    )
     procs = [
         subprocess.Popen(
             argv,
@@ -560,7 +550,7 @@ def test_two_processes_adding_the_same_body_insert_once(tmp_path: Path) -> None:
 def test_two_processes_superseding_one_target_create_one_replacement(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    base = _argv(home, "add", "--repo", REPO, "--topic", "t")
+    base = private_home.argv(home, "add", "--repo", REPO, "--topic", "t")
     first = subprocess.run(
         [*base, "--body-file", "-"], input=b"old\n", capture_output=True, env=_env(home),
         timeout=60,
@@ -600,3 +590,47 @@ def test_a_planted_target_of_another_repo_is_no_hit_and_leaks_no_id(gw: FakeGate
     code, out, _ = add(gw, "--supersedes", "1", body="new")
     assert (code, error_of(out)["reason"]) == (20, "supersede_mismatch")
     assert "zzz" not in out
+
+
+# -- the hit's ``supersedes`` never leaks a note of another repo ---------------------------------
+
+
+def _planted_foreign_pointer(gw: FakeGateway) -> None:
+    add(gw, repo="example.com/team/zzz", body="foreign")  # 1, another repo
+    add(gw, body="target")  # 2
+    add(gw, body="x")  # 3, the note both 1 and 2 are planted to point at
+    sql(gw, "UPDATE notes SET superseded_by = 3 WHERE id IN (1, 2)")
+
+
+def test_a_supersede_retry_hit_reports_the_requested_target_not_a_foreign_id(
+    gw: FakeGateway,
+) -> None:
+    _planted_foreign_pointer(gw)
+    code, out, _ = add(gw, "--supersedes", "2", body="x")
+    doc = json.loads(out)
+    assert code == 0 and doc["created"] is False and doc["id"] == 3
+    assert doc["supersedes"] == 2
+    assert "zzz" not in out
+
+
+def test_a_plain_hit_reports_the_replaced_note_of_its_own_repo_only(gw: FakeGateway) -> None:
+    _planted_foreign_pointer(gw)
+    doc = json.loads(add(gw, body="x")[1])
+    assert doc["created"] is False and doc["id"] == 3 and doc["supersedes"] == 2
+
+
+def test_a_plain_hit_with_only_a_foreign_pointer_reports_no_supersedes(gw: FakeGateway) -> None:
+    _planted_foreign_pointer(gw)
+    sql(gw, "UPDATE notes SET superseded_by = NULL WHERE id = 2")
+    doc = json.loads(add(gw, body="x")[1])
+    assert doc["created"] is False and doc["supersedes"] is None
+
+
+def test_a_plain_hit_with_duplicate_same_repo_pointers_reports_the_smallest_id(
+    gw: FakeGateway,
+) -> None:
+    add(gw, body="a")  # 1
+    add(gw, body="b")  # 2
+    add(gw, body="x")  # 3
+    sql(gw, "UPDATE notes SET superseded_by = 3 WHERE id IN (1, 2)")
+    assert json.loads(add(gw, body="x")[1])["supersedes"] == 1
