@@ -70,7 +70,7 @@ Design-time experiments (free, local, offline) settled the items marked verified
 | V2 | `BEGIN IMMEDIATE` with a busy timeout loses no write under eight concurrent writers and four readers; a deferred transaction loses most. | Verified. | Writers always use `BEGIN IMMEDIATE`. |
 | V3 | A read-only open of a WAL database can leave `-shm` and an empty `-wal`, and fails in a read-only directory. | Verified. | `context` catches the error and exits 12 `db_unreadable`. |
 | V4 | The `context` deadline holds with a locked, corrupt, unreadable or newer-schema database and a closed stdout. | Verified in a prototype (20 cases). | The process tests repeat the matrix, including a deadline that fires during a commit. |
-| V5 | claude-session's sanitizer, as documented, lets no closing-tag form through for the corpus used; memoctl's own output is unchanged by it. | Verified against a reimplementation of the documented rules; not against claude-session's code. | A differential test pins the reimplementation; V6 checks the real tool. |
+| V5 | claude-session's sanitizer, as documented, lets no closing-tag form through for the corpus used; memoctl's own output is unchanged by it. | Verified against a verbatim copy of claude-session v0.38.4's sanitizer (commit 50b4b25) pinned in `tests/pinned/`. | The differential test runs against the pinned copy; V6 checks the real tool. |
 | V6 | A real claude-session start with `notes_context` on shows an allowed note fenced in the injected context and omits a note whose kind is not allowed; the 10 000 code-unit cap leaves the block intact at the default budget. | Not verified. Needs a real `claude` run with a cheap model. | The budget stays at 8000. |
 | V7 | claude-session's label, repo and kind checks reject a trailing newline. | Not verified (its code was not read). | memoctl uses `fullmatch` everywhere. |
 | V8 | WAL behavior on a Windows-backed or network mount under WSL. | Not verified. | `validate` warns `unsafe_filesystem`. |
@@ -78,6 +78,22 @@ Design-time experiments (free, local, offline) settled the items marked verified
 | V10 | A cold `uv tool install` start of `context` stays well under the deadline with `pydantic` and `pyyaml` imported. | Imports measured (about 100 ms for pydantic). End to end not measured. | The deadline is 2 s. |
 | V11 | A profile that denies `memoctl add` to third-party-reading kinds blocks a session in the sandbox, including writes to the state directory. | Not verified here; belongs to claude-session's live suite. | A cross-tool note asks claude-session to confirm it. |
 | V12 | The entry `PATH=<home>/.local/bin:... memoctl prune ...` finds `memoctl` through the inline `PATH` under `dash`, `bash` and macOS `/bin/sh`, and `crontab -` accepts an empty input. | Not verified. | Linux with `dash` and `bash` is required; macOS is covered by V9. |
+
+### Known differences from claude-session's sanitizer
+
+The contract is one way: claude-session's sanitizer leaves memoctl's output unchanged. It is not an equality. The two sanitizers differ on the inputs below, memoctl always being the more conservative one, and `tests/test_sanitizer_differential.py` fails on any other difference, including one that co-occurs with a listed feature. "Foreign" means a row that a note could not hold, for instance one written by another tool or an older version.
+
+| Difference | memoctl | claude-session | Applies to |
+|---|---|---|---|
+| `lt_escape` | Escapes every `<` as `&lt;`. | Rewrites only `<`, optional whitespace, `/`, optional whitespace, `untrusted`. | Any text with `<`. |
+| `tab` | Prints a tab as four spaces. | Keeps the tab. | Any text with a tab. |
+| `line_paragraph_separator` | Removes U+2028 and U+2029. | Turns each into LF. | Foreign rows. |
+| `private_use` | Removes category Co. | Keeps it. | Foreign rows. |
+| `unassigned` | Removes category Cn of the running interpreter's Unicode version. | Keeps it, outside its reserved ranges. | Foreign rows; depends on the interpreter. |
+| `braille_blank` | Removes U+2800. | Keeps it. | Foreign rows. |
+| `lone_surrogate` | Removes unpaired surrogates. | Keeps them. | Foreign rows. |
+| `single_pass_nfkc` | Repeats NFKC and the strips until stable. | Runs them once. | Foreign rows. |
+| `combining_mark_run_guard` | Drops a code point that would extend a run past 30 combining marks. | No guard. | Foreign rows. |
 
 ## Modules
 
@@ -127,7 +143,7 @@ Errors fail fast with a code and a fixed message that never contains note text o
 
 - All access to the clock, randomness, the home, the terminal, file handles, stdin and `crontab` goes through `gateway.py`; tests replace it. Deadline tests allow 250 ms beyond `context.deadline` for the busy timeout. No test touches the real home or state.
 - Golden files for every `--json` output, validated against `schemas/`; the config example is validated against `schemas/config.json`. Context golden cases include the cut of a single over-long line, a body ending in LF, a store where nothing is shown (exit 10), a 255-character repo id at `max_chars` 1000 and a note whose header alone exceeds the budget (never shown, exit 10). Golden refusal for a 4000-mark body (class `combining`) and a 30-mark body accepted; the sanitizer is pinned as vectorized: removal and tab expansion run through a lazily filled `str.translate` table (Python runs once per distinct code point), and the combining-mark guard is screened by the set of distinct code points and then by a second `str.translate` pass; the per-character Python loop runs only on a text with a run of more than 30 candidate marks, which only a foreign database can hold.
-- Property and fuzz tests: the grammars against an oracle (including a trailing newline), the body reader on special files (FIFO, symlink, `/dev/zero`, endless stdin), the sanitizer on a corpus of hidden text and closing-tag forms, differential against a pinned reimplementation of claude-session's documented sanitizer.
+- Property and fuzz tests: the grammars against an oracle (including a trailing newline), the body reader on special files (FIFO, symlink, `/dev/zero`, endless stdin), the sanitizer on a corpus of hidden text and closing-tag forms, differential against a verbatim copy of claude-session v0.38.4's sanitizer (commit 50b4b25) pinned in `tests/pinned/`.
 - Process tests (`tests/process`): eight writers and four readers on one database; `prune` against writers and readers with no torn read; the `context` matrix (missing, empty, large, locked, corrupt, newer, unreadable, closed stdout, closed stdin; the closed-descriptor cases cover every subset of descriptors 0, 1 and 2 closed, assert that the startup rule opens `/dev/null` in ascending order and that each open returned the descriptor it was meant to fill, that the first file opened afterwards gets 3 or higher, and that `state.db` and `-wal` are byte-identical before and after, with `-shm` still present: a reader attached to a live WAL database updates the shared-memory read marks, which the interface allows) with exit codes and times; 200 notes of 30-mark runs at the default config finish `context` within the deadline; a flood test (20 real notes of kind `audit` in 10 topics with older ids and 5000 bogus notes of kind `implement` in 2500 topics with newer ids, defaults: at least 10 real notes shown; two fixtures with their documented outcomes: 20 real `implement` notes and 20 newer `implement` flood notes in 10 topics show 0 real, and 20 real `audit` notes and a flood of 20 newer notes split over `implement` and `draft-ticket` show 0 real, so the passing fixture does not suggest more); chain A → B → C: `delete B` leaves C superseded by A, `delete A B` reinstates C, `delete A` reinstates B; retry of `add --supersedes` after a lost output returns the same id; `--supersedes <self-identical>` creates a new note.
 - `live` tests (never in CI, deselected by default): V6, V8, V10 and V12 above, and the macOS checklist (V9).
 - `make verify` runs ruff, pyright, pytest and markdown lint; CI also runs the `schemas` job, whose metaschema check must be run locally before a push.

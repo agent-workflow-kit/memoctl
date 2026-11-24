@@ -4,8 +4,8 @@
 gateway. ``context`` applies it to every text that came from a note, and nothing else does
 (``list``, ``show`` and ``search`` show the stored text).
 
-The contract, for the differential test against claude-session's sanitizer (todo(#29): that
-test belongs to its own issue): for a text a note can hold (no character that body rules
+The contract, checked by the differential test against claude-session's pinned sanitizer
+(tests/test_sanitizer_differential.py): for a text a note can hold (no character that body rules
 item 3 refuses, no run of more than 30 combining marks) the output is the NFKC form of the text
 with tab turned into four spaces and every ``<`` written as ``&lt;``. For any other text
 (only possible in a database written by something else) the output is the same after removing
