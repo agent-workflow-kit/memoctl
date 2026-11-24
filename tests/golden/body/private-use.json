@@ -1,0 +1,1 @@
+{"error": {"code": "usage", "message": "the text contains a private-use character", "reason": null, "details": {"field": "body", "class": "private_use", "line": 1}, "retryable": false}}
