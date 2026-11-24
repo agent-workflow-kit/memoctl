@@ -179,18 +179,23 @@ def run_on_pty(
     prompt appears. ``typed_ahead`` is written before the command starts; ``icrnl=False`` keeps
     a carriage return as typed. Returns the exit code, what was shown on the terminal and stdout."""
     master, slave = pty.openpty()
-    if not icrnl:
-        attrs = termios.tcgetattr(slave)
-        attrs[0] &= ~termios.ICRNL
-        termios.tcsetattr(slave, termios.TCSANOW, attrs)
-    if typed_ahead:
-        os.write(master, typed_ahead)
-    proc = subprocess.Popen(
-        [sys.executable, "-I", "-c", TAKE_TTY, *private_home.argv(home, *args)],
-        stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env(home),
-        start_new_session=True,
-    )  # fmt: skip
-    os.close(slave)
+    try:
+        if not icrnl:
+            attrs = termios.tcgetattr(slave)
+            attrs[0] &= ~termios.ICRNL
+            termios.tcsetattr(slave, termios.TCSANOW, attrs)
+        if typed_ahead:
+            os.write(master, typed_ahead)
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-c", TAKE_TTY, *private_home.argv(home, *args)],
+            stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env(home),
+            start_new_session=True,
+        )  # fmt: skip
+    except BaseException:
+        os.close(master)
+        raise
+    finally:
+        os.close(slave)
     shown = b""
     try:
         deadline = time.monotonic() + 30

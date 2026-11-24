@@ -77,7 +77,8 @@ MAX_SCHEMA_OBJECTS = 64  # the real schema has 11; reading stops past this and r
 MAX_LABELS = 8  # config limits.max_labels is 0 to 8
 MAX_TIMESTAMP = 253_402_300_799  # 9999-12-31T23:59:59Z, the last second the output can print
 MAX_ID = 999_999_999_999_999_999
-DELETE_LENGTH_LIMIT = 1 << 30  # SQLite's own default; see ``Store.delete_note``
+# SQLite's default SQLITE_MAX_LENGTH (setlimit clamps to it); see ``Store.delete_note``
+DELETE_LENGTH_LIMIT = 1_000_000_000
 MAX_REPO_LENGTH = 255
 MAX_BODY_BYTES = 65536
 MAX_SIZE = 65536
@@ -90,7 +91,7 @@ TIMEOUT = "timeout"
 _RETRYABLE = {DB_LOCKED, TIMEOUT}
 
 # SQLite primary result codes (sqlite.org/rescode.html).
-_BUSY, _LOCKED, _INTERRUPT = 5, 6, 9
+_BUSY, _LOCKED, _INTERRUPT, _TOOBIG = 5, 6, 9, 18
 _UNREADABLE_CODES = {3, 7, 8, 10, 13, 14, 15, 23, 24}  # PERM NOMEM READONLY IOERR FULL CANTOPEN
 # PROTOCOL AUTH FORMAT. Everything else (CORRUPT, NOTADB, TOOBIG, ERROR, CONSTRAINT, ...) is
 # corruption: the statement is ours and fixed, so a failure means the file is not what we wrote.
@@ -103,6 +104,7 @@ class StoreError(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(f"store failure: {reason}")
         self.reason = reason
+        self.too_big = False  # a value over the length limit (SQLITE_TOOBIG); set by translate
 
     @property
     def retryable(self) -> bool:
@@ -134,7 +136,9 @@ def translate(exc: sqlite3.Error) -> StoreError:
         return StoreError(TIMEOUT)
     if primary in _UNREADABLE_CODES:
         return StoreError(DB_UNREADABLE)
-    return StoreError(DB_CORRUPT)
+    error = StoreError(DB_CORRUPT)
+    error.too_big = primary == _TOOBIG
+    return error
 
 
 def _failure(exc: sqlite3.Error, owner: Store | None = None) -> BaseException:
@@ -756,7 +760,7 @@ class Store:
             finally:
                 cursor.close()
         except StoreError as exc:
-            if exc.reason == DB_CORRUPT:
+            if exc.reason == DB_CORRUPT and exc.too_big:
                 return None
             raise
         return None if raw is None else raw[0]

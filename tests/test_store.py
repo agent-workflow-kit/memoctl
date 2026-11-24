@@ -1397,3 +1397,20 @@ def test_in_transaction_before_inside_and_after_read_and_write(state: StateDir) 
             assert s.in_transaction
             raise KeyError
         assert not s.in_transaction
+
+
+def test_field_read_propagates_corruption_that_is_not_an_over_limit_value(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    init(state)
+    s = open_store(state, Mode.WRITE)
+    assert s is not None
+
+    def corrupt(*_args: Any, **_kwargs: Any) -> None:
+        raise store_mod.StoreError(store_mod.DB_CORRUPT)
+
+    monkeypatch.setattr(s, "execute", corrupt)
+    with pytest.raises(StoreError) as caught:
+        s._field("SELECT repo FROM notes WHERE id = ?", 1)  # pyright: ignore[reportPrivateUsage]
+    assert caught.value.reason == store_mod.DB_CORRUPT
+    s.close()
