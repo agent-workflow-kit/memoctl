@@ -14,23 +14,25 @@ import pytest
 from memoctl import cmd_add
 from memoctl import store as store_mod
 from memoctl.cli import main
-from tests.fake_gateway import FakeExit, FakeGateway
-from tests.golden_files import check_golden
-from tests.schema_check import validate_json_output
-from tests.test_cmd_add import (
-    KIND_LINE,
+from tests.add_scenarios import (
     REPO,
     SCENARIOS,
-    _release,
-    _step,
-    _token,
+    release,
+    state_dir,
+    step_of,
+    token,
+    write_config,
+)
+from tests.fake_gateway import FakeExit, FakeGateway
+from tests.golden_files import check_golden
+from tests.schema_check import SchemaViolation, validate_json_output
+from tests.test_cmd_add import (
+    KIND_LINE,
     add,
     error_of,
     log_records,
     snapshot,
-    state_dir,
     stored,
-    write_config,
 )
 
 __all__ = ["gw"]
@@ -159,12 +161,27 @@ def test_dry_run_does_not_care_about_the_state_directory(gw: FakeGateway) -> Non
     assert snapshot(gw.home()) == before
 
 
-def test_dry_run_with_a_state_dir_that_is_a_file_or_a_corrupt_database(gw: FakeGateway) -> None:
+def test_dry_run_with_a_state_dir_that_is_a_file(gw: FakeGateway) -> None:
     sd = state_dir(gw)
     sd.parent.mkdir(parents=True)
     sd.write_text("not a directory")
     before = snapshot(gw.home())
-    assert add(gw)[0] != 0
+    code, out, _ = add(gw)
+    assert (code, error_of(out)["reason"]) == (20, "unsafe_state")
+    assert dry(gw)[0] == 0
+    assert snapshot(gw.home()) == before
+
+
+def test_dry_run_with_a_corrupt_database(gw: FakeGateway) -> None:
+    sd = state_dir(gw)
+    sd.mkdir(parents=True)
+    sd.chmod(0o700)
+    (sd / "state.db").write_bytes(b"this is not a database" * 100)
+    (sd / "state.db").chmod(0o600)
+    before = snapshot(gw.home())
+    code, out, _ = add(gw)
+    assert (code, error_of(out)["reason"]) == (12, "db_corrupt")
+    assert snapshot(gw.home()) == before
     assert dry(gw)[0] == 0
     assert snapshot(gw.home()) == before
 
@@ -196,7 +213,7 @@ def test_each_failing_step_alone_applies_to_dry_run_only_up_to_step_7(
         before = snapshot(gw.home())
         gw.terminal.stdout = ""
         code = main(argv, gw)
-        if _step(scenario) <= 7:
+        if step_of(scenario) <= 7:
             assert scenario[2](code, error_of(gw.terminal.stdout)), (scenario[0], code)
         else:  # the state and the limits are not looked at
             assert code == 0, scenario[0]
@@ -204,14 +221,14 @@ def test_each_failing_step_alone_applies_to_dry_run_only_up_to_step_7(
             assert doc["id"] is None and doc["dry_run"] is True
             validate_json_output("cli/add", gw.terminal.stdout.encode())
         assert gw.now_calls <= 1
-        if _step(scenario) <= 7:
-            assert gw.stdin_reads == (0 if _step(scenario) < 5 else 1)
+        if step_of(scenario) <= 7:
+            assert gw.stdin_reads == (0 if step_of(scenario) < 5 else 1)
         sidecar = (".db-wal", ".db-shm", "-wal", "-shm")
         assert {k: v for k, v in snapshot(gw.home()).items() if not k.endswith(sidecar)} == {
             k: v for k, v in before.items() if not k.endswith(sidecar)
         }
     finally:
-        _release(gw)
+        release(gw)
     assert log_records(gw) == []
 
 
@@ -221,7 +238,7 @@ def test_each_failing_step_alone_applies_to_dry_run_only_up_to_step_7(
         (a, b)
         for i, a in enumerate(SCENARIOS)
         for b in SCENARIOS[i + 1 :]
-        if _step(a) != _step(b) and _step(a) <= 7
+        if step_of(a) != step_of(b) and step_of(a) <= 7
     ],
     ids=lambda s: s[0],
 )
@@ -237,7 +254,7 @@ def test_of_two_failing_steps_dry_run_reports_the_earlier_one(
         gw.terminal.stdout = ""
         code = main(argv, gw)
     finally:
-        _release(gw)
+        release(gw)
     assert first[2](code, error_of(gw.terminal.stdout)), (first[0], second[0], code)
     assert log_records(gw) == []
 
@@ -312,10 +329,10 @@ def test_dry_run_takes_no_value_and_has_no_abbreviation(gw: FakeGateway, flag: s
 
 
 def test_dry_run_refuses_a_secret_exactly_as_a_real_add(gw: FakeGateway) -> None:
-    code, out, err = dry(gw, body=f"x {_token()}")
+    code, out, err = dry(gw, body=f"x {token()}")
     assert code == 20
     assert error_of(out)["details"] == {"class": "github_token", "field": "body"}
-    assert _token() not in out + err
+    assert token() not in out + err
     assert not state_dir(gw).exists()
 
 
@@ -413,6 +430,16 @@ def test_dry_run_warnings_match_between_the_two_forms(gw: FakeGateway) -> None:
     assert err_json == err_human == CAPPED_LINE + KIND_LINE
     assert human.startswith("dry run: valid")
     check_golden("add/dry-run-warnings-err.txt", err_human.encode())
+    check_golden("add/dry-run-warnings.json", out.encode(), schema="cli/add")
+
+
+def test_the_schema_rejects_expires_extended_in_a_dry_run_document(gw: FakeGateway) -> None:
+    _, out, _ = dry(gw)
+    doc = json.loads(out)
+    assert doc["dry_run"] is True
+    doc["warnings"] = ["expires_extended"]
+    with pytest.raises(SchemaViolation):
+        validate_json_output("cli/add", (json.dumps(doc) + "\n").encode())
 
 
 @pytest.mark.parametrize("kind", ["Bad Kind", "a;b", "x" * 5000, "\udcff"])

@@ -19,7 +19,8 @@ can run before an earlier refusal. The rules of the order:
 directory or ``state.db``, and it runs no dedupe, supersede check or limit. The deadline is
 disarmed before its output, like a real add.
 
-Seams owned by later issues are marked with ``TODO(#N)`` at the exact step: #20 (concurrency).
+Concurrency between two writers is settled by the transaction of steps 10 to 13 (issue #20
+adds the tests that exercise it).
 
 A crash (or a signal) between the commit of step 13 and the log append of step 14 leaves a stored
 note with no log record, as the interface documents; the retry then finds the note and
@@ -64,7 +65,6 @@ from memoctl.logfile import LogRecord, append_record
 from memoctl.notes import NoteKey, check_supersede_target, evaluate_limits, find_duplicate
 from memoctl.notes_read import LIVE, note_status
 from memoctl.render import (
-    WARNING_MESSAGES,
     Rendered,
     emit,
     format_add,
@@ -76,9 +76,6 @@ from memoctl.statedir import StateDir, open_state_dir
 from memoctl.store import Mode, Store, open_store
 
 __all__ = ["COMMAND", "run"]
-
-LOG_FAILED_WARNING = f"warning (log_failed): {WARNING_MESSAGES['log_failed']}"
-
 
 # -- the stages a step hands to the next --------------------------------------------------------
 
@@ -356,17 +353,16 @@ def build_warnings(plan: Plan, lifetime: Lifetime, *, hit: bool) -> tuple[str, .
     return tuple(out)
 
 
-def step14_append_log(state: StateDir, plan: Plan, result: Result) -> bool:
+def step14_append_log(state: StateDir, plan: Plan, result: Result, note_id: int) -> bool:
     """Step 14 (the log part): append the record after the commit. A failure never changes the
     exit code; it returns True (the ``log_failed`` warning, printed with the output) and puts no
     value in it. A dedupe hit writes no record."""
-    assert result.id is not None  # a dry run never gets here
     if not result.created:
         return False
     call = plan.call
     record = LogRecord(
         event="add",
-        note_id=result.id,
+        note_id=note_id,
         actor=call.actor.actor,
         actor_source=call.actor.source.value,
         repo=result.repo,
@@ -438,7 +434,8 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
             deadline.current().disarm()
         finally:
             store.close()
-        log_failed = step14_append_log(state, plan, result)
+        assert result.id is not None  # only a dry run has no id, and it returned above
+        log_failed = step14_append_log(state, plan, result, result.id)
     print_result(call, result, gateway, log_failed=log_failed)
     return 0
 
