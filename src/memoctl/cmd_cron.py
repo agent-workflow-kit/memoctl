@@ -67,7 +67,9 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
     shown = [_text(line) for line in block]
     document: dict[str, Any] = {"outcome": outcome, "dry_run": bool(args.dry_run), "block": shown}
     if args.json:
-        emit(gateway, Rendered(json.dumps(document, ensure_ascii=True, separators=(",", ":")) + "\n"))
+        emit(
+            gateway, Rendered(json.dumps(document, ensure_ascii=True, separators=(",", ":")) + "\n")
+        )
     else:
         rendered = format_cron(outcome, dry_run=args.dry_run)
         emit(gateway, Rendered("" if args.quiet else rendered.out))

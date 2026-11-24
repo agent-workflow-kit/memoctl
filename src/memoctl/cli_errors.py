@@ -407,7 +407,9 @@ def _register_defaults() -> None:
     # still internal (a bug or an environment fault).
     register_error(
         CrontabFailedError,
-        lambda e: Failure(FAILED, "failed", "the crontab could not be read or written", "crontab_failed"),
+        lambda e: Failure(
+            FAILED, "failed", "the crontab could not be read or written", "crontab_failed"
+        ),
     )
     register_error(
         BlockMalformedError,

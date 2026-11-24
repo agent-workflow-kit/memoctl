@@ -205,7 +205,11 @@ def test_a_failing_crontab_exits_12_without_a_claim_of_success(
     gw.crontab.fail_with = SECRET
     assert run(gw, command, "--json", *flags) == 12
     error = json.loads(gw.terminal.stdout)["error"]
-    assert (error["code"], error["reason"], error["retryable"]) == ("failed", "crontab_failed", False)
+    assert (error["code"], error["reason"], error["retryable"]) == (
+        "failed",
+        "crontab_failed",
+        False,
+    )
     assert "outcome" not in gw.terminal.stdout
     assert SECRET not in gw.terminal.stdout + gw.terminal.stderr
     assert gw.crontab.writes == []
@@ -226,7 +230,17 @@ def test_a_failing_write_exits_12_after_a_successful_read(gw: FakeGateway) -> No
 
 @pytest.mark.parametrize(
     "home",
-    ["/home/a b", "/home/a%b", "/home/a\nb", "/home/$x", "/home/`x`", "/home/'x", "relative", "", "/home/é"],
+    [
+        "/home/a b",
+        "/home/a%b",
+        "/home/a\nb",
+        "/home/$x",
+        "/home/`x`",
+        "/home/'x",
+        "relative",
+        "",
+        "/home/é",
+    ],
 )
 def test_an_unsafe_home_is_config_invalid_before_the_crontab_is_read(
     gw: FakeGateway, home: str
