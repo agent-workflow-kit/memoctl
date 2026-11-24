@@ -1,0 +1,1 @@
+dry run: would have pruned 2 expired notes, 1 would remain

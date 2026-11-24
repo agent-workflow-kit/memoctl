@@ -835,19 +835,53 @@ class Store:
         back (the caller looked the note up under the same lock)."""
         if self.mode is Mode.READ:
             raise RuntimeError("delete on a read-only store")
-        self.execute("DELETE FROM note_labels WHERE note_id = ?", (note_id,)).close()
-        # Removing the row edits the (repo, id) index entry, which reads the repo: a value over
-        # the 1 MiB limit would fail the statement, and ``delete`` is the way to remove such a
-        # row. The limit is raised for this one statement only, and restored.
-        self._conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, DELETE_LENGTH_LIMIT)
-        try:
+        # Removing a row edits its index entries, which read the value: a label key or value or a
+        # repo over the 1 MiB limit would fail the statement, and ``delete`` and ``prune`` are the
+        # way to remove such a row. The limit is raised for these statements only, and restored.
+        with self._raised_length_limit():
+            self.execute("DELETE FROM note_labels WHERE note_id = ?", (note_id,)).close()
             cursor = self.execute("DELETE FROM notes WHERE id = ?", (note_id,))
             changed = cursor.rowcount
             cursor.close()
-        finally:
-            self._conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, LENGTH_LIMIT)
         if changed != 1:
             raise StoreError(DB_CORRUPT)
+
+    @contextmanager
+    def _raised_length_limit(self) -> Iterator[None]:
+        self._conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, DELETE_LENGTH_LIMIT)
+        try:
+            yield
+        finally:
+            self._conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, LENGTH_LIMIT)
+
+    # -- prune (the rules are cmd_prune's; these are the statements)
+    def expired_ids(self, now: int) -> list[int]:
+        """The ids of the notes whose ``expires`` is at most ``now``, ascending. The comparison
+        is SQL's on an ``INTEGER`` column of a ``STRICT`` table, so a row is selected only when
+        its stored integer is proven at most ``now`` (a planted negative one included, a huge
+        one never); no value is read into Python."""
+        cursor = self.execute("SELECT id FROM notes WHERE expires <= ? ORDER BY id", (now,))
+        ids = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        if any(type(i) is not int for i in ids):
+            raise StoreError(DB_CORRUPT)
+        return ids
+
+    def count_all_notes(self) -> int:
+        """Notes of any status in the store (exact, uncapped)."""
+        return self._count(self.execute("SELECT count(*) FROM notes"))
+
+    def count_expired(self, now: int) -> int:
+        """Notes :meth:`expired_ids` would return."""
+        return self._count(self.execute("SELECT count(*) FROM notes WHERE expires <= ?", (now,)))
+
+    def delete_rate_through(self, cutoff: int) -> None:
+        """Delete the rate rows with ``at`` at most ``cutoff`` (``prune`` only), inside
+        :meth:`write`."""
+        if self.mode is Mode.READ:
+            raise RuntimeError("delete on a read-only store")
+        with self._raised_length_limit():  # a repo over 1 MiB is removed like any other
+            self.execute("DELETE FROM rate WHERE at <= ?", (cutoff,)).close()
 
     # -- rows
     def notes(
