@@ -1,11 +1,17 @@
 PYTEST_ARGS ?=
 
-.PHONY: verify test lint fmt fmt-check typecheck mdlint schemas golden-update
+.PHONY: verify perf test lint fmt fmt-check typecheck mdlint schemas golden-update
 
 verify: lint fmt-check typecheck test mdlint
 
 test:
 	uv run pytest
+
+# The heavy flood and performance fixtures (tests marked `perf`): minutes, up to about 100 MB of
+# scratch under pytest's temporary directory, never part of `verify` or CI. It prints a run
+# report ([perf] lines) for each; read the numbers with `-s`.
+perf:
+	uv run pytest -m perf -s tests/test_context_flood.py $(PYTEST_ARGS)
 
 lint:
 	uv run ruff check .
