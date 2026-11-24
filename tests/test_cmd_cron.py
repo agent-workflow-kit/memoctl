@@ -25,7 +25,20 @@ SECRET = "SECRET-TABLE-TEXT"
 def gw(tmp_path: Path) -> FakeGateway:
     gateway = FakeGateway(tmp_path / "gw")
     gateway._home = HOME
+    _absolute_paths_outside_the_root_exist_as_directories(gateway)
     return gateway
+
+
+def _absolute_paths_outside_the_root_exist_as_directories(gateway: FakeGateway) -> None:
+    """The golden block names ``/home/example``, which the fake's confined filesystem cannot
+    hold: an absolute path outside its root answers as an existing directory (the root's)."""
+    real = gateway.stat_path
+
+    def stat_path(path: Path, *, follow: bool) -> object:
+        outside = path.is_absolute() and gateway.root != path and gateway.root not in path.parents
+        return real(gateway.root if outside else path, follow=follow)
+
+    gateway.stat_path = stat_path  # type: ignore[method-assign]
 
 
 def run(gw: FakeGateway, *argv: str) -> int:
@@ -157,6 +170,29 @@ def test_quiet_prints_nothing_on_success(gw: FakeGateway) -> None:
     assert gw.crontab.writes == [BLOCK]
 
 
+def test_quiet_json_still_prints_the_document(gw: FakeGateway) -> None:
+    assert run(gw, "install", "--quiet", "--json") == 0
+    out = json.loads(gw.terminal.stdout)
+    validate("cli/cron-install", out)
+    assert out["outcome"] == "installed"
+
+
+def test_quiet_on_a_malformed_table_still_prints_the_error_and_exits_20(
+    gw: FakeGateway,
+) -> None:
+    gw.crontab.table = b"# memoctl managed\n"
+    assert run(gw, "install", "--quiet") == 20
+    assert gw.terminal.stdout == ""
+    assert gw.terminal.stderr.startswith("refused (cron_block_malformed)")
+    assert gw.crontab.writes == []
+
+
+def test_a_real_run_that_replaces_says_so(gw: FakeGateway) -> None:
+    gw.crontab.table = OTHER + block_bytes("/home/old")
+    assert run(gw, "install") == 0
+    assert gw.terminal.stdout == "cron block replaced\n"
+
+
 def test_actor_is_validated_like_every_command(gw: FakeGateway) -> None:
     assert run(gw, "install", "--actor", "bad actor!") == 2
     assert gw.crontab.writes == []
@@ -251,6 +287,41 @@ def test_an_unsafe_home_is_config_invalid_before_the_crontab_is_read(
     error = json.loads(gw.terminal.stdout)["error"]
     assert (error["code"], error["details"]) == ("config_invalid", {"field": "home"})
     assert gw.crontab.writes == []
+
+
+def _bad_home(gw: FakeGateway, kind: str) -> None:
+    if kind == "relative":
+        gw._home = Path("relative")
+    elif kind == "empty":
+        gw._home = Path("")
+    elif kind == "missing":
+        gw._home = gw.root / "no-such-home"
+    else:
+        gw._home = gw.root / "a-file"
+        gw._home.write_text("x")
+
+
+BAD_HOMES = ["relative", "empty", "missing", "file"]
+
+
+@pytest.mark.parametrize("command", ["install", "uninstall"])
+@pytest.mark.parametrize("kind", BAD_HOMES)
+def test_a_home_that_is_not_an_existing_absolute_directory_is_config_invalid(
+    gw: FakeGateway, command: str, kind: str
+) -> None:
+    _bad_home(gw, kind)
+    gw.crontab.table = BLOCK
+    gw.crontab.fail_with = "must not be read"
+    assert run(gw, command, "--json") == 2
+    error = json.loads(gw.terminal.stdout)["error"]
+    assert (error["code"], error["details"]) == ("config_invalid", {"field": "home"})
+    assert gw.crontab.writes == [] and gw.crontab.table == BLOCK
+
+
+def test_install_writes_the_home_normalised_as_a_path(gw: FakeGateway) -> None:
+    gw._home = Path("/home/x//./y/")
+    assert run(gw, "install") == 0
+    assert b"PATH=/home/x/y/.local/bin:" in gw.crontab.writes[0]
 
 
 def test_uninstall_does_not_need_a_safe_home(gw: FakeGateway) -> None:

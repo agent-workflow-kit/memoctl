@@ -129,7 +129,7 @@ def test_install_then_uninstall_restores_the_original_bytes() -> None:
         END + b"x\n" + START,  # reversed
         START + END,  # nothing in between
         START + b"a\nb\n" + END,  # too long
-        START + b"x\n" + b"y\n" + END,
+        START + b"x\n" + b"y\n" + b"z\n" + END,  # three lines
         b"# memoctl managed \n" + b"x\n" + END,  # trailing space
         b"# memoctl managed\r\n" + b"x\n" + END,  # CR
         START + b"x\n" + b"# memoctl managed end\r\n",

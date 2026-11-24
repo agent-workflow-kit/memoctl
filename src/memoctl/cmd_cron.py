@@ -3,8 +3,9 @@
 Order:
 
 1. parse (``cron install --json``: the global flags belong to the leaf, never to ``cron``);
-2. ``install`` only: the home directory from the password database must be safe to write into
-   a crontab (else exit 2 ``config_invalid`` on ``home``), checked before anything is read;
+2. the home from the password database must be an absolute existing directory, like for every
+   command (else exit 2 ``config_invalid`` on ``home``); ``install`` also needs its characters
+   to be safe to write into a crontab. Both are checked before anything is read;
 3. read the crontab through the gateway (a failure is exit 12 ``crontab_failed``);
 4. find the block (:mod:`memoctl.cron_block`; a malformed one is exit 20, nothing changed);
 5. unless the outcome is ``unchanged`` or ``--dry-run``: one ``crontab -`` write of the whole
@@ -24,7 +25,7 @@ from typing import Any
 
 from memoctl import deadline
 from memoctl.cli_args import Command, add_global_flags
-from memoctl.config import ConfigError
+from memoctl.config import ConfigError, resolve_home
 from memoctl.cron_block import (
     MAX_BLOCK_LINE,
     CrontabFailedError,
@@ -52,10 +53,11 @@ def configure(parser: argparse.ArgumentParser) -> None:
 
 def run(args: argparse.Namespace, gateway: Gateway) -> int:
     if args.action == "install":
-        home = _home(gateway)
+        home = _install_home(gateway)
         table = _read(gateway)
         outcome, new, block = plan_install(table, home)
     else:
+        resolve_home(gateway)
         table = _read(gateway)
         outcome, new, block = plan_uninstall(table)
     if new is not None and not args.dry_run:
@@ -76,11 +78,8 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
     return 0
 
 
-def _home(gateway: Gateway) -> str:
-    try:
-        home = str(gateway.home())
-    except GatewayError as exc:
-        raise ConfigError("home") from exc
+def _install_home(gateway: Gateway) -> str:
+    home = str(resolve_home(gateway))
     if not home_is_safe(home):
         raise ConfigError("home")
     return home
