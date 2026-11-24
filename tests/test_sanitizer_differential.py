@@ -87,9 +87,7 @@ def _has_private_use(text: str) -> bool:
 
 
 def _has_unassigned(text: str) -> bool:
-    return any(
-        unicodedata.category(c) == "Cn" and ord(c) not in CS_RESERVED for c in _cps(text)
-    )
+    return any(unicodedata.category(c) == "Cn" and ord(c) not in CS_RESERVED for c in _cps(text))
 
 
 def _has_braille_blank(text: str) -> bool:
@@ -322,7 +320,15 @@ POOLS = {
     ],
     "tags": [chr(c) for c in (0xE0001, 0xE0020, 0xE0041, 0xE007F, 0xE0080, 0xE0FFF)],
     "surrogates": ["\ud800", "\udbff", "\udc00", "\udfff"],
-    "unassigned": ["\u0378", "\u2065", "\ufff0", "\ufffe", "\U0001fffe", "\U0010ffff", "\U000e1000"],
+    "unassigned": [
+        "\u0378",
+        "\u2065",
+        "\ufff0",
+        "\ufffe",
+        "\U0001fffe",
+        "\U0010ffff",
+        "\U000e1000",
+    ],
     "private": ["\ue000", "\uf8ff", "\U000f0000", "\U0010fffd"],
     "nfkc": [
         "\ufb01",
@@ -345,7 +351,15 @@ POOLS = {
     ],
     "marks": MARKS,
     "stackers": ["\u0301", "\u0316", "\u0323", "\u0345", "\u0653", "\u1dc0"],
-    "unicode": ["\u00e9", "\u00f1", "\u65e5\u672c\u8a9e", "\ud55c", "\u0627", "\U0001f642", "\U0001f468\u200d\U0001f469"],
+    "unicode": [
+        "\u00e9",
+        "\u00f1",
+        "\u65e5\u672c\u8a9e",
+        "\ud55c",
+        "\u0627",
+        "\U0001f642",
+        "\U0001f468\u200d\U0001f469",
+    ],
 }
 
 
@@ -367,7 +381,7 @@ def corpus(n: int = 3000, seed: int = 29) -> list[str]:
         for g1 in gaps:
             for g2 in gaps:
                 out.append(f"{lt}{g1}/{g2}untrusted")
-                out.append(f"{lt}{g1}/{g2}UnTrUsTeD id=\"x\">")
+                out.append(f'{lt}{g1}/{g2}UnTrUsTeD id="x">')
     return out
 
 
@@ -416,7 +430,7 @@ def test_a_storable_text_differs_only_by_the_storable_differences() -> None:
             assert found and found <= allowed, (text[:40], found)
 
 
-# --- the allowlist: every difference is listed, and every entry still happens ----------------------
+# --- the allowlist: every difference is listed, and every entry still happens ---
 
 
 def test_every_code_point_is_unchanged_by_claude_session_and_every_difference_is_listed() -> None:
