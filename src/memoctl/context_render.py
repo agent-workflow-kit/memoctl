@@ -111,7 +111,7 @@ def _check_note(n: SelectedNote) -> None:
         raise ContextRenderError("cut flag differs from the cut line")
 
 
-def _check(sel: Selection, max_chars: int | None, max_bytes: int | None) -> str:
+def _check(sel: Selection, max_chars: int, max_bytes: int) -> str:
     """Validate ``sel`` and return its block (not empty: the caller handled ``shown`` 0)."""
     if not is_add_repo_id(sel.repo):
         raise ContextRenderError("bad repo id")
@@ -126,20 +126,18 @@ def _check(sel: Selection, max_chars: int | None, max_bytes: int | None) -> str:
         _check_note(n)
     block = sel.head + "".join(n.text for n in notes) + sel.omit
     _check_text(block)
-    if max_chars is not None and u16(block) > max_chars:
+    if u16(block) > max_chars:
         raise ContextRenderError("block over the character budget")
-    if max_bytes is not None and b8(block) > max_bytes:
+    if b8(block) > max_bytes:
         raise ContextRenderError("block over the byte budget")
     return block
 
 
-def render_block(
-    sel: Selection, *, max_chars: int | None = None, max_bytes: int | None = None
-) -> str:
+def render_block(sel: Selection, *, max_chars: int, max_bytes: int) -> str:
     """The plain block: head, each note's text, the omitted-notes line when notes are omitted.
 
     ``""`` when nothing is shown. ``max_chars`` and ``max_bytes`` (``context.max_chars`` and
-    ``context.max_bytes``), when given, are enforced on the block: a block over either raises.
+    ``context.max_bytes``) are required and enforced on the block: a block over either raises.
     """
     if not sel.notes:
         return ""
@@ -160,8 +158,8 @@ def render_fenced(
     sel: Selection,
     nonce: str,
     *,
-    max_chars: int | None = None,
-    max_bytes: int | None = None,
+    max_chars: int,
+    max_bytes: int,
 ) -> str:
     """The block wrapped in the fence. The fence lines are outside both budgets. ``""`` when
     nothing is shown (then the nonce is not needed, but is still checked)."""
@@ -175,12 +173,14 @@ def render_text(
     *,
     fence: bool = False,
     nonce: str | None = None,
-    max_chars: int | None = None,
-    max_bytes: int | None = None,
+    max_chars: int,
+    max_bytes: int,
 ) -> str:
     """What ``context`` prints: the fenced form with ``fence``, else the plain block."""
     if fence:
-        return render_fenced(sel, nonce, max_chars=max_chars, max_bytes=max_bytes)  # type: ignore[arg-type]
+        if nonce is None:
+            raise ContextRenderError("fence without a nonce")
+        return render_fenced(sel, nonce, max_chars=max_chars, max_bytes=max_bytes)
     return render_block(sel, max_chars=max_chars, max_bytes=max_bytes)
 
 
@@ -189,8 +189,8 @@ def render_json(
     *,
     fence: bool = False,
     nonce: str | None = None,
-    max_chars: int | None = None,
-    max_bytes: int | None = None,
+    max_chars: int,
+    max_bytes: int,
 ) -> str:
     """The ``--json`` document (schemas/cli/context.json) as one ASCII line ending in LF.
 

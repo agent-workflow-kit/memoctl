@@ -64,7 +64,8 @@ def ref_sanitize(text: str) -> str:
     Follows docs/interface.md, Sanitizer: NFKC and removal of every refused character (category
     C*, U+2028/2029 and the default-ignorables of Body rules item 3) until stable, tab to four
     spaces, then ``<`` to ``&lt;``. It does not model the real sanitizer's combining-mark run
-    limit (Body rules item 4); no fixture here holds such a run.
+    limit (Body rules item 4). The real sanitizer counts a run in its NFKD form, so the two
+    differ only for a run of more than 30 marks in NFKD form; no fixture here holds one.
     """
     out = text
     while True:
@@ -581,6 +582,11 @@ def random_fixture(rng: random.Random) -> tuple[list[dict[str, Any]], SelectionC
                 "   \n",
                 "<b>&lt;</b>\ttab",
                 "\n".join(f"line{j}" for j in range(rng.randint(1, 80))),
+                "\uff46\uff55\uff4c\uff4c\u200b" * rng.randint(1, 100),  # fullwidth + removed
+                "\ufb01" * rng.randint(1, 300),  # ligature: NFKC makes two characters
+                "e\u200b\u0301" * rng.randint(1, 200),  # removed char, then a mark
+                "\u2800x\n" * rng.randint(1, 100),  # removed braille blank
+                "\uff21" * rng.randint(1, 900),  # fullwidth capital A
             ]
         )
         notes.append(
@@ -603,6 +609,13 @@ def random_fixture(rng: random.Random) -> tuple[list[dict[str, Any]], SelectionC
     )
     labels = set(rng.sample(labelpool, rng.randint(0, 3)))
     return notes, c, labels
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_the_stand_in_equals_the_real_sanitizer_on_every_fixture_body(seed: int) -> None:
+    notes, _, _ = random_fixture(random.Random(seed))
+    for n in notes:
+        assert ref_sanitize(n["body"]) == sanitize(n["body"])
 
 
 @pytest.mark.parametrize("seed", range(40))
@@ -825,6 +838,7 @@ def test_from_config_defaults() -> None:
     [
         dict(max_chars=True), dict(max_chars=1.5), dict(max_chars=-1), dict(max_bytes="1"),
         dict(max_notes=-1), dict(max_per_topic=2.0), dict(note_max_chars=-5),
+        dict(note_max_chars=0), dict(note_max_chars=1),
         dict(max_kind_share=0.5), dict(max_kind_share=Fraction(-1, 10)),
         dict(max_kind_share=Fraction(11, 10)), dict(max_kind_share=True),
         dict(author_kinds=["a"]), dict(author_kinds=(1,)),
@@ -836,5 +850,15 @@ def test_selection_config_refuses_values_the_walk_is_not_defined_for(over: dict[
 
 
 def test_selection_config_accepts_the_edges() -> None:
+    cfg(note_max_chars=2)
     cfg(max_notes=0, max_per_topic=0, max_kind_share=Fraction(0))
     cfg(max_kind_share=Fraction(1), author_kinds=())
+
+
+@pytest.mark.parametrize("out", ["\ud800ab", "ab\udfff", "\U0001f600\ud800"])
+def test_unencodable_sanitizer_output_raises_a_fixed_value_error(db: Db, out: str) -> None:
+    db.add(body="secret note text")
+    with pytest.raises(ValueError) as e:
+        db.select(sanitize=lambda t: out)
+    assert str(e.value) == "sanitizer output is not encodable"
+    assert not isinstance(e.value, UnicodeEncodeError)
