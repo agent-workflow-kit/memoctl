@@ -262,7 +262,7 @@ The command claude-session runs at session start. Its argument forms are `--repo
 
 Order:
 
-1. Parse the arguments (exit 2 `usage`). No `--repo`, or a repo id longer than 255 characters: exit 10 without reading config.
+1. Parse the arguments (exit 2 `usage`). No `--repo`, or a repo id longer than 255 characters (whatever it holds, and without checking its grammar): exit 10 without reading config. Any other repo id that does not match the repo grammar is exit 2 `usage` (`field` `repo`), and never printed.
 2. Arm the [deadline](#deadlines) at 2 s.
 3. Find home and load config (exit 2 `config_invalid`); compute the effective config for `--repo`. Re-arm the timer so that it fires `context.deadline` after step 2 (exit 12 `timeout` at once if that moment has passed). `context.deadline` is global only.
 4. Look at the state directory without creating it: missing exits 10; unsafe exits 20 `unsafe_state`.
@@ -270,7 +270,7 @@ Order:
 6. Render the block; disarm the deadline; write it to file descriptor 1 (see [Deadlines](#deadlines)).
 7. Exit 0 when `shown` > 0, else 10 with nothing printed.
 
-A config error beats every later outcome, including a missing state directory. Any failure to read the database exits 12 with an empty stdout in plain mode ([Output on failure](#output-on-failure)) and a `reason`: `db_unreadable`, `db_locked`, `db_corrupt`. A deadline that passes prints nothing on stdout in plain mode (the status line goes to stderr) and exits 12 `timeout`; a busy database that is still locked after the 200 ms busy timeout exits 12 `db_locked`. With `--json` it prints `{text, note_ids, shown, eligible, omitted}` ([schemas/cli/context.json](../schemas/cli/context.json)) on exit 0 and on exit 10 (`text` "" and `note_ids` [] on exit 10; `eligible` 0 when there was no repo, state or database). `text` is exactly what the plain form prints (the fenced form with `--fence`); `note_ids` are in display order; `omitted` = `eligible` − `shown`.
+A config error beats every later outcome, including a missing state directory. A block that fails the renderer's own safety checks (a bug: nothing a stored note can hold reaches them) is exit 1 `internal` with an empty stdout in plain mode, so `context` never prints a block it could not verify. Any failure to read the database exits 12 with an empty stdout in plain mode ([Output on failure](#output-on-failure)) and a `reason`: `db_unreadable`, `db_locked`, `db_corrupt`. A deadline that passes prints nothing on stdout in plain mode (the status line goes to stderr) and exits 12 `timeout`; a busy database that is still locked after the 200 ms busy timeout exits 12 `db_locked`. With `--json` it prints `{text, note_ids, shown, eligible, omitted}` ([schemas/cli/context.json](../schemas/cli/context.json)) on exit 0 and on exit 10 (`text` "" and `note_ids` [] on exit 10; `eligible` 0 when there was no repo, state or database). `text` is exactly what the plain form prints (the fenced form with `--fence`); `note_ids` are in display order; `omitted` = `eligible` − `shown`.
 
 ### `delete`
 
