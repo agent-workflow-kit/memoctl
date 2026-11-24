@@ -255,6 +255,9 @@ def plan_delete(store: Store, targets: dict[int, DeleteTarget], now: int) -> Del
                 answer = resolved[cur]
                 break
             path.append(cur)
+            if targets[cur].pointer_invalid:
+                answer = False
+                break
             nxt = targets[cur].superseded_by
             if nxt is None:
                 answer = None

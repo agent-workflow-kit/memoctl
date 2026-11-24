@@ -112,6 +112,7 @@ Package `src/memoctl/` (design guide section 15):
 | `secretscan.py` | The secret check: patterns and `mask_env` values over the repo id, topic, labels, kind and body (named so it never shadows the standard library `secrets`). |
 | `store.py` | SQLite open modes, migrations, the queries (all SQL lives here). |
 | `cmd_add.py` | The `add` command: its 14 steps as one function each, called in the interface's order (argv grammars, config, body, secrets, clock, state, store transaction, log, output). The dedupe and supersede rules of steps 10 and 11 are `notes.py`'s (the queries are `store.py`'s); the limit rules of step 12 are `notes.py`'s (`evaluate_limits`, `check_limits`; the queries are `store.py`'s). |
+| `cmd_delete.py` | The `delete` command: id grammar and the 1 to 500 cap, the lookup snapshot, the confirmation on `/dev/tty` through the gateway (deadline paused), the write transaction, the log records after the commit, the output. The chain rule is `notes.py`'s (`plan_delete`); the statements are `store.py`'s. |
 | `notes.py` | The rules of `add`, `delete`, `prune`: supersede, dedupe, limits, chain repointing and reinstatement on `delete`. |
 | `selection.py` | Context selection and fairness. |
 | `sanitize.py` | The read-time sanitizer. |

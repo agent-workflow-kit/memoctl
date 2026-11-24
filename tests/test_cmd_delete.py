@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from memoctl.cli import main
+from memoctl.render import DELETE_LOG_FAILED, WARNING_MESSAGES
 from tests.fake_gateway import EPOCH, FakeGateway
 from tests.golden_files import check_golden
 from tests.test_cmd_read import NOW, REPO, add_note, db_path, seed
@@ -400,23 +401,39 @@ def test_pointer_to_a_missing_note_is_left_hidden(gw: FakeGateway) -> None:
 
 
 @pytest.mark.parametrize(
-    "rows",
+    ("rows", "after_first"),
     [
-        [dict(id=1, superseded_by=2), dict(id=2, superseded_by=1)],  # a two-note cycle
-        [dict(id=1, superseded_by=1)],  # self pointer
-        [dict(id=1, superseded_by=3), dict(id=2, superseded_by=1), dict(id=3, superseded_by=2)],
-        [dict(id=1, superseded_by=2), dict(id=2, superseded_by=2)],
+        ([dict(id=1, superseded_by=2), dict(id=2, superseded_by=1)], {2: 1}),  # two-note cycle
+        ([dict(id=1, superseded_by=1)], {}),  # self pointer
+        (
+            [dict(id=1, superseded_by=3), dict(id=2, superseded_by=1), dict(id=3, superseded_by=2)],
+            {2: 1, 3: 2},
+        ),
+        ([dict(id=1, superseded_by=2), dict(id=2, superseded_by=2)], {2: 2}),
     ],
 )
 def test_planted_cycles_terminate_and_never_reinstate(
-    gw: FakeGateway, rows: list[dict[str, Any]]
+    gw: FakeGateway, rows: list[dict[str, Any]], after_first: dict[int, int]
 ) -> None:
     seed(gw, rows).close()
     ids = [str(r["id"]) for r in rows]
     assert run(gw, "delete", "--yes", "--json", ids[0]) == 0
     assert json.loads(gw.terminal.stdout)["reinstated"] == []
+    assert pointers(gw) == after_first  # nothing cleared, nothing invented
     if ids[1:]:
         assert run(gw, "delete", "--yes", "--json", *ids[1:]) == 0
+        assert json.loads(gw.terminal.stdout)["reinstated"] == []
+    assert pointers(gw) == {}
+
+
+@pytest.mark.parametrize("bad", [0, -3, 10**18])
+def test_an_invalid_pointer_leaves_the_note_hidden(gw: FakeGateway, bad: int) -> None:
+    # 1 -> 2 -> invalid: the chain above 2 cannot be followed, so 1 stays hidden (never
+    # reinstated, never repointed), exactly as for a pointer to a missing note.
+    seed(gw, [dict(id=1, superseded_by=2), dict(id=2, superseded_by=bad)]).close()
+    assert run(gw, "delete", "2", "--yes", "--json") == 0
+    assert gw.terminal.stdout == '{"deleted":[2],"reinstated":[]}\n'
+    assert pointers(gw) == {1: 2}
 
 
 def test_pointer_from_a_higher_id_is_left_alone(gw: FakeGateway) -> None:
@@ -435,6 +452,36 @@ def test_a_row_failing_its_checks_is_deleted_with_null_fields(gw: FakeGateway) -
     assert (rec["repo"], rec["body_sha256"]) == (None, None)
     assert (rec["topic"], rec["kind"], rec["size"]) == ("t", "k", 5)
     assert note_ids(gw) == [1]
+
+
+@pytest.mark.parametrize("field", ["repo", "topic", "kind", "body_sha256"])
+def test_a_field_over_one_mib_is_a_failed_check_and_the_row_is_deletable(
+    gw: FakeGateway, field: str
+) -> None:
+    conn = seed(gw, [])
+    add_note(conn, id=1, **{field: "a" * ((1 << 20) + 10)})
+    conn.close()
+    gw.terminal.tty_answer = "n"
+    assert run(gw, "delete", "1") == 13  # the prompt could be built: no db_corrupt
+    assert run(gw, "delete", "1", "--yes", "--json") == 0
+    [rec] = log_records(gw)
+    assert rec[field if field != "body_sha256" else "body_sha256"] is None
+    assert note_ids(gw) == []
+
+
+@pytest.mark.parametrize(
+    ("body", "size", "logged"),
+    [("hello", 99, None), ("hello", 5, 5), ("\u00e9", 2, 2), ("\u00e9", 1, None)],
+)
+def test_log_size_is_null_when_it_disagrees_with_the_body(
+    gw: FakeGateway, body: str, size: int, logged: int | None
+) -> None:
+    conn = seed(gw, [])
+    add_note(conn, id=1, body=body, size=size)
+    conn.close()
+    assert run(gw, "delete", "1", "--yes") == 0
+    [rec] = log_records(gw)
+    assert rec["size"] == logged
 
 
 def test_bad_row_prompt_never_prints_its_text(gw: FakeGateway) -> None:
@@ -461,6 +508,18 @@ def test_log_failure_is_a_warning_and_exit_0(gw: FakeGateway) -> None:
     assert gw.terminal.stderr.startswith("warning (log_failed): ")
     assert note_ids(gw) == []
     assert run(gw, "delete", "1", "--yes") == 10  # a retry: already deleted
+
+
+@pytest.mark.parametrize(
+    ("command", "line"),
+    [
+        ("add", "warning (log_failed): " + WARNING_MESSAGES["log_failed"]),
+        ("delete", DELETE_LOG_FAILED.rstrip("\n")),
+    ],
+)
+def test_log_failed_wordings_are_in_the_interface_table(command: str, line: str) -> None:
+    text = (Path(__file__).parent.parent / "docs" / "interface.md").read_text()
+    assert f"| `log_failed` | `{command}` | `{line}` |" in text
 
 
 def test_quiet_does_not_hide_the_warning(gw: FakeGateway) -> None:

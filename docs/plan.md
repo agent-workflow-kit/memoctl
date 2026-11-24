@@ -32,6 +32,7 @@ Status: 0.1.0-design, 2026-11-18. This plan implements [interface.md](interface.
 | `body.py` | 2 | Body validation (six classes, combining runs, NFKC bound). |
 | `secretscan.py` | 2 | The secret check (patterns, `mask_env`). |
 | `cmd_add.py` | 3 | The `add` command: the 14 ordered steps, one function each. |
+| `cmd_delete.py` | 6 | The `delete` command: ids, lookup, confirmation on `/dev/tty`, one write transaction, log records, output. |
 | `notes.py` | 3 and 6 | The rules `add` calls (dedupe, supersede, limits: #17, #18), `delete` (chain repointing), `prune`. |
 | `logfile.py` | 3 | `log.jsonl` append and rotation. |
 | `searchmatch.py` | 4 | Search term parsing and matching. |

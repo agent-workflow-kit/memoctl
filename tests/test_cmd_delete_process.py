@@ -4,7 +4,6 @@ is replaced in the child; see ``tests/private_home.py``)."""
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import pty
@@ -163,14 +162,33 @@ def test_delete_against_a_superseding_add_leaves_no_dangling_pointer(home: Path)
 # -- a real terminal ------------------------------------------------------------------------
 
 
-def run_on_pty(home: Path, *args: str, send: bytes) -> tuple[int, bytes, bytes]:
+# Runs in the child after ``start_new_session`` (the child leads a new session): take the pty on
+# descriptor 0 as the controlling terminal, then become the real command. No ``preexec_fn``
+# (unsafe with threads), and nothing of the production code is changed.
+TAKE_TTY = (
+    "import fcntl, os, sys, termios\n"
+    "fcntl.ioctl(0, termios.TIOCSCTTY, 0)\n"
+    "os.execv(sys.argv[1], sys.argv[1:])\n"
+)
+
+
+def run_on_pty(
+    home: Path, *args: str, send: bytes, typed_ahead: bytes = b"", icrnl: bool = True
+) -> tuple[int, bytes, bytes]:
     """Start the command with a pty as its controlling terminal; write ``send`` after the
-    prompt appears. Returns the exit code, what was shown on the terminal and stdout."""
+    prompt appears. ``typed_ahead`` is written before the command starts; ``icrnl=False`` keeps
+    a carriage return as typed. Returns the exit code, what was shown on the terminal and stdout."""
     master, slave = pty.openpty()
+    if not icrnl:
+        attrs = termios.tcgetattr(slave)
+        attrs[0] &= ~termios.ICRNL
+        termios.tcsetattr(slave, termios.TCSANOW, attrs)
+    if typed_ahead:
+        os.write(master, typed_ahead)
     proc = subprocess.Popen(
-        private_home.argv(home, *args), stdin=slave, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, env=env(home), start_new_session=True,
-        preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0),
+        [sys.executable, "-I", "-c", TAKE_TTY, *private_home.argv(home, *args)],
+        stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env(home),
+        start_new_session=True,
     )  # fmt: skip
     os.close(slave)
     shown = b""
@@ -220,6 +238,18 @@ def test_other_answers_delete_nothing_exit_13(home: Path, send: bytes) -> None:
     assert rows(home) == [(1, None)]
 
 
+def test_input_typed_before_the_prompt_is_discarded(home: Path) -> None:
+    add(home, "x")
+    code, _shown, _ = run_on_pty(home, "delete", "1", send=b"n\n", typed_ahead=b"y\n")
+    assert code == 13 and rows(home) == [(1, None)]
+
+
+def test_a_carriage_return_makes_it_another_answer(home: Path) -> None:
+    add(home, "x")
+    code, _shown, _ = run_on_pty(home, "delete", "1", send=b"y\r\n", icrnl=False)
+    assert code == 13 and rows(home) == [(1, None)]
+
+
 def test_end_of_input_on_the_terminal_after_a_partial_line(home: Path) -> None:
     add(home, "x")
     code, _shown, _ = run_on_pty(home, "delete", "1", send=b"y\x04\x04")
@@ -257,12 +287,15 @@ def test_no_terminal_exit_13_without_yes_and_works_with_yes(home: Path) -> None:
 def test_closed_standard_descriptors(home: Path) -> None:
     add(home, "x")
 
-    def close_all() -> None:
-        for fd in (0, 1, 2):
-            os.close(fd)
-
+    close_all = (
+        "import os, sys\n"
+        "for fd in (0, 1, 2):\n"
+        "    os.close(fd)\n"
+        "os.execv(sys.argv[1], sys.argv[1:])\n"
+    )
     proc = subprocess.Popen(
-        private_home.argv(home, "delete", "1", "--yes"), env=env(home), preexec_fn=close_all,
+        [sys.executable, "-I", "-c", close_all, *private_home.argv(home, "delete", "1", "--yes")],
+        env=env(home),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )  # fmt: skip
     assert proc.wait(timeout=60) == 0

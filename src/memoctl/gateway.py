@@ -37,6 +37,7 @@ import signal
 import stat
 import subprocess
 import sys
+import termios
 import threading
 import time
 from collections.abc import Callable
@@ -1048,6 +1049,10 @@ class RealGateway:
         except OSError:
             return None
         try:
+            try:
+                termios.tcflush(fd, termios.TCIFLUSH)  # input typed before the prompt is no answer
+            except termios.error:
+                pass
             data = prompt.encode(ENCODING, "replace")
             while data:
                 data = data[os.write(fd, data) :]
@@ -1062,7 +1067,7 @@ class RealGateway:
             line = buffer.split(b"\n", 1)[0]
             if len(line) > ASK_MAX_BYTES:
                 return None
-            return line.removesuffix(b"\r").decode(ENCODING, "replace")
+            return line.decode(ENCODING, "replace")
         except OSError:
             return None
         finally:

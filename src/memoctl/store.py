@@ -77,6 +77,7 @@ MAX_SCHEMA_OBJECTS = 64  # the real schema has 11; reading stops past this and r
 MAX_LABELS = 8  # config limits.max_labels is 0 to 8
 MAX_TIMESTAMP = 253_402_300_799  # 9999-12-31T23:59:59Z, the last second the output can print
 MAX_ID = 999_999_999_999_999_999
+DELETE_LENGTH_LIMIT = 1 << 30  # SQLite's own default; see ``Store.delete_note``
 MAX_REPO_LENGTH = 255
 MAX_BODY_BYTES = 65536
 MAX_SIZE = 65536
@@ -275,6 +276,7 @@ class DeleteTarget:
     body_sha256: str | None  # the first 16 hex characters, as the log records them
     superseded_by: int | None
     expires: int | None
+    pointer_invalid: bool = False  # superseded_by is set but is not a valid id
 
 
 def _is_sha256(text: str) -> bool:
@@ -744,20 +746,43 @@ class Store:
         return found[0] if found is not None and type(found[0]) is int else None
 
     # -- delete (the rules are notes.py's; these are the statements)
+    def _field(self, sql: LiteralString, note_id: int) -> object:
+        """One value of note ``note_id`` (``sql`` selects it); ``None`` when the value cannot be
+        handed over (over the 1 MiB statement limit, which fails that read only)."""
+        try:
+            cursor = self.execute(sql, (note_id,))
+            try:
+                raw = cursor.fetchone()
+            finally:
+                cursor.close()
+        except StoreError as exc:
+            if exc.reason == DB_CORRUPT:
+                return None
+            raise
+        return None if raw is None else raw[0]
+
     def delete_target(self, note_id: int) -> DeleteTarget | None:
         """What ``delete`` knows about note ``note_id``, read column by column and without the
-        body: ``None`` when no such row exists. A column that fails its check is ``None`` in the
-        result (the log record then carries null there); the row is deleted like any other."""
-        cursor = self.execute(
-            "SELECT repo, topic, kind, size, body_sha256, superseded_by, expires FROM notes"
-            " WHERE id = ?",
-            (note_id,),
-        )
+        body: ``None`` when no such row exists. A column that fails its check (or is over the
+        1 MiB limit) is ``None`` in the result (the log record then carries null there); the
+        row is deleted like any other. ``size`` is kept only when it equals the body's length
+        in bytes (computed in SQL, the body is never read here)."""
+        cursor = self.execute("SELECT superseded_by, expires FROM notes WHERE id = ?", (note_id,))
         raw = cursor.fetchone()
         cursor.close()
         if raw is None:
             return None
-        repo, topic, kind, size, sha, by, expires = raw
+        by, expires = raw
+        repo = self._field("SELECT repo FROM notes WHERE id = ?", note_id)
+        topic = self._field("SELECT topic FROM notes WHERE id = ?", note_id)
+        kind = self._field("SELECT kind FROM notes WHERE id = ?", note_id)
+        sha = self._field("SELECT body_sha256 FROM notes WHERE id = ?", note_id)
+        size = self._field(
+            "SELECT CASE WHEN size = length(CAST(body AS BLOB)) THEN size END"
+            " FROM notes WHERE id = ?",
+            note_id,
+        )
+        pointer = _as_int(by, 1, MAX_ID)
         return DeleteTarget(
             id=note_id,
             repo=repo if type(repo) is str and is_add_repo_id(repo) else None,
@@ -765,8 +790,9 @@ class Store:
             kind=kind if type(kind) is str and matches("kind", kind) else None,
             size=_as_int(size, 1, MAX_SIZE),
             body_sha256=sha[:16] if type(sha) is str and _is_sha256(sha) else None,
-            superseded_by=_as_int(by, 1, MAX_ID),
+            superseded_by=pointer,
             expires=_as_int(expires, 0, MAX_TIMESTAMP),
+            pointer_invalid=by is not None and pointer is None,
         )
 
     def pointing_at(self, note_id: int) -> list[tuple[int, int | None]]:
@@ -780,14 +806,6 @@ class Store:
         out = [(row[0], _as_int(row[1], 0, MAX_TIMESTAMP)) for row in self._rows(cursor)]
         cursor.close()
         return [(i, e) for i, e in out if type(i) is int and i >= 1]
-
-    def pointer_of(self, note_id: int) -> int | None:
-        """The valid ``superseded_by`` of note ``note_id`` (``None``: no such note, not
-        superseded, or an invalid pointer)."""
-        cursor = self.execute("SELECT superseded_by FROM notes WHERE id = ?", (note_id,))
-        raw = cursor.fetchone()
-        cursor.close()
-        return None if raw is None else _as_int(raw[0], 1, MAX_ID)
 
     def note_exists(self, note_id: int) -> bool:
         cursor = self.execute("SELECT 1 FROM notes WHERE id = ?", (note_id,))
@@ -814,9 +832,16 @@ class Store:
         if self.mode is Mode.READ:
             raise RuntimeError("delete on a read-only store")
         self.execute("DELETE FROM note_labels WHERE note_id = ?", (note_id,)).close()
-        cursor = self.execute("DELETE FROM notes WHERE id = ?", (note_id,))
-        changed = cursor.rowcount
-        cursor.close()
+        # Removing the row edits the (repo, id) index entry, which reads the repo: a value over
+        # the 1 MiB limit would fail the statement, and ``delete`` is the way to remove such a
+        # row. The limit is raised for this one statement only, and restored.
+        self._conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, DELETE_LENGTH_LIMIT)
+        try:
+            cursor = self.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+            changed = cursor.rowcount
+            cursor.close()
+        finally:
+            self._conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, LENGTH_LIMIT)
         if changed != 1:
             raise StoreError(DB_CORRUPT)
 
