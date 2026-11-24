@@ -535,6 +535,10 @@ class Gateway(Protocol):
         """A monotonic clock in seconds, for measuring the deadline (never for a timestamp)."""
         ...
 
+    def pause(self, seconds: float) -> None:
+        """Sleep for ``seconds`` (a short wait for another process to finish a step)."""
+        ...
+
     def alarm_arm(self, seconds: float, on_alarm: Callable[[], None]) -> AlarmHandle:
         """Install a ``SIGALRM`` handler that calls ``on_alarm`` and start a one-shot
         ``ITIMER_REAL`` timer of ``seconds``. The previous handler, the signal mask and any timer
@@ -1025,6 +1029,9 @@ class RealGateway:
 
     def monotonic(self) -> float:
         return time.monotonic()
+
+    def pause(self, seconds: float) -> None:
+        time.sleep(seconds)
 
     def alarm_arm(self, seconds: float, on_alarm: Callable[[], None]) -> AlarmHandle:
         return _RealAlarm(seconds, on_alarm)

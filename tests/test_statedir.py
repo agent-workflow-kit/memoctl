@@ -11,15 +11,21 @@ import os
 import pickle
 import stat
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from memoctl.config import ConfigError
-from memoctl.gateway import DirHandle, GatewayError, RealGateway
-from memoctl.statedir import StateAccessError, UnsafeStateError, open_state_dir
+from memoctl.gateway import DirHandle, GatewayError, PathInfo, RealGateway
+from memoctl.statedir import (
+    SETTLE_PAUSE,
+    SETTLE_TRIES,
+    StateAccessError,
+    UnsafeStateError,
+    open_state_dir,
+)
 from tests.fake_gateway import FakeGateway
 
 
@@ -600,3 +606,190 @@ def test_check_db_checks_the_file_inside_the_checked_directory(
         (_state(home) / "state.db").write_bytes(b"")
         (_state(home) / "state.db").chmod(0o666)
         assert sd.check_db() is True  # the held directory's own, safe, file
+
+
+# --- a creator that has not yet set the mode (first-run race, #20) ---------------------------
+
+
+class _SlowCreator(HomeGateway):
+    """The first ``pause`` plays the creator finishing: it sets 0700 on the named levels."""
+
+    def __init__(self, home: Path, levels: list[Path]) -> None:
+        super().__init__(home)
+        self.levels = levels
+        self.pauses: list[float] = []
+
+    def pause(self, seconds: float) -> None:
+        self.pauses.append(seconds)
+        for level in self.levels:
+            level.chmod(0o700)
+        self.levels = []
+
+
+@pytest.mark.parametrize("mode", [0o000, 0o100, 0o500, 0o300])
+def test_a_level_a_creator_has_not_yet_chmodded_is_waited_for_not_refused(
+    home: Path, mode: int
+) -> None:
+    levels = [home / ".local", home / ".local" / "state", _state(home)]
+    for level in levels:
+        level.mkdir()
+    for level in reversed(levels):  # the leaf first, so the parents stay reachable meanwhile
+        level.chmod(mode)
+    gw = _SlowCreator(home, levels)
+    with open_state_dir(gw, create=True) as sd:
+        assert sd is not None
+    assert gw.pauses  # it waited
+    for level in levels:
+        assert _mode(level) == 0o700
+
+
+def test_a_final_level_that_never_settles_is_still_handled_as_before(home: Path) -> None:
+    for level in (home / ".local", home / ".local" / "state", _state(home)):
+        level.mkdir()
+    _state(home).chmod(0o000)
+    gw = HomeGateway(home)
+    pauses: list[float] = []
+    gw.pause = pauses.append  # type: ignore[method-assign]
+    try:
+        with pytest.raises(UnsafeStateError) as info:
+            open_state_dir(gw, create=True)
+    finally:
+        _state(home).chmod(0o700)
+    assert info.value.reason == "mode"
+    assert len(pauses) == SETTLE_TRIES  # one budget for the whole call, retry included
+
+
+def test_the_settle_constants_keep_the_wait_within_about_a_third_of_a_second() -> None:
+    assert SETTLE_TRIES == 30
+    assert SETTLE_PAUSE == 0.01
+    assert SETTLE_TRIES * SETTLE_PAUSE <= 0.3 + 1e-9
+
+
+class _Lying:
+    """A directory handle that reports what the test scripts for ``lstat`` of chosen names and
+    for ``open_dir`` of a name; the rest is the real handle."""
+
+    def __init__(self, inner: DirHandle, owner: _LyingGateway) -> None:
+        self._inner = inner
+        self._owner = owner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def lstat(self, name: str) -> PathInfo | None:
+        real = self._inner.lstat(name)
+        mode = self._owner.lstat_mode(name)
+        if real is None or mode is None:
+            return real
+        return PathInfo(real.kind, real.uid, mode)
+
+    def open_dir(self, name: str, *, follow: bool) -> Any:
+        self._owner.before_open(name)
+        child = self._inner.open_dir(name, follow=follow)
+        return None if child is None else _Lying(child, self._owner)
+
+
+class _LyingGateway(HomeGateway):
+    """A real home whose ``lstat`` can disagree with the disk, with a scripted ``pause``."""
+
+    def __init__(self, home: Path) -> None:
+        super().__init__(home)
+        self.pauses: list[float] = []
+        # name -> reported mode, or None for the real one
+        self.lstat_mode: Callable[[str], int | None] = lambda name: None
+        self.before_open: Callable[[str], None] = lambda name: None
+        self.on_pause: Callable[[int], None] = lambda count: None
+
+    def open_dir(self, path: Path, *, follow: bool) -> Any:
+        handle = super().open_dir(path, follow=follow)
+        return None if handle is None else _Lying(handle, self)
+
+    def pause(self, seconds: float) -> None:
+        self.pauses.append(seconds)
+        self.on_pause(len(self.pauses))
+
+
+def _levels(home: Path) -> list[Path]:
+    levels = [home / ".local", home / ".local" / "state", _state(home)]
+    for level in levels:
+        level.mkdir(mode=0o700)
+    return levels
+
+
+def test_only_the_post_open_wait_rescues_a_level_whose_lstat_looks_settled(home: Path) -> None:
+    """The lstat reports 0700 (so the wait before the open does not run), the open descriptor is
+    a 0500 level that its creator makes 0700 after three pauses: only the descriptor-based wait
+    sees that, and it runs for ``create`` only."""
+    levels = _levels(home)
+    levels[2].chmod(0o500)
+    gw = _LyingGateway(home)
+    gw.lstat_mode = lambda name: 0o700
+    gw.on_pause = lambda count: levels[2].chmod(0o700) if count == 3 else None
+    try:
+        with open_state_dir(gw, create=True) as sd:
+            assert sd is not None
+            assert sd.handle.stat().mode == 0o700
+    finally:
+        levels[2].chmod(0o700)
+    assert len(gw.pauses) == 3
+
+
+def test_a_first_open_that_is_denied_is_retried_once_after_the_level_settles(home: Path) -> None:
+    """The first open of the final level fails with a permission error although the level is
+    fine at the next look (the creator set its mode in between): waiting for it and opening
+    again succeeds, the level is not refused."""
+    _levels(home)
+    gw = _LyingGateway(home)
+    state = {"failed": False}
+
+    def before_open(name: str) -> None:
+        if name == "memoctl" and not state["failed"]:
+            state["failed"] = True
+            raise PermissionError(errno.EACCES, "denied")
+
+    def lstat_mode(name: str) -> int | None:
+        if name != "memoctl" or not state["failed"]:
+            return None
+        return 0o300 if len(gw.pauses) < 2 else 0o700  # unsettled until two pauses are over
+
+    gw.before_open = before_open
+    gw.lstat_mode = lstat_mode
+    with open_state_dir(gw, create=True) as sd:
+        assert sd is not None
+    assert len(gw.pauses) == 2
+
+
+def test_the_pauses_of_all_levels_share_one_budget(home: Path) -> None:
+    _levels(home)
+    gw = _LyingGateway(home)
+    gw.lstat_mode = lambda name: 0o300  # every level looks unsettled for ever
+    with open_state_dir(gw, create=True) as sd:  # the real levels are 0700: judged on the fd
+        assert sd is not None
+    assert len(gw.pauses) == SETTLE_TRIES
+
+
+def test_a_permanent_owner_read_only_level_costs_a_reader_no_wait(home: Path) -> None:
+    levels = _levels(home)
+    for level in reversed(levels):
+        level.chmod(0o500)
+    gw = _LyingGateway(home)
+    try:
+        sd = open_state_dir(gw, create=False)
+        assert sd is not None
+        sd.close()
+    finally:
+        for level in levels:
+            level.chmod(0o700)
+    assert gw.pauses == []
+
+
+@pytest.mark.parametrize("mode", [0o000, 0o100, 0o300])
+def test_a_reader_waits_for_a_level_without_owner_read_and_search(home: Path, mode: int) -> None:
+    levels = _levels(home)
+    for level in reversed(levels):
+        level.chmod(mode)
+    gw = _SlowCreator(home, levels)
+    sd = open_state_dir(gw, create=False)
+    assert sd is not None
+    sd.close()
+    assert gw.pauses

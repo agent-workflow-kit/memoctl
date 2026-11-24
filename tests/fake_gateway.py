@@ -165,6 +165,7 @@ class FakeGateway:
         self._scripted: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {}
         self._random = random.Random(seed)
         self.mono = 1000.0
+        self.pauses: list[float] = []
         self.alarms: list[FakeAlarm] = []
         self.write_out_calls: list[tuple[float | None, bool]] = []  # (bound, complete)
         self.exits: list[int] = []
@@ -237,6 +238,10 @@ class FakeGateway:
 
     def monotonic(self) -> float:
         return self.mono
+
+    def pause(self, seconds: float) -> None:
+        self.pauses.append(seconds)
+        self.advance_mono(seconds)
 
     def alarm_arm(self, seconds: float, on_alarm: Callable[[], None]) -> FakeAlarm:
         if not 0 < seconds <= 3600:
