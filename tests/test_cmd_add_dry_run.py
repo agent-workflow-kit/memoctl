@@ -52,7 +52,7 @@ def dry(gw: FakeGateway, *argv: str, **kwargs: Any) -> tuple[int, str, str]:
     return add(gw, "--dry-run", *argv, **kwargs)
 
 
-# -- the output ------------------------------------------------------------------------------------
+# -- the output -----------------------
 
 
 def test_dry_run_prints_the_documented_document_and_writes_nothing(gw: FakeGateway) -> None:
@@ -122,7 +122,7 @@ def test_dry_run_runs_no_limits(gw: FakeGateway) -> None:
     assert dry(gw, "--kind", "implement", body="three")[0] == 0
 
 
-# -- never touches the state ------------------------------------------------------------------------
+# -- never touches the state -----------------------
 
 
 def _fail(*args: Any, **kwargs: Any) -> Any:
@@ -181,7 +181,7 @@ def test_dry_run_does_not_write_a_log_record(gw: FakeGateway) -> None:
     assert log_records(gw) == before and len(stored(gw)) == 1
 
 
-# -- the steps 1 to 7 apply, 8 to 13 do not ---------------------------------------------------------
+# -- the steps 1 to 7 apply, 8 to 13 do not -----------------------
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda s: s[0])
@@ -242,7 +242,7 @@ def test_of_two_failing_steps_dry_run_reports_the_earlier_one(
     assert log_records(gw) == []
 
 
-# -- the deadline -----------------------------------------------------------------------------------
+# -- the deadline -----------------------
 
 DRY_STEPS = [
     "step1_parse", "step2_load_config", "step3_check_label_count", "step4_resolve_kind",
@@ -300,7 +300,7 @@ def test_a_timer_that_ran_out_before_the_disarm_point_prints_no_document(
     assert info.value.code == 12 and "dry_run" not in gw.terminal.stdout
 
 
-# -- hostile input -----------------------------------------------------------------------------------
+# -- hostile input -----------------------
 
 
 @pytest.mark.parametrize("flag", ["--dry-run=x", "--dry-run=", "--dry", "--dry-ru", "--dryrun"])
@@ -346,7 +346,7 @@ def test_dry_run_with_a_body_file_reads_that_file(gw: FakeGateway) -> None:
     assert gw.stdin_reads == 0
 
 
-# -- the warning lines --------------------------------------------------------------------------------
+# -- the warning lines -----------------------
 
 
 def test_expires_capped_prints_its_line_in_both_forms(gw: FakeGateway) -> None:
