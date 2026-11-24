@@ -627,3 +627,11 @@ def test_a_deadline_that_runs_out_during_the_commit_exits_12_with_no_log_record(
     assert not (db_path(gw).parent / "log.jsonl").exists()
     assert json.loads(gw.terminal.stdout)["error"]["reason"] == "timeout"
     assert run(gw, "delete", "1", "--yes") == 10  # the documented retry result
+
+
+def test_delete_removes_a_note_with_an_oversized_label(gw: FakeGateway) -> None:
+    big = "x" * (1_048_576 + 10)
+    seed(gw, [dict(id=1), dict(id=2)], labels=[(1, big, "v")]).close()
+    assert run(gw, "delete", "1", "--yes", "--json") == 0
+    assert note_ids(gw) == [2]
+    assert state(gw)["labels"] == []

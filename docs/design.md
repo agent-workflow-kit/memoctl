@@ -113,6 +113,7 @@ Package `src/memoctl/` (design guide section 15):
 | `store.py` | SQLite open modes, migrations, the queries (all SQL lives here). |
 | `cmd_add.py` | The `add` command: its 14 steps as one function each, called in the interface's order (argv grammars, config, body, secrets, clock, state, store transaction, log, output). The dedupe and supersede rules of steps 10 and 11 are `notes.py`'s (the queries are `store.py`'s); the limit rules of step 12 are `notes.py`'s (`evaluate_limits`, `check_limits`; the queries are `store.py`'s). |
 | `cmd_delete.py` | The `delete` command: id grammar and the 1 to 500 cap, the lookup snapshot, the confirmation on `/dev/tty` through the gateway (deadline paused), the write transaction, the log records after the commit, the output. The chain rule is `notes.py`'s (`plan_delete`); the statements are `store.py`'s. |
+| `cmd_prune.py` | The `prune` command: argv (`--actor`, `--dry-run`, `--json`), the one clock read, the read-only dry run, the one write transaction, the busy outcome, the deadline disarm, the log records after the commit, the output. The statements are `store.py`'s. |
 | `notes.py` | The rules of `add`, `delete`, `prune`: supersede, dedupe, limits, chain repointing and reinstatement on `delete`. |
 | `selection.py` | Context selection and fairness. |
 | `sanitize.py` | The read-time sanitizer. |
@@ -134,7 +135,7 @@ The tables are in [Database](interface.md#database). `status` is derived at read
 
 ## Concurrency
 
-All writes (`add`, `delete`, `prune`, migration) take `BEGIN IMMEDIATE`; the limits, the dedupe check, the supersede checks and the insert happen under that one lock, so two concurrent adds cannot both pass a limit. `context` reads in one read transaction on a WAL snapshot and never takes a write lock, so it never blocks a writer and sees a note and its labels consistently. `prune` is one transaction (`prune --dry-run` is a read transaction and takes no write lock; a 100000-note store with half of it expired prunes in a few seconds, well inside the 30 s deadline, and a deadline that does pass rolls the whole transaction back); a second `prune` that cannot get the lock within the busy timeout reports `busy` (another writer holds it). The log append is a single `O_APPEND` write; rotation takes `log.lock` with `flock`.
+All writes (`add`, `delete`, `prune`, migration) take `BEGIN IMMEDIATE`; the limits, the dedupe check, the supersede checks and the insert happen under that one lock, so two concurrent adds cannot both pass a limit. `context` reads in one read transaction on a WAL snapshot and never takes a write lock, so it never blocks a writer and sees a note and its labels consistently. `prune` is one transaction (`prune --dry-run` is a read transaction and takes no write lock; a 100000-note store with half of it expired prunes well inside the 30 s deadline, and a deadline that does pass rolls the whole transaction back); a second `prune` that cannot get the lock within the busy timeout reports `busy` (another writer holds it). The log append is a single `O_APPEND` write; rotation takes `log.lock` with `flock`.
 
 ## Error handling
 

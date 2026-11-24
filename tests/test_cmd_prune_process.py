@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from tests import private_home
+from tests.schema_check import validate
 from tests.test_cmd_delete_process import (
     REPO,
     add,
@@ -219,17 +220,32 @@ def test_a_large_store_prunes_within_the_deadline(home: Path) -> None:
     conn.executemany("INSERT INTO rate VALUES ('r', ?)", ((i,) for i in range(50_000)))
     conn.execute("COMMIT")
     conn.close()
-    started = time.monotonic()
+    pruned_ids = [r[0] for r in table(home, "notes") if r[8] == 2]
+    assert len(pruned_ids) == 50_000
     dry = memoctl(home, "prune", "--dry-run", "--json")
     assert json.loads(dry.stdout) == {"expired": 50_000, "remaining": 50_001, "dry_run": True}
+    started = time.monotonic()
     done = memoctl(home, "prune", "--json", "--quiet")
     elapsed = time.monotonic() - started
     assert done.returncode == 0, done.stderr
     assert json.loads(done.stdout) == {"expired": 50_000, "remaining": 50_001, "dry_run": False}
     assert len(table(home, "rate")) == 1  # the seed add's own row, from today
     assert done.stderr == b""  # every append worked; the log rotated on its own size cap
-    assert 0 < len(prune_log(home)) <= 50_000
-    assert elapsed < 25, elapsed
+    state_dir = (home / DB).parent
+    kept = [  # both kept files
+        json.loads(line)
+        for name in ("log.jsonl.1", "log.jsonl")
+        if (state_dir / name).exists()
+        for line in (state_dir / name).read_text().splitlines()
+        if json.loads(line)["event"] == "prune"
+    ]
+    # older records may have rotated away; the newest must be there
+    assert kept
+    assert all(r["event"] == "prune" and r["repo"] == REPO for r in kept)
+    for r in kept:
+        validate("log", r)
+    assert max(r["note_id"] for r in kept) == max(pruned_ids)
+    assert elapsed < 30, elapsed  # the command's own deadline is 30 s
 
 
 # -- descriptors ----------------------------------------------------------------------------

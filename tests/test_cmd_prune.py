@@ -7,19 +7,22 @@ replacement. ``NOW`` is the fake clock; a note with ``expires <= NOW`` is expire
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from memoctl.cli import main
+from memoctl.logfile import ROTATE_BYTES
 from memoctl.render import BUSY_WARNING, PRUNE_LOG_FAILED
 from tests.fake_gateway import EPOCH, FakeExit, FakeGateway
 from tests.golden_files import check_golden
+from tests.schema_check import validate
 from tests.test_cmd_delete import log_records, note_ids, pointers, state
-from tests.test_cmd_read import NOW, REPO, add_note, db_path, seed
+from tests.test_cmd_read import NOW, REPO, SHA, add_note, db_path, seed
 
 DAY = 86400
 
@@ -197,10 +200,18 @@ def test_planted_far_future_expiry_is_never_pruned(gw: FakeGateway, value: int) 
 def test_clock_extremes_remove_only_what_the_clock_says(gw: FakeGateway, when: Any) -> None:
     seed(gw, [dict(id=1, expires=NOW + 1000), dict(id=2, expires=NOW + 100 * DAY)]).close()
     gw.clock.set(when)
-    now = int(when.timestamp())
+    now = math.floor(when.timestamp())
     expected = [i for i, e in ((1, NOW + 1000), (2, NOW + 100 * DAY)) if e > now]
     assert run(gw, "prune") == 0
     assert note_ids(gw) == expected
+
+
+def test_a_fractional_pre_1970_clock_is_floored_not_truncated(gw: FakeGateway) -> None:
+    # -0.5 s floors to -1 (int() would give 0 and wrongly prune the note expiring at 0).
+    seed(gw, [dict(id=1, expires=-1), dict(id=2, expires=0)]).close()
+    gw.clock.set(datetime(1969, 12, 31, 23, 59, 59, 500000, tzinfo=UTC))
+    assert run(gw, "prune") == 0
+    assert note_ids(gw) == [2]
 
 
 def test_clock_one_second_before_expiry_keeps_the_note(gw: FakeGateway) -> None:
@@ -221,6 +232,29 @@ def test_rows_failing_their_checks_are_pruned_like_any_other(gw: FakeGateway) ->
     [rec] = log_records(gw)
     assert (rec["repo"], rec["topic"], rec["size"]) == (None, None, None)
     assert rec["kind"] == "unknown"
+
+
+# --- values over the 1 MiB length limit ---------------------------------------------------------
+
+BIG = "x" * (1_048_576 + 10)
+
+
+@pytest.mark.parametrize("which", ["key", "value"])
+def test_an_oversized_label_does_not_stop_the_prune(gw: FakeGateway, which: str) -> None:
+    key, value = (BIG, "v") if which == "key" else ("k", BIG)
+    seed(gw, [dict(id=1, expires=NOW - 1), dict(id=2)], labels=[(1, key, value)]).close()
+    assert run(gw, "prune", "--json") == 0
+    assert gw.terminal.stdout == '{"expired":1,"remaining":1,"dry_run":false}\n'
+    assert note_ids(gw) == [2]
+    assert state(gw)["labels"] == []
+
+
+def test_an_oversized_rate_repo_does_not_stop_the_prune(gw: FakeGateway) -> None:
+    conn = seed(gw, [])
+    put_rate(conn, (BIG, 0), ("r", NOW))
+    conn.close()
+    assert run(gw, "prune", "--json") == 0
+    assert rate_rows(gw) == [("r", NOW)]
 
 
 # --- dry run ----------------------------------------------------------------------------------
@@ -309,6 +343,8 @@ def test_one_log_record_per_pruned_note_without_bodies(gw: FakeGateway) -> None:
     recs = log_records(gw)
     assert [(r["event"], r["note_id"]) for r in recs] == [("prune", 1), ("prune", 2)]
     for r in recs:
+        validate("log", r)
+        assert (r["size"], r["body_sha256"]) == (11 if r["note_id"] == 1 else 5, SHA[:16])
         assert r["reinstated"] is None and r["supersedes"] is None
         assert (r["actor"], r["actor_source"]) == ("auto:memoctl-cron", "flag")
         assert r["repo"] == REPO and r["kind"] == "unknown" and r["topic"] == "t"
@@ -341,11 +377,14 @@ def test_log_failed_wording_is_in_the_interface_table() -> None:
 
 
 def test_rotation_is_the_logs_own(gw: FakeGateway) -> None:
-    seed(gw, [dict(id=1, expires=NOW - 1)]).close()
+    seed(gw, [dict(id=1, expires=NOW - 1), dict(id=2, expires=NOW - 1)]).close()
+    log = db_path(gw).parent / "log.jsonl"
+    log.write_bytes(b"x" * ROTATE_BYTES)  # at the cap: the next append rotates
+    log.chmod(0o600)
     assert run(gw, "prune") == 0
-    assert sorted(p.name for p in db_path(gw).parent.iterdir() if p.name.startswith("log")) == [
-        "log.jsonl"
-    ]
+    assert gw.terminal.stderr == ""
+    assert (db_path(gw).parent / "log.jsonl.1").stat().st_size == ROTATE_BYTES
+    assert [(r["event"], r["note_id"]) for r in log_records(gw)] == [("prune", 1), ("prune", 2)]
 
 
 # --- arguments ---------------------------------------------------------------------------------
@@ -510,6 +549,33 @@ def test_busy_is_golden(gw: FakeGateway, short_busy: None) -> None:
     finally:
         holder.execute("ROLLBACK")
         holder.close()
+
+
+def test_the_write_lock_is_held_when_the_expired_ids_are_selected(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memoctl.store import Store
+
+    seed(gw, [dict(id=1, expires=NOW - 1)]).close()
+    real = Store.expired_ids
+    outcomes: list[str] = []
+
+    def probe(self: Any, now: int) -> list[int]:
+        other = sqlite3.connect(db_path(gw), timeout=0.05, isolation_level=None)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            outcomes.append("acquired")
+            other.execute("ROLLBACK")
+        except sqlite3.OperationalError as error:
+            outcomes.append(str(error))
+        finally:
+            other.close()
+        return real(self, now)
+
+    monkeypatch.setattr(Store, "expired_ids", probe)
+    assert run(gw, "prune") == 0
+    assert outcomes == ["database is locked"]
+    assert note_ids(gw) == []
 
 
 # --- the deadline ------------------------------------------------------------------------------
