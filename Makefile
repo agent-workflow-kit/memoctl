@@ -7,7 +7,7 @@ verify: lint fmt-check typecheck test mdlint
 test:
 	uv run pytest
 
-# The heavy flood and performance fixtures (tests marked `perf`): minutes, up to about 100 MB of
+# The heavy flood and performance fixtures (tests marked `perf`): about 15 s, up to about 70 MB of
 # scratch under pytest's temporary directory, never part of `verify` or CI. It prints a run
 # report ([perf] lines) for each; read the numbers with `-s`.
 perf:

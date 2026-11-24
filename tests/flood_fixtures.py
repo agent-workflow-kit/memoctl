@@ -1,9 +1,14 @@
 """Flood and performance fixtures for ``context`` (deterministic, bulk-built, small on disk).
 
 Raw writers: they bypass every write limit on purpose, because the point is what the read side
-does with stores that ``add`` would refuse (a foreign or hostile database, or one near the
-maximum configuration). Everything is seeded (``random.Random(seed)``, no clock, no environment)
-so a failure reproduces; rows go in with ``executemany`` inside one transaction.
+does with stores that ``add`` at the default config would refuse (a foreign or hostile database,
+or one near the maximum configuration). They also bypass ``limits.total`` (the flood fixture
+holds 5020 notes), ``limits.live_per_repo`` and the rate limits; ``body_sha256`` is a constant,
+``created`` and ``expires`` are fixed (``expires`` is in the year 2096, so no row expires
+in a run; ``tests/test_cmd_context.py`` ``Store.add`` instead dates rows relative to a fixed
+``NOW`` and writes the same raw columns). Everything is seeded (``random.Random(seed)``, no
+clock, no environment) so a failure reproduces; rows go in with ``executemany`` inside one
+transaction.
 
 Bodies (``body_*``) are the pathological texts the tests use; ``Note`` is one row to insert.
 """
@@ -80,7 +85,8 @@ def body_mark_runs(max_bytes: int, run: int = 30) -> str:
 
 
 def body_single_mark_run(marks: int) -> str:
-    """One ``a`` followed by ``marks`` mixed-class combining marks (over 30: a foreign row)."""
+    """One ``a`` followed by ``marks`` mixed-class combining marks (over 30: a foreign row at the
+    default config)."""
     return "a" + (_MARKS * (marks // len(_MARKS) + 1))[:marks]
 
 
@@ -92,7 +98,7 @@ def body_expanding(char: str, max_bytes: int) -> str:
 # One code point and what it does to the text under NFKC (the tests do not depend on the
 # numbers; they are for the reader).
 EXPANDING = {
-    "u+fdfa": "ﷺ",  # 18 characters (3 bytes in, 33 code points out)
+    "u+fdfa": "ﷺ",  # 3 bytes in, 18 code points (33 bytes) out
     "ligature-ffi": "ﬃ",  # 3 characters
     "squared-hz": "㏿",  # a CJK square: 'gal'
     "roman-12": "Ⅻ",  # XII: 3 characters
@@ -101,7 +107,7 @@ EXPANDING = {
     "astral-emoji": "\U0001f600",  # 2 UTF-16 units, 4 bytes, 1 character
 }
 
-BIDI_ZERO_WIDTH = "a‮b​c⁦d‍e﻿" * 40  # all refused by body rules; foreign rows only
+BIDI_ZERO_WIDTH = "a‮b​c⁦d‍e﻿" * 40  # foreign rows only (add's body rules refuse them)
 
 
 def body_mixed(rng: random.Random, max_bytes: int) -> str:

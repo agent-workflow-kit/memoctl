@@ -36,8 +36,8 @@ note text has the documented shape and the sizes selection counted.
 the store interrupts a long scan.
 Cost: the scan is linear in the repo's live notes (``eligible`` fixes the reserved lines before
 the walk). The flood and performance fixtures are tests/test_context_flood.py; a store of 100k live
-notes in one repo scans in about 2.0 to 2.5 s, over the default 2 s deadline (exit 12, fail
-closed), a decision for the maintainer (see issue 28), not a defect of the scan.
+notes in one repo scans in about 1.7 to 2.5 s, over the default 2 s deadline (exit 12, fail
+closed), a decision for the maintainer (see issue 81), not a defect of the scan.
 """
 
 from __future__ import annotations
