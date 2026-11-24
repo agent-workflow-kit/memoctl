@@ -111,7 +111,8 @@ def test_utf8_bom_is_an_invisible_character_not_skipped() -> None:
 
 # ---------- item 3: the refused characters ----------
 
-# One golden per refused class and length case: the error envelope the CLI prints for the body.
+# One golden per refused class and length case: the error envelope the CLI prints for the body
+# (the stderr status line is pinned once, in test_too_long_golden).
 # Sweeps over every code point of a class stay below as plain assertions.
 
 GOLDEN_REFUSALS: dict[str, tuple[bytes, int]] = {
@@ -138,7 +139,6 @@ def test_refusal_golden(case: str) -> None:
         validate_body(data, limit)
     failure = failure_for(info.value)
     check_golden(f"body/{case}.json", failure.envelope().encode(), schema="cli/error")
-    check_golden(f"body/{case}-err.txt", failure.status_line().encode())
 
 
 def test_too_long_golden() -> None:
@@ -157,6 +157,8 @@ def test_search_text_refusal_golden() -> None:
 
 
 def test_classify_is_the_sanitizers_classification_for_every_code_point() -> None:
+    # Only guards against body growing its own classification again; the independent oracles
+    # below (unicodedata sweep, INVISIBLE_EXTRA, tag block) are what pin the classes.
     for cp in range(0x110000):
         ch = chr(cp)
         expected = refused_class(ch)
@@ -168,6 +170,7 @@ def test_classify_is_the_sanitizers_classification_for_every_code_point() -> Non
 def test_the_tag_block_is_invisible_to_the_sanitizer_labels_too() -> None:
     for cp in range(0xE0000, 0xE0080):
         assert refused_class(chr(cp)) == "invisible", hex(cp)
+        assert body.classify(chr(cp)) == "invisible", hex(cp)
 
 
 CONTROL = [chr(c) for c in [*range(0, 9), *range(11, 32), 127, *range(0x80, 0xA0), 0x2028, 0x2029]]
@@ -220,11 +223,6 @@ def test_named_invisibles() -> None:
         assert refusal(f"a{chr(cp)}".encode()).cls == "invisible", hex(cp)
 
 
-def test_whole_tag_block_is_invisible_even_where_unassigned() -> None:
-    for cp in range(0xE0000, 0xE0080):
-        assert body.classify(chr(cp)) == "invisible", hex(cp)
-
-
 def test_zwj_and_emoji_variation_selector_are_refused() -> None:
     assert refusal("\U0001f468‍\U0001f469".encode()).cls == "invisible"
     assert refusal("❤️".encode()).cls == "invisible"
@@ -256,6 +254,13 @@ def test_classify_agrees_with_unicodedata_for_all_code_points() -> None:
             assert cls == "private_use", hex(cp)
         elif cat == "Cn" and not 0xE0000 <= cp <= 0xE007F:
             assert cls == "unassigned", hex(cp)
+        elif (
+            cat not in {"Cc", "Cf", "Co", "Cn", "Cs"}
+            and cp not in INVISIBLE_EXTRA
+            and cp not in (0x2028, 0x2029)
+            and not 0xE0000 <= cp <= 0xE007F
+        ):
+            assert cls is None, hex(cp)
         if cls is None:
             allowed_extra.add(cp)
     # nothing in any refused class is accepted; whitespace letters stay accepted

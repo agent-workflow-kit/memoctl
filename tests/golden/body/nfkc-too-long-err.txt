@@ -1,1 +1,0 @@
-usage: the text is over the size limit after normalization

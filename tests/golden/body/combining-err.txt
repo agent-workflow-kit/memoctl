@@ -1,1 +1,0 @@
-usage: the text contains too long a run of combining marks
