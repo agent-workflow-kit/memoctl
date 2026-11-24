@@ -69,9 +69,9 @@ def chain(gw: FakeGateway) -> None:
 
 
 def test_delete_one_with_yes_json(gw: FakeGateway) -> None:
-    seed(
-        gw, [dict(id=1), dict(id=2)], labels=[(1, "a", "b"), (2, "a", "b")]
-    ).execute("INSERT INTO rate VALUES ('x', 5)").connection.commit()
+    seed(gw, [dict(id=1), dict(id=2)], labels=[(1, "a", "b"), (2, "a", "b")]).execute(
+        "INSERT INTO rate VALUES ('x', 5)"
+    ).connection.commit()
     assert run(gw, "delete", "1", "--yes", "--json") == 0
     assert gw.terminal.stdout == '{"deleted":[1],"reinstated":[]}\n'
     snap = state(gw)
@@ -209,7 +209,7 @@ def test_deadline_is_armed_with_yes_and_disarmed_before_output(gw: FakeGateway) 
 # --- order: the earlier refusal wins and nothing is deleted -----------------------------------
 
 BAD_IDS = [
-    ["0"], ["01"], ["-1"], ["1.0"], ["+1"], [" 1"], ["1 "], ["x"], ["١"], ["１"],  # non-ASCII digits
+    ["0"], ["01"], ["-1"], ["1.0"], ["+1"], [" 1"], ["1 "], ["x"], ["١"], ["１"],
     ["1" * 19], ["9" * 40], ["1" * 5000], [""], ["1", "x"],
 ]  # fmt: skip
 
@@ -505,3 +505,66 @@ def test_goldens(gw: FakeGateway) -> None:
 
 def test_epoch_is_what_the_expiry_compares_with() -> None:
     assert NOW == int(EPOCH.timestamp())
+
+
+# --- the deadline and the transaction ----------------------------------------------------------
+
+
+def test_a_failure_inside_the_transaction_rolls_everything_back(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memoctl import cmd_delete
+    from memoctl.store import StoreError
+
+    chain(gw)
+    before = state(gw)
+    real = cmd_delete.apply_delete
+
+    def apply_then_time_out(store: Any, plan: Any) -> None:
+        real(store, plan)  # deletes and repoints are done, the commit is not
+        raise StoreError("timeout")
+
+    monkeypatch.setattr(cmd_delete, "apply_delete", apply_then_time_out)
+    assert run(gw, "delete", "3", "2", "--yes", "--json") == 12
+    assert json.loads(gw.terminal.stdout)["error"]["reason"] == "timeout"
+    assert state(gw) == before
+
+
+def test_a_deadline_that_runs_out_during_the_commit_exits_12_with_no_log_record(
+    gw: FakeGateway,
+) -> None:
+    from tests.fake_gateway import FakeExit
+
+    seed(gw, [dict(id=1)]).close()
+    orig = gw.alarm_arm
+
+    def arm(seconds: float, on_alarm: Any) -> Any:
+        alarm = orig(seconds, on_alarm)
+        gw.deadline_alarm = alarm  # type: ignore[attr-defined]
+        return alarm
+
+    gw.alarm_arm = arm  # type: ignore[method-assign]
+    import memoctl.store as store_mod
+
+    real_write = store_mod.Store.write
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def write(self: Any) -> Any:
+        with real_write(self):
+            yield
+        gw.deadline_alarm.fired = True  # type: ignore[attr-defined]  # ran out while it committed
+        gw.mono += 100
+
+    store_mod.Store.write = write  # type: ignore[method-assign]
+    try:
+        with pytest.raises(FakeExit) as info:
+            run(gw, "delete", "1", "--yes", "--json")
+    finally:
+        store_mod.Store.write = real_write  # type: ignore[method-assign]
+    assert info.value.code == 12
+    assert note_ids(gw) == []  # stored: the new state, never a mix
+    assert not (db_path(gw).parent / "log.jsonl").exists()
+    assert json.loads(gw.terminal.stdout)["error"]["reason"] == "timeout"
+    assert run(gw, "delete", "1", "--yes") == 10  # the documented retry result
