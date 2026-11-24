@@ -32,7 +32,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from memoctl import deadline
+from memoctl import deadline, phases
 from memoctl.author import resolve_actor
 from memoctl.cli_args import Command
 from memoctl.gateway import Gateway
@@ -54,10 +54,13 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
     actor = resolve_actor(gateway, args.actor)
     now = gateway.now()
     seconds = math.floor(now.timestamp())
+    phases.mark("parse")
     if args.dry_run:
         counts = dry_run(gateway, seconds)
+        phases.mark("select")
         deadline.current().disarm()
         print_result(args, gateway, {"expired": counts[0], "remaining": counts[1], "dry_run": True})
+        phases.mark("output")
         return 0
     state = open_state_dir(gateway, create=False)
     if state is None:
@@ -67,22 +70,26 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
         if outcome is None:  # the write lock was not obtained: nothing was pruned
             deadline.current().disarm()
             print_result(args, gateway, {"outcome": "busy"})
+            phases.mark("output")
             return 0
         deadline.current().disarm()  # right after the commit (see cmd_delete)
         targets, remaining = outcome
         failed = append_records(state, targets, actor.actor, actor.source.value, now)
+        phases.mark("log")
     print_result(
         args,
         gateway,
         {"expired": len(targets), "remaining": remaining, "dry_run": False},
         log_failed=failed,
     )
+    phases.mark("output")
     return 0
 
 
 def finish(args: argparse.Namespace, gateway: Gateway, result: dict[str, Any]) -> int:
     deadline.current().disarm()
     print_result(args, gateway, result)
+    phases.mark("output")
     return 0
 
 
@@ -99,12 +106,14 @@ def write_run(state: StateDir, seconds: int) -> tuple[list[DeleteTarget], int] |
     ``state.db``, or an uninitialized one) is ``([], 0)``: nothing is created or migrated."""
     try:
         store = open_store(state, Mode.WRITE, configure=deadline.current().configure_store)
+        phases.mark("open_store")
         if store is None:
             return [], 0
         try:
             with store.write():
                 targets = apply_prune(store, seconds)
                 remaining = store.count_all_notes()
+            phases.mark("transaction")
         finally:
             store.close()
     except StoreError as exc:

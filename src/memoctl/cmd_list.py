@@ -15,7 +15,7 @@ import json
 import re
 from collections.abc import Callable
 
-from memoctl import deadline
+from memoctl import deadline, phases
 from memoctl.cli_args import Command
 from memoctl.gateway import Gateway
 from memoctl.grammar import GrammarError, matches, parse_label
@@ -75,13 +75,16 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
     )
     now = int(gateway.now().timestamp())
     store = open_read_store(gateway)
+    phases.mark("open_store")
     if store is None:
         result = empty_result()
     else:
         with store:
             result = scan(store, filters, now)
+    phases.mark("scan")
     deadline.current().disarm()
     print_result(args, gateway, result)
+    phases.mark("output")
     return 0
 
 

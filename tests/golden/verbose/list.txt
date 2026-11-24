@@ -1,0 +1,3 @@
+verbose (open_store): 0 ms
+verbose (scan): 0 ms
+verbose (output): 0 ms

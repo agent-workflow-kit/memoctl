@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from memoctl import deadline
+from memoctl import deadline, phases
 from memoctl.author import (
     ActorResult,
     KindResult,
@@ -402,13 +402,18 @@ def print_result(call: Call, result: Result, gateway: Gateway, *, log_failed: bo
 
 def run(args: argparse.Namespace, gateway: Gateway) -> int:
     call = step1_parse(args, gateway)
+    phases.mark("parse")
     config = step2_load_config(call, gateway)
     step3_check_label_count(call, config)
     effective = config.for_repo(call.repo)
+    phases.mark("config")
     kind = step4_resolve_kind(call, effective, gateway)
     data, body = step5_read_body(call, effective, gateway)
+    phases.mark("body")
     step6_secret_check(call, effective, kind, body, gateway)
+    phases.mark("secret_check")
     now, created, lifetime = step7_read_clock(call, effective, gateway)
+    phases.mark("clock")
     plan = Plan(
         call, effective, kind, body, hashlib.sha256(data).hexdigest(), len(data), now, created,
         lifetime,
@@ -418,9 +423,11 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
         # limit, no log. Disarm before the output, as after the commit of a real add.
         deadline.current().disarm()
         print_result(call, dry_run_result(plan), gateway)
+        phases.mark("output")
         return 0
     with step8_open_state_dir(gateway) as state:
         store = step9_open_store(state)
+        phases.mark("open_store")
         try:
             with store.write():
                 result = step10_dedupe(store, plan)
@@ -431,12 +438,15 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
             # Right after the commit and before the log append and the output: a timeout is
             # never reported once the change is durable. When the timer ran out during the
             # commit, this call ends the process with exit 12 (no log record).
+            phases.mark("transaction")
             deadline.current().disarm()
         finally:
             store.close()
         assert result.id is not None  # only a dry run has no id, and it returned above
         log_failed = step14_append_log(state, plan, result, result.id)
+        phases.mark("log")
     print_result(call, result, gateway, log_failed=log_failed)
+    phases.mark("output")
     return 0
 
 

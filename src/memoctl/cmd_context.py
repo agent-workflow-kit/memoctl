@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 from typing import Final
 
-from memoctl import deadline
+from memoctl import deadline, phases
 from memoctl.cli_args import Command
 from memoctl.config import load_config
 from memoctl.context_render import render_json, render_text
@@ -79,9 +79,11 @@ def _print(
         selection, fence=args.fence, nonce=nonce, max_chars=max_chars, max_bytes=max_bytes
     )
     # The gateway writes UTF-8 with errors replaced, the same bytes as encode_output(text).
+    phases.mark("render")
     deadline.current().disarm()
     if text:
         gateway.write_out(text, complete=True)  # never cut off by a slow reader
+    phases.mark("output")
     return 0 if selection.shown > 0 else NOTHING_TO_SHOW
 
 
@@ -95,9 +97,11 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
         )
     config = load_config(gateway).for_repo(repo)
     deadline.current().rearm(config.context.deadline)
+    phases.mark("config")
     max_chars, max_bytes = config.context.max_chars, config.context.max_bytes
     selection_config = SelectionConfig.from_config(config.context)
     store = open_read_store(gateway)
+    phases.mark("open_store")
     if store is None:
         return _print(
             args, gateway, Selection(repo, 0, (), 0), max_chars=max_chars, max_bytes=max_bytes
@@ -112,6 +116,7 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
             now=now,
             sanitize=sanitize,
         )
+    phases.mark("select")
     return _print(args, gateway, selection, max_chars=max_chars, max_bytes=max_bytes)
 
 

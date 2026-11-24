@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from memoctl import deadline
+from memoctl import deadline, phases
 from memoctl.body import check_text
 from memoctl.bodyread import STDIN, BodyError, read_body
 from memoctl.cli_args import Command
@@ -59,17 +59,21 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
     except TermError:
         raise UsageError("text") from None
     matcher = Matcher(terms)
+    phases.mark("parse")
     filters = Filters(repo=args.repo, include_all=args.all, limit=args.limit)
     now = int(gateway.now().timestamp())
     store = open_read_store(gateway)
+    phases.mark("open_store")
     if store is None:
         result = empty_result()
     else:
         with store:
             result = scan(store, filters, now, lambda row: matcher.matches(row.topic, row.body))
             store.bad_rows += matcher.skipped
+    phases.mark("scan")
     deadline.current().disarm()
     print_result(args, gateway, result)
+    phases.mark("output")
     return 0
 
 
