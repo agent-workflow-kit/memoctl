@@ -37,41 +37,17 @@ from memoctl.author import resolve_actor
 from memoctl.cli_args import Command
 from memoctl.gateway import Gateway
 from memoctl.logfile import LogRecord, append_record
+from memoctl.notes import apply_prune, count_prune
 from memoctl.notes_read import open_read_store
 from memoctl.render import PRUNE_LOG_FAILED, Rendered, emit, format_prune
 from memoctl.statedir import StateDir, open_state_dir
-from memoctl.store import DB_LOCKED, DeleteTarget, Mode, Store, StoreError, open_store
+from memoctl.store import DB_LOCKED, DeleteTarget, Mode, StoreError, open_store
 
-__all__ = ["COMMAND", "RATE_RETENTION_SECONDS", "apply_prune", "run"]
-
-RATE_RETENTION_SECONDS = 86400  # a rate row older than a day is of no use to any window
+__all__ = ["COMMAND", "run"]
 
 
 def configure(parser: argparse.ArgumentParser) -> None:
     """``prune`` has no arguments of its own."""
-
-
-def apply_prune(store: Store, now: int) -> list[DeleteTarget]:
-    """The writes, in the caller's ``Store.write()`` transaction: delete every expired note
-    (with its labels) and the old rate rows. Returns what was deleted, ascending by id, for
-    the log. Nothing is repointed (see the module doc)."""
-    targets: list[DeleteTarget] = []
-    for note_id in store.expired_ids(now):
-        target = store.delete_target(note_id)
-        if target is None:  # the ids and this read share the transaction: cannot happen
-            raise StoreError("db_corrupt")
-        store.delete_note(note_id)
-        targets.append(target)
-    store.delete_rate_through(now - RATE_RETENTION_SECONDS)
-    return targets
-
-
-def dry_counts(store: Store, now: int) -> tuple[int, int]:
-    """``(expired, remaining)`` as a real run would report them, from one read snapshot."""
-    with store.read():
-        expired = store.count_expired(now)
-        total = store.count_all_notes()
-    return expired, total - expired
 
 
 def run(args: argparse.Namespace, gateway: Gateway) -> int:
@@ -115,7 +91,7 @@ def dry_run(gateway: Gateway, seconds: int) -> tuple[int, int]:
     if store is None:
         return 0, 0
     with store:
-        return dry_counts(store, seconds)
+        return count_prune(store, seconds)
 
 
 def write_run(state: StateDir, seconds: int) -> tuple[list[DeleteTarget], int] | None:

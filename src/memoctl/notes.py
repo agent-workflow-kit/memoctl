@@ -4,7 +4,7 @@ The rules live here; every query is a :class:`~memoctl.store.Store` method (only
 touches SQLite). Every function runs inside the caller's ``Store.write()`` transaction, so what
 is checked is what is committed: no other writer can change a note between a check and the
 insert. The limit rules (``check_limits``, ``evaluate_limits``) are here too.
-``delete``'s rules (lookup, chain repointing) are at the end; todo(#31): ``prune``.
+``delete``'s rules (lookup, chain repointing) and ``prune``'s follow.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from memoctl.cli_errors import (
 )
 from memoctl.config import Limits
 from memoctl.notes_read import LIVE, note_status
-from memoctl.store import DeleteTarget, NoteRow, Store
+from memoctl.store import DeleteTarget, NoteRow, Store, StoreError
 
 __all__ = [
     "DeletePlan",
@@ -35,6 +35,9 @@ __all__ = [
     "check_supersede_target",
     "evaluate_limits",
     "apply_delete",
+    "apply_prune",
+    "count_prune",
+    "RATE_RETENTION_SECONDS",
     "find_duplicate",
     "find_targets",
     "plan_delete",
@@ -304,3 +307,37 @@ def apply_delete(store: Store, plan: DeletePlan) -> None:
         store.set_pointer(note_id, by)
     for item in plan.reinstated:
         store.set_pointer(item.id, None)
+
+
+# -- prune (interface.md, ``prune``) -----------------------------------------------------------
+
+RATE_RETENTION_SECONDS = 86400  # a rate row older than a day is of no use to any window
+
+
+def apply_prune(store: Store, now: int) -> list[DeleteTarget]:
+    """The writes of ``prune``, in the caller's ``Store.write()`` transaction: delete every note
+    with ``expires`` <= ``now`` (and its labels) and every rate row with ``at`` <= ``now`` -
+    86400. Returns what was deleted, ascending by id, for the log.
+
+    Nothing is repointed or reinstated: a replacement never expires before its target, so a
+    store the tool wrote has no live note pointing at a pruned one. A planted pointer to a
+    pruned note leaves its holder hidden and unchanged (``delete`` does the same for a pointer
+    it cannot follow). A note is selected only by its stored integer ``expires`` compared in
+    SQL, never by a value this code could misread."""
+    targets: list[DeleteTarget] = []
+    for note_id in store.expired_ids(now):
+        target = store.delete_target(note_id)
+        if target is None:  # the ids and this read share the transaction: cannot happen
+            raise StoreError("db_corrupt")
+        store.delete_note(note_id)
+        targets.append(target)
+    store.delete_rate_through(now - RATE_RETENTION_SECONDS)
+    return targets
+
+
+def count_prune(store: Store, now: int) -> tuple[int, int]:
+    """``(expired, remaining)`` as a real run would report them, from one read snapshot."""
+    with store.read():
+        expired = store.count_expired(now)
+        total = store.count_all_notes()
+    return expired, total - expired

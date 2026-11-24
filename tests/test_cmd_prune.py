@@ -352,7 +352,8 @@ def test_rotation_is_the_logs_own(gw: FakeGateway) -> None:
 
 BAD_ARGS = [
     ["--dry-run=x"], ["--dry"], ["--dry-ru"], ["--dryrun"], ["--actor"], ["--actor", "bad actor"],
-    ["extra"], ["--", "x"], ["1"], ["--yes"], ["--limit", "3"], ["--json=1"], ["--quiet", "--verbose"],
+    ["extra"], ["--", "x"], ["1"], ["--yes"], ["--limit", "3"], ["--json=1"],
+    ["--quiet", "--verbose"],
 ]  # fmt: skip
 
 
