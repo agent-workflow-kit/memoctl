@@ -15,7 +15,7 @@ can run before an earlier refusal. The rules of the order:
   before the log append and the output, so a timeout is never reported after the change is
   durable.
 
-Seams owned by later issues are marked with ``TODO(#N)`` at the exact step: #18 (limits), #19
+Seams owned by later issues are marked with ``TODO(#N)`` at the exact step: #19
 (``--dry-run`` and the warning lines), #20 (concurrency).
 
 A crash (or a signal) between the commit of step 13 and the log append of step 14 leaves a stored
@@ -58,7 +58,8 @@ from memoctl.lifetime import (
     seconds_since_epoch,
 )
 from memoctl.logfile import LogRecord, append_record
-from memoctl.notes import NoteKey, check_supersede_target, find_duplicate
+from memoctl.notes import NoteKey, check_supersede_target, evaluate_limits, find_duplicate
+from memoctl.notes_read import LIVE, note_status
 from memoctl.render import emit, format_add
 from memoctl.secretscan import check_secrets
 from memoctl.statedir import StateDir, open_state_dir
@@ -257,7 +258,15 @@ def step10_dedupe(store: Store, plan: Plan) -> Result | None:
     )  # fmt: skip
 
 
-def step11_supersede(store: Store, plan: Plan) -> tuple[Lifetime, int | None]:
+@dataclass(frozen=True)
+class Target:
+    """The ``--supersedes`` target after the step 11 checks."""
+
+    id: int
+    live: bool  # live at ``now``: it frees its own slot for ``repo_full``
+
+
+def step11_supersede(store: Store, plan: Plan) -> tuple[Lifetime, Target | None]:
     """Step 11: the ``--supersedes`` checks (exit 10, then 20 ``supersede_mismatch``, then 20
     ``already_superseded``); with a target the lifetime is raised to the target's ``expires``
     when that is later (``compute_lifetime(..., target_expires=...)``). The target is marked
@@ -269,18 +278,23 @@ def step11_supersede(store: Store, plan: Plan) -> tuple[Lifetime, int | None]:
     lifetime = compute_lifetime(
         plan.created, plan.config.retention.max_age, call.requested, target.expires
     )
-    return lifetime, target.id
+    return lifetime, Target(target.id, note_status(target, plan.created) == LIVE)
 
 
-def step12_limits(store: Store, plan: Plan) -> None:
+def step12_limits(store: Store, plan: Plan, target: Target | None) -> None:
     """Step 12: ``repo_full``, ``store_full`` and the two ``rate_limited`` checks, in that order
-    (exit 20), run inside the write transaction.
+    (exit 20), inside the write transaction, so the counts are what the insert commits on.
+    ``now`` is ``plan.created``; the rules live in :func:`memoctl.notes.evaluate_limits`. The
+    rate row itself is written by step 13."""
+    refusal = evaluate_limits(
+        store, plan.config.limits, plan.call.repo, plan.created,
+        target_live=target is not None and target.live,
+    )  # fmt: skip
+    if refusal is not None:
+        raise refusal.error()
 
-    TODO(#18): the limit queries and their refusals. (The rate row itself is written by
-    step 13.)"""
 
-
-def step13_insert(store: Store, plan: Plan, lifetime: Lifetime, supersedes: int | None) -> Result:
+def step13_insert(store: Store, plan: Plan, lifetime: Lifetime, target: Target | None) -> Result:
     """Step 13 (the insert part): the note, its labels and its rate row, and ``superseded_by`` of
     the ``--supersedes`` target, in the transaction the caller commits."""
     call = plan.call
@@ -295,6 +309,7 @@ def step13_insert(store: Store, plan: Plan, lifetime: Lifetime, supersedes: int 
         expires=lifetime.expires,
         labels=call.labels,
     )
+    supersedes = None if target is None else target.id
     if supersedes is not None:
         store.mark_superseded(supersedes, note_id)
     return Result(
@@ -374,9 +389,9 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
             with store.write():
                 result = step10_dedupe(store, plan)
                 if result is None:
-                    final, supersedes = step11_supersede(store, plan)
-                    step12_limits(store, plan)
-                    result = step13_insert(store, plan, final, supersedes)
+                    final, target = step11_supersede(store, plan)
+                    step12_limits(store, plan, target)
+                    result = step13_insert(store, plan, final, target)
             # Right after the commit and before the log append and the output: a timeout is
             # never reported once the change is durable. When the timer ran out during the
             # commit, this call ends the process with exit 12 (no log record).
