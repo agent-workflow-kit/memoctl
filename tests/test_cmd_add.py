@@ -12,7 +12,6 @@ import json
 import os
 import sqlite3
 import stat
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -26,29 +25,31 @@ from memoctl.gateway import RealGateway
 from memoctl.logfile import LogError
 from memoctl.statedir import open_state_dir
 from memoctl.store import Mode, NoteRow, open_store
+from tests.add_scenarios import (
+    REPO,
+    SCENARIOS,
+    Scenario,
+    release,
+    state_dir,
+    step_of,
+    token,
+    write_config,
+)
 from tests.fake_gateway import EPOCH, FakeExit, FakeGateway
 from tests.golden_files import check_golden
 from tests.schema_check import validate_json_output
 
 DAY = 86400
-REPO = "example.com/team/app"
+KIND_LINE = (
+    "warning (kind_not_shown): context will not show this note: "
+    "its kind is not an allowed author kind\n"
+)  # the stderr line of the default kind (unknown), which no default allow list shows
+LOG_LINE = "warning (log_failed): the note was stored but its log record was not written"
 
 
 @pytest.fixture
 def gw(tmp_path: Path) -> FakeGateway:
     return FakeGateway(tmp_path / "gw")
-
-
-def state_dir(gw: FakeGateway) -> Path:
-    return gw.home() / ".local" / "state" / "memoctl"
-
-
-def write_config(gw: FakeGateway, text: str) -> None:
-    directory = gw.home() / ".config" / "memoctl"
-    directory.mkdir(parents=True, exist_ok=True)
-    directory.chmod(0o700)
-    (directory / "config.yaml").write_text(text)
-    (directory / "config.yaml").chmod(0o600)
 
 
 def add(
@@ -144,7 +145,7 @@ def test_add_prints_the_human_line_and_nothing_on_stderr(gw: FakeGateway) -> Non
 
 def test_quiet_suppresses_the_result_line_but_not_json(gw: FakeGateway) -> None:
     code, out, err = add(gw, "--quiet", json_mode=False)
-    assert (code, out, err) == (0, "", "")
+    assert (code, out, err) == (0, "", KIND_LINE)  # a warning is never suppressed
     assert len(stored(gw)) == 1
     code, out, _ = add(gw, "--quiet", body="another body")
     assert code == 0 and json.loads(out)["id"] == 2
@@ -290,7 +291,8 @@ def test_a_malformed_kind_variable_becomes_unknown_and_is_never_echoed(
     gw.environ["CSESSION_KIND"] = value
     code, out, err = add(gw)
     assert code == 0 and json.loads(out)["kind"] == "unknown"
-    assert value[:8] not in out + err or value == ""
+    assert err == KIND_LINE
+    assert value[:8] not in out + err.replace(KIND_LINE, "") or value == ""
 
 
 def test_the_kind_variable_name_comes_from_config(gw: FakeGateway) -> None:
@@ -525,20 +527,7 @@ def test_flags_before_the_subcommand_and_after_double_dash_are_usage_argv(gw: Fa
     assert stored(gw) == [] and gw.stdin_reads == 0
 
 
-def test_dry_run_is_not_yet_accepted_so_a_note_is_never_written_by_mistake(
-    gw: FakeGateway,
-) -> None:
-    # TODO(#19): replaced by the dry-run tests when --dry-run lands.
-    code, out, _ = add(gw, "--dry-run")
-    assert code == 2 and error_of(out)["details"] == {"field": "argv"}
-    assert stored(gw) == []
-
-
 # -- secrets ---------------------------------------------------------------------------------------
-
-
-def _token() -> str:
-    return "gh" + "p_" + "A1" * 18  # assembled at run time
 
 
 def _check_secret(gw: FakeGateway, field: str, **kwargs: Any) -> None:
@@ -546,16 +535,16 @@ def _check_secret(gw: FakeGateway, field: str, **kwargs: Any) -> None:
     error = error_of(out)
     assert code == 20 and error["reason"] == "secret_detected"
     assert error["details"] == {"class": "github_token", "field": field}
-    assert _token() not in out + err
+    assert token() not in out + err
     assert stored(gw) == [] and not state_dir(gw).exists()
 
 
 def test_a_secret_in_the_body_is_refused(gw: FakeGateway) -> None:
-    _check_secret(gw, "body", body=f"token {_token()} here")
+    _check_secret(gw, "body", body=f"token {token()} here")
 
 
 def test_a_secret_in_a_label_is_refused(gw: FakeGateway) -> None:
-    code, out, _ = add(gw, f"--label=k={_token()}")
+    code, out, _ = add(gw, f"--label=k={token()}")
     assert code == 20 and error_of(out)["details"] == {"class": "github_token", "field": "label"}
     assert not state_dir(gw).exists()
 
@@ -758,7 +747,7 @@ def test_a_log_failure_after_the_commit_warns_and_keeps_exit_0(
     monkeypatch.setattr(cmd_add, "append_record", broken)
     code, out, err = add(gw)
     assert code == 0 and json.loads(out)["id"] == 1
-    assert err == f"{cmd_add.LOG_FAILED_WARNING}\n"
+    assert err == f"{KIND_LINE}{LOG_LINE}\n"
     assert len(stored(gw)) == 1
 
 
@@ -771,7 +760,7 @@ def test_an_os_error_from_the_log_is_the_same_warning(
     monkeypatch.setattr(cmd_add, "append_record", broken)
     code, out, err = add(gw, json_mode=False)
     assert (code, out) == (0, "note 1 created\n") and "No space" not in err
-    assert err == f"{cmd_add.LOG_FAILED_WARNING}\n"
+    assert err == f"{KIND_LINE}{LOG_LINE}\n"
 
 
 @pytest.mark.parametrize("exc", [ValueError("x"), RuntimeError("y")])
@@ -784,7 +773,7 @@ def test_any_other_error_from_the_log_append_is_the_same_warning_and_exit_0(
     monkeypatch.setattr(cmd_add, "append_record", broken)
     code, out, err = add(gw)
     assert code == 0 and json.loads(out)["id"] == 1
-    assert err == f"{cmd_add.LOG_FAILED_WARNING}\n"
+    assert err == f"{KIND_LINE}{LOG_LINE}\n"
     assert len(stored(gw)) == 1
 
 
@@ -795,7 +784,7 @@ def test_a_log_file_that_is_not_a_regular_file_warns_without_failing(gw: FakeGat
     (sd / "log.jsonl").mkdir()
     code, out, err = add(gw)
     assert code == 0 and len(stored(gw)) == 1
-    assert err == f"{cmd_add.LOG_FAILED_WARNING}\n"
+    assert err == f"{KIND_LINE}{LOG_LINE}\n"
 
 
 def test_a_failed_insert_leaves_no_note_label_rate_row_or_log_record(
@@ -906,157 +895,8 @@ def test_a_retry_after_that_timeout_is_not_blocked_by_the_stored_note(
 # -- the order of the steps ------------------------------------------------------------------------
 
 
-def _s1(gw: FakeGateway, argv: list[str]) -> None:
-    argv[argv.index(REPO)] = "Bad_Repo"
-
-
-def _s2(gw: FakeGateway, argv: list[str]) -> None:
-    write_config(gw, "limits:\n  max_body_bytes: 1\n")
-
-
-def _s3(gw: FakeGateway, argv: list[str]) -> None:
-    for i in range(9):
-        argv += ["--label", f"k{i}=v"]
-
-
-def _s5(gw: FakeGateway, argv: list[str]) -> None:
-    gw.terminal.stdin = "x" * 9000
-
-
-def _s6(gw: FakeGateway, argv: list[str]) -> None:
-    argv += ["--label", f"k={_token()}"]
-
-
-def _s7(gw: FakeGateway, argv: list[str]) -> None:
-    gw.clock.set(datetime(1969, 1, 1, tzinfo=UTC))
-
-
-def _s8(gw: FakeGateway, argv: list[str]) -> None:
-    sd = state_dir(gw)
-    sd.mkdir(parents=True, exist_ok=True)
-    sd.chmod(0o777)
-
-
-def _s9(gw: FakeGateway, argv: list[str]) -> None:
-    sd = state_dir(gw)
-    sd.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(sd / "state.db")
-    conn.execute("PRAGMA application_id = 1835363695")
-    conn.execute("PRAGMA user_version = 99")
-    conn.commit()
-    conn.close()
-    (sd / "state.db").chmod(0o600)
-    sd.chmod(0o700)
-
-
-def _s9_locked(gw: FakeGateway, argv: list[str]) -> None:
-    state = open_state_dir(gw, create=True)
-    with state:
-        store = open_store(state, Mode.INIT)
-        assert store is not None
-        store.close()
-    blocker = sqlite3.connect(state_dir(gw) / "state.db", isolation_level=None)
-    blocker.execute("BEGIN IMMEDIATE")
-    gw.blocker = blocker  # type: ignore[attr-defined]
-
-
-def _s9_corrupt(gw: FakeGateway, argv: list[str]) -> None:
-    sd = state_dir(gw)
-    sd.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(sd / "state.db")
-    conn.execute("CREATE TABLE other (x)")
-    conn.commit()
-    conn.close()
-    (sd / "state.db").chmod(0o600)
-    sd.chmod(0o700)
-
-
-def _seed_corrupt_target(gw: FakeGateway, argv: list[str]) -> None:
-    """Step 10: ``--supersedes 1`` names a row that fails its row checks (db_corrupt); the one
-    failure of the dedupe step that does not depend on a step before it."""
-    state = open_state_dir(gw, create=True)
-    with state:
-        store = open_store(state, Mode.INIT)
-        assert store is not None
-        with store.write():
-            store.insert_note(
-                repo=REPO, topic="build", kind="unknown", body="x", body_sha256="0" * 64,
-                size=1, created=1, expires=2, labels=(),
-            )  # fmt: skip
-        store.close()
-    conn = sqlite3.connect(state_dir(gw) / "state.db")
-    conn.execute("UPDATE notes SET expires = -5")
-    conn.commit()
-    conn.close()
-    argv += ["--supersedes", "1"]
-
-
-def _s11(gw: FakeGateway, argv: list[str]) -> None:
-    argv += ["--supersedes", "5"]  # no such note
-
-
-def _seed_target(gw: FakeGateway, repo: str, superseded_by: int | None) -> None:
-    state = open_state_dir(gw, create=True)
-    with state:
-        store = open_store(state, Mode.INIT)
-        assert store is not None
-        with store.write():
-            store.insert_note(
-                repo=repo, topic="build", kind="unknown", body="x", body_sha256="0" * 64,
-                size=1, created=1, expires=2, labels=(),
-            )  # fmt: skip
-        store.close()
-    if superseded_by is not None:
-        conn = sqlite3.connect(state_dir(gw) / "state.db")
-        conn.execute("UPDATE notes SET superseded_by = ?", (superseded_by,))
-        conn.commit()
-        conn.close()
-
-
-def _s11_mismatch(gw: FakeGateway, argv: list[str]) -> None:
-    _seed_target(gw, "example.com/team/other", None)
-    argv += ["--supersedes", "1"]
-
-
-def _s11_superseded(gw: FakeGateway, argv: list[str]) -> None:
-    _seed_target(gw, REPO, 77)
-    argv += ["--supersedes", "1"]
-
-
-Scenario = tuple[
-    str, Callable[[FakeGateway, list[str]], None], Callable[[int, dict[str, Any]], bool]
-]
-SCENARIOS: list[Scenario] = [
-    ("1", _s1, lambda c, e: c == 2 and e["details"] == {"field": "repo"}),
-    ("2", _s2, lambda c, e: c == 2 and e["code"] == "config_invalid"),
-    ("3", _s3, lambda c, e: c == 2 and e["details"] == {"field": "label", "limit": 8}),
-    ("5", _s5, lambda c, e: c == 2 and e["details"] == {"field": "body", "limit": 8192}),
-    ("6", _s6, lambda c, e: c == 20 and e["reason"] == "secret_detected"),
-    ("7", _s7, lambda c, e: c == 1 and e["code"] == "internal"),
-    ("8", _s8, lambda c, e: c == 20 and e["reason"] == "unsafe_state"),
-    ("9", _s9, lambda c, e: c == 12 and e["reason"] == "schema_newer"),
-    ("9l", _s9_locked, lambda c, e: c == 12 and e["reason"] == "db_locked"),
-    ("9c", _s9_corrupt, lambda c, e: c == 12 and e["reason"] == "db_corrupt"),
-    ("10", _seed_corrupt_target, lambda c, e: c == 12 and e["reason"] == "db_corrupt"),
-    ("11", _s11, lambda c, e: c == 10 and e["details"] == {"id": 5}),
-    ("11m", _s11_mismatch, lambda c, e: c == 20 and e["reason"] == "supersede_mismatch"),
-    ("11s", _s11_superseded, lambda c, e: c == 20 and e["reason"] == "already_superseded"),
-]
-
-
-def _step(scenario: Scenario) -> int:
-    return int(scenario[0].rstrip("lcms"))  # "9l", "9c", "11m", "11s" share their step
-
-
 def _without_sidecars(files: dict[str, tuple[Any, ...]]) -> dict[str, tuple[Any, ...]]:
     return {k: v for k, v in files.items() if not k.endswith(("-wal", "-shm"))}
-
-
-def _release(gw: FakeGateway) -> None:
-    blocker = getattr(gw, "blocker", None)
-    if blocker is not None:
-        blocker.execute("ROLLBACK")
-        blocker.close()
 
 
 def _argv() -> list[str]:
@@ -1066,7 +906,7 @@ def _argv() -> list[str]:
 PAIRS = [
     pair
     for pair in itertools.combinations(SCENARIOS, 2)
-    if _step(pair[0]) != _step(pair[1]) and {_step(pair[0]), _step(pair[1])} != {10, 11}
+    if step_of(pair[0]) != step_of(pair[1]) and {step_of(pair[0]), step_of(pair[1])} != {10, 11}
 ]  # two step-9 states would be one database; steps 10 and 11 both read the one --supersedes
 # target row (a corrupt row is step 10's, an absent one step 11's): one flag, one state
 
@@ -1082,20 +922,20 @@ def test_of_two_failing_steps_the_earlier_wins_and_nothing_was_written(
         for _, setup, _ in (second, first):  # order of setup must not matter
             setup(gw, argv)
         before = snapshot(gw.home())
-        unreadable = {8, 9} & {_step(first), _step(second)}  # an unsafe or newer store
+        unreadable = {8, 9} & {step_of(first), step_of(second)}  # an unsafe or newer store
         seeded = [] if unreadable else stored(gw)  # rows a scenario planted (steps 10 and 11)
         gw.terminal.stdout = ""
         code = main(argv, gw)
     finally:
-        _release(gw)
+        release(gw)
     error = error_of(gw.terminal.stdout)
     assert first[2](code, error), (first[0], second[0], code, error)
     assert gw.now_calls <= 1
-    if _step(first) < 5:
+    if step_of(first) < 5:
         assert gw.stdin_reads == 0
-    if _step(first) < 7:
+    if step_of(first) < 7:
         assert gw.now_calls == 0
-    if _step(first) < 8:
+    if step_of(first) < 8:
         # not even the state directory (the blocker's own -wal/-shm files go with its connection)
         assert _without_sidecars(snapshot(gw.home())) == _without_sidecars(before)
     assert log_records(gw) == []
@@ -1115,7 +955,7 @@ def test_each_failing_step_alone_reports_itself(
         gw.terminal.stdout = ""
         code = main(argv, gw)
     finally:
-        _release(gw)
+        release(gw)
     assert scenario[2](code, error_of(gw.terminal.stdout))
     assert log_records(gw) == []
 
@@ -1148,14 +988,14 @@ def test_the_store_version_is_checked_again_inside_the_write_transaction(
 
 
 def test_status_lines_carry_no_input_value(gw: FakeGateway) -> None:
-    code, out, err = add(gw, "--label=k=" + _token(), repo=REPO)
+    code, out, err = add(gw, "--label=k=" + token(), repo=REPO)
     assert code == 20
-    for value in (_token(), REPO, "build"):
+    for value in (token(), REPO, "build"):
         assert value not in out + err
 
 
 def test_a_secret_refusal_golden(gw: FakeGateway) -> None:
-    code, out, err = add(gw, body=f"x {_token()}")
+    code, out, err = add(gw, body=f"x {token()}")
     assert code == 20
     check_golden("add/secret-refused.json", out.encode(), schema="cli/error")
     check_golden("add/secret-refused-err.txt", err.encode())
@@ -1236,12 +1076,12 @@ def test_an_unexpected_error_with_a_secret_in_a_local_is_internal_and_prints_not
     gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def boom(*args: Any, **kwargs: Any) -> Any:
-        leaked = _token()  # noqa: F841 - a local a traceback with locals would print
-        raise RuntimeError(f"unexpected {_token()}")
+        leaked = token()  # noqa: F841 - a local a traceback with locals would print
+        raise RuntimeError(f"unexpected {token()}")
 
     monkeypatch.setattr(cmd_add, "step13_insert", boom)
-    code, out, err = add(gw, body=f"{_token()[:5]} body")
+    code, out, err = add(gw, body=f"{token()[:5]} body")
     assert code == 1 and error_of(out)["code"] == "internal"
-    assert _token() not in out + err
+    assert token() not in out + err
     monkeypatch.undo()
     assert stored(gw) == [] and log_records(gw) == []

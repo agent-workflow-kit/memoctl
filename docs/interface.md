@@ -232,7 +232,7 @@ The order, with the exit code of each refusal. Config is loaded right after argv
 
 The output of a hit is the stored note's fields (`id`, `expires`, `size`, `body_sha256`, `supersedes`, labels as stored; under (b) `supersedes` is T, under (a) the smallest id of a note *of the same repo* whose `superseded_by` is the hit) and `warnings` computed from this call's inputs (`expires_capped` and `kind_not_shown`; `expires_extended` is never reported on a hit). This call's `--expires` is not applied: `expires` is the stored value.
 
-`--dry-run` runs steps 1 to 7 and writes nothing; it never looks at the state directory or `state.db`. The output has `id` null, `created` true (the call is valid; dedupe, the supersede checks and the limits are not run), `supersedes` the requested target unchecked, and `expires` the call's own lifetime (never raised by a target, so never `expires_extended`).
+`--dry-run` runs steps 1 to 7 and writes nothing; it never looks at the state directory or `state.db`, reads the clock once and the body once, and disarms the deadline before it prints. Its errors are those of steps 1 to 7, exactly as in a real call; a state that would fail step 8 to 12 (an unsafe or corrupt state directory, a missing target, a full repo) does not change a dry run. Without `--json` it prints the line under [Human output](#human-output) (not with `--quiet`), then the warning lines. The output has `id` null, `created` true (the call is valid; dedupe, the supersede checks and the limits are not run), `supersedes` the requested target unchecked, and `expires` the call's own lifetime (never raised by a target, so never `expires_extended`).
 
 The output is `{id, created, dry_run, repo, topic, kind, labels, expires, supersedes, size, body_sha256, warnings}` ([schemas/cli/add.json](../schemas/cli/add.json)); `id` is null exactly when `dry_run` is true. `warnings` is an array of fixed strings: `expires_capped` (the requested lifetime was cut), `expires_extended` (a supersede raised the lifetime) and `kind_not_shown` (the stored kind, including `unknown`, is not in the repo's effective `context.author_kinds`, so `context` will not show the note). `--actor` defaults as in [Global flags](#global-flags).
 
@@ -343,6 +343,18 @@ First, before anything else opens a file (and before the `--json` pre-scan), the
 stdout and stderr are written as UTF-8 with errors replaced, never through the locale; `context` writes with `os.write` so a closed stdout never raises. A failure to write after the result was fixed is ignored. Without `--json`, a command that prints data prints human text on stdout ([Human output](#human-output)); `context` always prints its block on stdout. Status lines go to stderr and contain no note text, topic or label value. Warnings print on stderr as `warning (<name>): <fixed message>`; a log record that could not be written after the commit of `add` is the warning `warning (log_failed): the note was stored but its log record was not written` (never suppressed by `--quiet`; the exit code stays 0); `--quiet` suppresses every stderr line except errors and warnings, and, without `--json`, the stdout result line of `add`, `delete`, `prune` and `cron` (so `memoctl prune --quiet` prints nothing on success). It never suppresses data (`list`, `show`, `search`, `context`, `validate`) or `--json` output; `--verbose` adds one line per phase with the elapsed milliseconds and never prints a body.
 
 Text that came from a note and is printed without `--json` follows [Terminal rendering](#terminal-rendering), so a note cannot drive the terminal. `--json` prints stored values as they are (JSON-escaped); a consumer treats every field the schemas mark `x-untrusted` as untrusted: `repo`, `topic`, `kind`, `labels`, `body` and `text`, every value a note's writer chose.
+
+### Warnings
+
+A warning is a stderr line `warning (<name>): <fixed message>`, printed after the stdout result, with or without `--json`, and never suppressed by `--quiet`. The messages are fixed strings (no value from the call is ever in one); tests assert the names. `add` prints, in this order, the names of its `warnings` array and then `log_failed`; the stderr lines and the `--json` `warnings` array name the same warnings, except `log_failed`, which is only a stderr line (it is about the log, not the note).
+
+| Name | Printed by | Line |
+| --- | --- | --- |
+| `expires_capped` | `add`, `add --dry-run` | `warning (expires_capped): the requested lifetime was cut to the maximum age` |
+| `expires_extended` | `add` (never a dedupe hit, never a dry run) | `warning (expires_extended): the lifetime was raised to the expiry of the note this one replaces` |
+| `kind_not_shown` | `add`, `add --dry-run` | `warning (kind_not_shown): context will not show this note: its kind is not an allowed author kind` |
+| `log_failed` | `add` | `warning (log_failed): the note was stored but its log record was not written` |
+| `prune_busy` | `prune` | `warning (prune_busy): another writer held the lock; nothing was pruned` |
 
 ### Output on failure
 

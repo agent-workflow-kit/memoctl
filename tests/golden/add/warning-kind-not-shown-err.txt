@@ -1,0 +1,1 @@
+warning (kind_not_shown): context will not show this note: its kind is not an allowed author kind

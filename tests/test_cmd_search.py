@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import random
 import sqlite3
@@ -464,12 +465,19 @@ def _peak_search_memory(gw: FakeGateway, count: int) -> int:
     conn.execute("INSERT INTO note_labels SELECT id, 'k', 'v' FROM notes WHERE id % 10 = 0")
     conn.execute("COMMIT")
     conn.close()
-    tracemalloc.start()
+    assert search(gw, "HIT", "--limit", "500") == 0  # warm-up, untraced: caches and imports
+    gc.collect()
+    was_enabled = gc.isenabled()
     try:
+        gc.disable()  # a collection inside the traced region would move the peak
+        tracemalloc.start()
+        tracemalloc.reset_peak()
         assert search(gw, "HIT", "--limit", "500") == 0
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
+        if was_enabled:
+            gc.enable()
     doc = out_json(gw)
     assert (doc["total"], doc["shown"]) == (count // 2, 500)
     assert ids(gw)[:2] == [count - 1, count - 3]
