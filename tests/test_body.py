@@ -108,7 +108,7 @@ def test_utf8_bom_is_an_invisible_character_not_skipped() -> None:
 
 # ---------- item 3: the refused characters ----------
 
-# todo(#7): move these refusal cases into the golden harness
+# Note: these refusal cases could move into the golden harness
 
 CONTROL = [chr(c) for c in [*range(0, 9), *range(11, 32), 127, *range(0x80, 0xA0), 0x2028, 0x2029]]
 

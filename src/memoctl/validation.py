@@ -285,9 +285,11 @@ def _check_store(gateway: Gateway, configure: Callable[[Store], None] | None) ->
 def _check_open(state: Any, configure: Callable[[Store], None] | None) -> list[CheckResult]:
     try:
         store = open_store(state, Mode.READ, configure=configure)
-    except (UnsafeStateError, StateAccessError, OSError):
-        # a refused file, or one whose lstat failed (I/O error): not safe to use either
+    except UnsafeStateError:
         return [_fail("database", "unsafe_state", "the database file is not safe to use")]
+    except (StateAccessError, OSError):
+        # an I/O failure (not a refusal), such as a failed lstat: db_unreadable, as everywhere else
+        return [_fail("database", "db_unreadable", "the database cannot be read")]
     except SchemaNewerError:
         # application_id and identity were accepted before the version was refused; the rows
         # of a newer layout cannot be read, so they are not checked

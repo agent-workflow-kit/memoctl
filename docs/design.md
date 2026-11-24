@@ -103,6 +103,7 @@ Package `src/memoctl/` (design guide section 15):
 | `render.py` | Terminal rendering of stored text for `list`, `show` and the other human output (not `context`). |
 | `searchmatch.py` | Search term parsing and matching (the fold, the term rules, the combining-run guard). |
 | `cmd_search.py` | The `search` command: text source, term rules, the filtered scan. |
+| `cmd_validate.py` | The `validate` command: argv (`--json`), the checks from `validation.py`, the output and the one status line, and the deadline disarm before the output is written. |
 | `statedir.py` | The state directory check and the `0600` creation. |
 | `logfile.py` | `log.jsonl` append and rotation. |
 | `crontab.py` | The managed block logic (pure; the calls are in the gateway). |

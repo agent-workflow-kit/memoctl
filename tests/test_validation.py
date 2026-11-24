@@ -665,7 +665,7 @@ def test_os_error_while_checking_a_missing_state_dir_is_unsafe_state(
     assert r.checks[1].message == "the state directory cannot be created"
 
 
-def test_database_lstat_error_is_unsafe_state(
+def test_database_lstat_error_is_db_unreadable(
     gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from memoctl import gateway as gateway_module
@@ -680,9 +680,9 @@ def test_database_lstat_error_is_unsafe_state(
 
     monkeypatch.setattr(gateway_module._RealDirHandle, "lstat", lstat)
     r = checked(gw)
-    assert r.exit_code == 20 and names(r) == ["config", "state_dir", "database"]
-    assert r.checks[2].reason == "unsafe_state"
-    assert r.checks[2].message == "the database file is not safe to use"
+    assert r.exit_code == 12 and names(r) == ["config", "state_dir", "database"]
+    assert r.checks[2].reason == "db_unreadable"
+    assert r.checks[2].message == "the database cannot be read"
 
 
 class _RealHome:

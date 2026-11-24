@@ -36,6 +36,7 @@ Status: 0.1.0-design, 2026-11-18. This plan implements [interface.md](interface.
 | `logfile.py` | 3 | `log.jsonl` append and rotation. |
 | `searchmatch.py` | 4 | Search term parsing and matching. |
 | `cmd_search.py` | 4 | The `search` command. |
+| `cmd_validate.py` | 6 | The `validate` command: argv, the checks, output, status line, deadline disarm. |
 | `sanitize.py` | 4 and 5 | The read-time sanitizer. |
 | `render.py` | 4 | Terminal rendering of stored text for `list`, `show` and the other human output (not `context`). |
 | `context_render.py` | 5 | The context block (plain and fenced) and the `--json` document, pure functions over a `Selection`. |

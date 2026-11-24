@@ -30,7 +30,7 @@ driver raising with the value in its message).
 The CLI maps :class:`StoreError` and :class:`SchemaNewerError` to exit 12 (``cli_errors``). The
 deadline installs its progress handler through ``open_store(configure=deadline.configure_store)``;
 an interrupted statement arrives as ``StoreError("timeout")``.
-todo(#15): the change log is appended after :meth:`Store.write` returns (after the commit).
+The change log (``logfile.py``) is appended after :meth:`Store.write` returns (after the commit).
 ``add``'s write is :meth:`Store.insert_note` (the note, its labels and its rate row), run inside
 ``Store.write()``. The dedupe and supersede queries (:meth:`Store.live_with_key`,
 :meth:`Store.get_note`, :meth:`Store.replaced_note_id`, :meth:`Store.mark_superseded`) run inside

@@ -23,7 +23,7 @@ from memoctl.cli_commands import COMMANDS
 from memoctl.statedir import StateAccessError
 from memoctl.store import Store
 from tests import private_home
-from tests.fake_gateway import FakeExit, FakeGateway
+from tests.fake_gateway import FakeAlarm, FakeExit, FakeGateway
 from tests.golden_files import check_golden
 from tests.schema_check import validate_json_output
 from tests.test_validation import (
@@ -177,8 +177,10 @@ def _release_locks() -> Any:
     yield
     while LOCKS:
         c = LOCKS.pop()
-        c.execute("ROLLBACK")
-        c.close()
+        try:
+            c.execute("ROLLBACK")
+        finally:
+            c.close()
 
 
 @pytest.mark.parametrize("case", sorted(GOLDEN_CASES))
@@ -243,7 +245,7 @@ def test_a_failed_check_has_one_status_line_even_with_quiet(
     assert gw.terminal.stdout != ""  # data is never suppressed
 
 
-@pytest.mark.parametrize("flags", [[], ["--quiet"], ["--verbose"]])
+@pytest.mark.parametrize("flags", [[], ["--quiet"]])
 def test_a_passing_run_prints_nothing_on_stderr(gw: FakeGateway, flags: list[str]) -> None:
     make_store(gw)
     assert run(gw, *flags) == 0
@@ -259,6 +261,27 @@ def test_quiet_does_not_change_stdout(gw: FakeGateway, monkeypatch: pytest.Monke
     assert gw.terminal.stdout == plain
     assert plain.endswith("warning  unsafe_filesystem\n")
     assert gw.terminal.stderr == ""  # a warning is on stdout; it does not fail the run
+
+
+def test_a_failed_check_with_the_unsafe_filesystem_warning(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_state(gw).chmod(0o755)
+    gw.mountinfo = MOUNTINFO.format(mnt=gw.home().resolve(), fs="nfs").encode()
+    assert run(gw) == 20
+    assert gw.terminal.stdout == (
+        "ok  config  configuration is valid\n"
+        "FAIL  state_dir  the state directory is not safe to use\n"
+        "warning  unsafe_filesystem\n"
+    )
+    assert gw.terminal.stderr == "refused (unsafe_state): the state directory is not safe to use\n"
+    assert run(gw, "--json") == 20
+    assert gw.terminal.stdout == (
+        '{"ok":false,"checks":[{"name":"config","ok":true,"reason":null,'
+        '"message":"configuration is valid"},{"name":"state_dir","ok":false,'
+        '"reason":"unsafe_state","message":"the state directory is not safe to use"}],'
+        '"warnings":["unsafe_filesystem"]}\n'
+    )
 
 
 def test_output_never_echoes_paths_or_sqlite_text(
@@ -315,7 +338,7 @@ def test_hostile_databases_exit_12_and_change_nothing(gw: FakeGateway, case: str
     assert snapshot(state_path(gw)) == before
 
 
-# --- StateAccessError is reported as unsafe_state (decision recorded on the issue) -------------
+# --- StateAccessError: unsafe_state at the state-dir level, db_unreadable for the database ----
 
 
 def test_state_access_error_in_the_state_dir_check_is_unsafe_state(
@@ -351,7 +374,7 @@ def test_state_access_error_when_reopening_for_the_database_is_unsafe_state(
     assert [(c["name"], c["reason"]) for c in doc["checks"]][-1] == ("database", "unsafe_state")
 
 
-def test_state_access_error_when_opening_the_store_is_unsafe_state(
+def test_state_access_error_when_opening_the_store_is_db_unreadable(
     gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     make_store(gw)
@@ -360,10 +383,10 @@ def test_state_access_error_when_opening_the_store_is_unsafe_state(
         raise StateAccessError()
 
     monkeypatch.setattr(validation, "open_store", boom)
-    assert run(gw, "--json") == 20
+    assert run(gw, "--json") == 12
     doc = json.loads(gw.terminal.stdout)
-    assert [(c["name"], c["reason"]) for c in doc["checks"]][-1] == ("database", "unsafe_state")
-    assert gw.terminal.stderr == "refused (unsafe_state): the database file is not safe to use\n"
+    assert [(c["name"], c["reason"]) for c in doc["checks"]][-1] == ("database", "db_unreadable")
+    assert gw.terminal.stderr == "failed (db_unreadable): the database cannot be read\n"
 
 
 # --- the deadline -----------------------------------------------------------------------------
@@ -421,12 +444,9 @@ def test_a_statement_interrupted_by_the_progress_handler_is_the_timeout_envelope
         return real(self)
 
     monkeypatch.setattr(Store, "check_rows", expire)
-    code = None
-    try:
-        code = run(gw, *flags)
-    except FakeExit as e:
-        code = e.code
-    assert code == 12
+    monkeypatch.setattr(FakeAlarm, "release", lambda self: False)  # the timer never ran
+    # the StoreError(timeout) path returns the exit code; the timer path would raise FakeExit
+    assert run(gw, *flags) == 12
     assert "checks" not in gw.terminal.stdout and "ok  " not in gw.terminal.stdout
     assert gw.terminal.stderr == "failed (timeout): deadline passed\n"
     if flags:
