@@ -42,7 +42,7 @@ class RaisingGateway(HomeGateway):
     def exit_now(self, code: int) -> NoReturn:
         raise Exit(code)
 
-    def write_out(self, text: str, *, bound: float | None = None) -> None:
+    def write_out(self, text: str, *, bound: float | None = None, complete: bool = False) -> None:
         pass
 
     def write_err(self, text: str, *, bound: float | None = None) -> None:

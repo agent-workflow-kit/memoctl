@@ -81,7 +81,7 @@ def _print(
     # The gateway writes UTF-8 with errors replaced, the same bytes as encode_output(text).
     deadline.current().disarm()
     if text:
-        gateway.write_out(text)
+        gateway.write_out(text, complete=True)  # never cut off by a slow reader
     return 0 if selection.shown > 0 else NOTHING_TO_SHOW
 
 
@@ -97,12 +97,12 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
     deadline.current().rearm(config.context.deadline)
     max_chars, max_bytes = config.context.max_chars, config.context.max_bytes
     selection_config = SelectionConfig.from_config(config.context)
-    now = int(gateway.now().timestamp())
     store = open_read_store(gateway)
     if store is None:
         return _print(
             args, gateway, Selection(repo, 0, (), 0), max_chars=max_chars, max_bytes=max_bytes
         )
+    now = int(gateway.now().timestamp())  # read only once there is a store to select from
     with store, store.read():
         selection = select_context(
             store,

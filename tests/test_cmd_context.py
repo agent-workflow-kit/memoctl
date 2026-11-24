@@ -979,14 +979,30 @@ def test_a_deadline_during_the_output_write_is_not_reported_after_output_started
     store.add()
     real_write = gw.write_out
 
-    def slow_write(text: str, *, bound: float | None = None) -> None:
+    def slow_write(text: str, *, bound: float | None = None, complete: bool = False) -> None:
         gw.mono += 30  # the reader is slow: the deadline would have passed long ago
-        real_write(text, bound=bound)
+        real_write(text, bound=bound, complete=complete)
 
     monkeypatch.setattr(gw, "write_out", slow_write)
     assert run(gw, "--repo", REPO) == 0
     assert gw.terminal.stdout == HEAD1 + hdr(1) + "| hello\n"
     assert gw.terminal.stderr == "" and gw.exits == []
+
+
+def test_the_block_is_written_with_complete_and_without_a_bound(
+    gw: FakeGateway, store: Store
+) -> None:
+    store.add()
+    assert run(gw, "--repo", REPO) == 0
+    assert gw.write_out_calls == [(None, True)]
+
+
+def test_a_clock_fault_with_a_missing_store_is_exit_10_not_1(
+    gw: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gw.clock, "now", lambda: (_ for _ in ()).throw(RuntimeError("clock")))
+    assert run(gw, "--repo", REPO) == 10
+    assert gw.terminal.stdout == "" and gw.terminal.stderr == ""
 
 
 def test_the_deadline_is_disarmed_before_the_first_byte_is_written(
@@ -996,9 +1012,9 @@ def test_the_deadline_is_disarmed_before_the_first_byte_is_written(
     armed_at_write: list[bool] = []
     real_write = gw.write_out
 
-    def spy(text: str, *, bound: float | None = None) -> None:
+    def spy(text: str, *, bound: float | None = None, complete: bool = False) -> None:
         armed_at_write.append(bool(gw.alarms))
-        real_write(text, bound=bound)
+        real_write(text, bound=bound, complete=complete)
 
     monkeypatch.setattr(gw, "write_out", spy)
     assert run(gw, "--repo", REPO) == 0

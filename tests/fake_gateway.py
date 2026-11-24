@@ -160,6 +160,7 @@ class FakeGateway:
         self._random = random.Random(seed)
         self.mono = 1000.0
         self.alarms: list[FakeAlarm] = []
+        self.write_out_calls: list[tuple[float | None, bool]] = []  # (bound, complete)
         self.exits: list[int] = []
         self.now_calls = 0  # clock reads: a command reads the clock once
         self.stdin_reads = 0  # read_stdin_bounded calls: a refusal before the body never reads
@@ -251,8 +252,9 @@ class FakeGateway:
         self.exits.append(code)
         raise FakeExit(code)
 
-    def write_out(self, text: str, *, bound: float | None = None) -> None:
+    def write_out(self, text: str, *, bound: float | None = None, complete: bool = False) -> None:
         self.terminal.stdout += text
+        self.write_out_calls.append((bound, complete))
 
     def write_err(self, text: str, *, bound: float | None = None) -> None:
         self.terminal.stderr += text
