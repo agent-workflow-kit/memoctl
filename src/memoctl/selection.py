@@ -32,8 +32,8 @@ so ``0.3`` is exactly 3/10), never as a binary float product.
 The sanitizer is passed in as ``sanitize`` (``memoctl.sanitize.sanitize`` in production); the
 block is printed from a :class:`Selection` by ``memoctl.context_render``, which checks that each
 note text has the documented shape and the sizes selection counted.
-todo(#27): the CLI wraps this in its exit paths and deadline; the progress handler of the store
-interrupts a long scan.
+``memoctl.cmd_context`` wraps this in its exit paths and the deadline; the progress handler of
+the store interrupts a long scan.
 todo(#28): flood and performance fixtures (the scan is linear in the repo's live notes).
 """
 

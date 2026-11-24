@@ -858,9 +858,9 @@ def test_the_deadline_is_disarmed_before_the_first_byte_of_output(
     seen: list[int] = []
     real_write = gw.write_out
 
-    def write_out(text: str, *, bound: float | None = None) -> None:
+    def write_out(text: str, *, bound: float | None = None, complete: bool = False) -> None:
         seen.append(len(gw.alarms))
-        real_write(text, bound=bound)
+        real_write(text, bound=bound, complete=complete)
 
     monkeypatch.setattr(gw, "write_out", write_out)
     assert add(gw)[0] == 0

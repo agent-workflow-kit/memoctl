@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import pwd
 import sys
@@ -120,6 +121,67 @@ def test_a_closed_or_broken_stdout_is_ignored(capfdbinary: pytest.CaptureFixture
         os.close(saved)
         os.close(writer)
     capfdbinary.readouterr()
+
+
+def _small_pipe() -> tuple[int, int]:
+    reader, writer = os.pipe()
+    fcntl.fcntl(writer, fcntl.F_SETPIPE_SZ, 4096)
+    return reader, writer
+
+
+def _slow_reader(reader: int, first: int, pause: float, sink: list[bytes]) -> threading.Thread:
+    def drain() -> None:
+        sink.append(os.read(reader, first))
+        time.sleep(pause)
+        while chunk := os.read(reader, 65536):
+            sink.append(chunk)
+
+    thread = threading.Thread(target=drain)
+    thread.start()
+    return thread
+
+
+def test_complete_write_waits_out_a_reader_that_stalls_longer_than_the_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway, "WRITE_WAIT_SECONDS", 0.2)
+    reader, writer = _small_pipe()
+    data = "x" * 100_000
+    sink: list[bytes] = []
+    thread = _slow_reader(reader, 1000, 0.6, sink)
+    try:
+        gateway._write_fd(writer, data, complete=True)
+    finally:
+        os.close(writer)
+        thread.join(10)
+        os.close(reader)
+    assert b"".join(sink) == data.encode()
+
+
+def test_an_incomplete_write_still_gives_up_on_a_stalled_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway, "WRITE_WAIT_SECONDS", 0.2)
+    reader, writer = _small_pipe()
+    sink: list[bytes] = []
+    thread = _slow_reader(reader, 1000, 0.6, sink)
+    try:
+        gateway._write_fd(writer, "x" * 100_000)
+    finally:
+        os.close(writer)
+        thread.join(10)
+        os.close(reader)
+    assert 0 < len(b"".join(sink)) < 100_000
+
+
+def test_a_complete_write_to_a_broken_pipe_ends_silently() -> None:
+    reader, writer = os.pipe()
+    os.close(reader)
+    try:
+        gateway._write_fd(writer, "x" * 100_000, complete=True)
+        gateway._write_fd(-1, "x", complete=True)
+    finally:
+        os.close(writer)
 
 
 def test_login_name_comes_from_the_password_database() -> None:

@@ -547,10 +547,12 @@ class Gateway(Protocol):
         own children)."""
         ...
 
-    def write_out(self, text: str, *, bound: float | None = None) -> None:
+    def write_out(self, text: str, *, bound: float | None = None, complete: bool = False) -> None:
         """Write ``text`` to file descriptor 1. With ``bound`` (seconds) the write gives up once
         the descriptor has not become writable for that long (a full pipe, a stopped terminal),
-        so the caller never waits on a reader that is not reading."""
+        so the caller never waits on a reader that is not reading. With ``complete`` (and no
+        ``bound``) it never gives up on a slow reader: it waits as long as the descriptor stays
+        open and ends silently only on a write error (EPIPE, a closed descriptor)."""
         ...
 
     def write_err(self, text: str, *, bound: float | None = None) -> None:
@@ -730,14 +732,17 @@ class _RealAlarm:
 _BOUNDED_CHUNK = 512  # below PIPE_BUF: a writable pipe takes it whole, without blocking
 
 
-def _writable_before(fd: int, end: float) -> bool:
-    """Wait until ``fd`` can take a write or ``end`` (a ``time.monotonic`` value) passes. A
-    closed or broken descriptor counts as ready: the write then fails and is ignored."""
+def _writable_before(fd: int, end: float | None) -> bool:
+    """Wait until ``fd`` can take a write or ``end`` (a ``time.monotonic`` value) passes; with
+    no ``end`` wait for as long as it takes. A closed or broken descriptor counts as ready:
+    the write then fails and is ignored."""
+    poller = select.poll()
+    poller.register(fd, select.POLLOUT)
+    if end is None:
+        return bool(poller.poll())
     left_ms = math.ceil((end - time.monotonic()) * 1000)
     if left_ms <= 0:
         return False
-    poller = select.poll()
-    poller.register(fd, select.POLLOUT)
     return bool(poller.poll(left_ms))
 
 
@@ -774,7 +779,7 @@ def _is_symlink(path: Path) -> bool:
 WRITE_WAIT_SECONDS = 3.0
 
 
-def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
+def _write_fd(fd: int, text: str, bound: float | None = None, *, complete: bool = False) -> None:
     """Write ``text`` to a standard descriptor as UTF-8 with errors replaced, never through the
     locale. A failure to write (closed descriptor, EPIPE) is ignored, as the interface says.
 
@@ -787,9 +792,14 @@ def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
     With ``bound`` the write is for a signal handler that must not hang: it waits for the
     descriptor to be writable for at most ``bound`` seconds in all (``poll``, EINTR retried
     with the time left) and writes in small chunks, then gives up silently. The descriptor is
-    left blocking (its open file description may be shared with other processes)."""
+    left blocking (its open file description may be shared with other processes).
+
+    With ``complete`` (and no ``bound``) a stalled reader is waited on for as long as it takes:
+    every byte is written unless the descriptor fails (EPIPE, EBADF, any other ``OSError`` ends
+    the loop silently)."""
     view = memoryview(text.encode(ENCODING, "replace"))
-    end = time.monotonic() + (WRITE_WAIT_SECONDS if bound is None else bound)
+    unbounded = complete and bound is None
+    end = None if unbounded else time.monotonic() + (WRITE_WAIT_SECONDS if bound is None else bound)
     try:
         while view:
             if _writable_before(fd, end):
@@ -798,9 +808,12 @@ def _write_fd(fd: int, text: str, bound: float | None = None) -> None:
                 return
             try:
                 view = view[os.write(fd, chunk) :]
-                if bound is None:  # the budget is per stall: progress restarts it
+                if bound is None and not unbounded:  # per stall: progress restarts the budget
                     end = time.monotonic() + WRITE_WAIT_SECONDS
             except BlockingIOError:
+                if end is None:
+                    select.select([], [fd], [])
+                    continue
                 remaining = end - time.monotonic()
                 if remaining <= 0:
                     return
@@ -1014,8 +1027,8 @@ class RealGateway:
                 pass
         os._exit(code)
 
-    def write_out(self, text: str, *, bound: float | None = None) -> None:
-        _write_fd(1, text, bound)
+    def write_out(self, text: str, *, bound: float | None = None, complete: bool = False) -> None:
+        _write_fd(1, text, bound, complete=complete)
 
     def write_err(self, text: str, *, bound: float | None = None) -> None:
         _write_fd(2, text, bound)

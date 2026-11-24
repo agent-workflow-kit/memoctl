@@ -3,7 +3,7 @@ line here and nothing else, so sibling branches conflict on one line at most."""
 
 from __future__ import annotations
 
-from memoctl import cmd_add, cmd_list, cmd_search, cmd_show, cmd_validate
+from memoctl import cmd_add, cmd_context, cmd_list, cmd_search, cmd_show, cmd_validate
 from memoctl.cli_args import Command
 
 COMMANDS: tuple[Command, ...] = (
@@ -12,7 +12,7 @@ COMMANDS: tuple[Command, ...] = (
     cmd_show.COMMAND,
     cmd_search.COMMAND,
     cmd_validate.COMMAND,
-    # todo(#27): context
+    cmd_context.COMMAND,
     # todo(#30): delete
     # todo(#31): prune
     # todo(#33): cron
