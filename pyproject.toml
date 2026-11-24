@@ -51,6 +51,7 @@ testpaths = ["tests"]
 markers = [
     "live: needs real models/hosts/credentials; never run in CI",
     "real_passwd: may read the real home from the password database (tests/conftest.py guard)",
+    "process: runs real memoctl child processes under concurrency; part of `make verify`",
     "perf: heavy flood and performance fixtures; opt in with `make perf`, never run by `make verify` or CI",
 ]
 addopts = "-m 'not live and not perf'"

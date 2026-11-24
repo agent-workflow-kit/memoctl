@@ -241,7 +241,7 @@ class FakeGateway:
 
     def pause(self, seconds: float) -> None:
         self.pauses.append(seconds)
-        self.mono += seconds
+        self.advance_mono(seconds)
 
     def alarm_arm(self, seconds: float, on_alarm: Callable[[], None]) -> FakeAlarm:
         if not 0 < seconds <= 3600:

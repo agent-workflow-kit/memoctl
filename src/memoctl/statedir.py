@@ -52,7 +52,8 @@ FORBIDDEN_BITS = 0o077
 ATTEMPTS = 3  # a rival may create or remove a level between our open and our mkdir
 # A creator makes a level with ``mkdir`` (the umask applies) and sets 0700 right after, so for a
 # moment the level has less than 0700. Another process that sees it waits for the creator,
-# for at most SETTLE_TRIES * SETTLE_PAUSE (0.3 s); a level that stays so is then handled as before.
+# for at most SETTLE_TRIES * SETTLE_PAUSE (0.3 s) in all per command (one shared budget); a level
+# that stays so is then handled as before.
 SETTLE_TRIES = 30
 SETTLE_PAUSE = 0.01
 
@@ -191,55 +192,75 @@ def _open_final(cur: DirHandle, name: str, uid: int) -> DirHandle | None:
         raise
 
 
-def _wait_for_creator(gateway: Gateway, cur: DirHandle, name: str, uid: int) -> None:
-    """Wait while ``name`` looks like a level whose creator has not yet set its mode: a directory
-    of the user, no group or other permission, and less than 0700 (what ``mkdir`` leaves under
-    a umask such as 0277 or 0777). The wait is bounded; nothing is changed or fixed here."""
-    for _ in range(SETTLE_TRIES):
+class _Settle:
+    """The pauses left for one ``open_state_dir`` call, shared by every level and both waits, so
+    the whole command waits at most SETTLE_TRIES * SETTLE_PAUSE."""
+
+    def __init__(self) -> None:
+        self.left = SETTLE_TRIES
+
+
+def _unsettled(kind: str, owner: int, mode: int, uid: int, create: bool) -> bool:
+    """A directory of the user, no group or other permission, and below what the command needs:
+    for ``create`` less than 0700 (a creator has not yet set its mode, as under a umask such as
+    0277 or 0777), for a read without owner read and search (unusable as it is). A level that
+    is usable already, or that is not the user's or has other bits, is not waited for."""
+    if kind != "dir" or owner != uid or mode & FORBIDDEN_BITS:
+        return False
+    need = DIR_MODE if create else OWNER_USE
+    return mode & need != need
+
+
+def _wait_for_creator(
+    gateway: Gateway, cur: DirHandle, name: str, uid: int, settle: _Settle, *, create: bool
+) -> None:
+    """Wait while ``name`` looks like a level whose creator has not yet set its mode (see
+    :func:`_unsettled`). The wait is bounded by the shared budget; nothing is changed or
+    fixed here and nothing is accepted because of it."""
+    while settle.left > 0:
         info = cur.lstat(name)
-        if (
-            info is None
-            or info.kind != "dir"
-            or info.uid != uid
-            or info.mode & FORBIDDEN_BITS
-            or info.mode & DIR_MODE == DIR_MODE
-        ):
+        if info is None or not _unsettled(info.kind, info.uid, info.mode, uid, create):
             return
+        settle.left -= 1
         gateway.pause(SETTLE_PAUSE)
 
 
-def _wait_for_creator_of(gateway: Gateway, handle: DirHandle, uid: int) -> None:
-    """:func:`_wait_for_creator` for a level already open (a 0500 level opens, but nothing can be
-    made in it until its creator has set 0700)."""
-    for _ in range(SETTLE_TRIES):
+def _wait_for_creator_of(gateway: Gateway, handle: DirHandle, uid: int, settle: _Settle) -> None:
+    """:func:`_wait_for_creator` for a level already open, on its descriptor, for ``create``
+    only (a 0500 level opens, but nothing can be made in it until its creator has set 0700)."""
+    while settle.left > 0:
         info = handle.stat()
-        if (
-            info.kind != "dir"
-            or info.uid != uid
-            or info.mode & FORBIDDEN_BITS
-            or info.mode & DIR_MODE == DIR_MODE
-        ):
+        if not _unsettled(info.kind, info.uid, info.mode, uid, True):
             return
+        settle.left -= 1
         gateway.pause(SETTLE_PAUSE)
 
 
 def _descend(
-    gateway: Gateway, cur: DirHandle, name: str, *, final: bool, create: bool, uid: int
+    gateway: Gateway,
+    cur: DirHandle,
+    name: str,
+    *,
+    final: bool,
+    create: bool,
+    uid: int,
+    settle: _Settle,
 ) -> DirHandle | None:
     """Open ``name`` under ``cur`` (a parent follows a symlink, the final component does not);
     with ``create`` make it at 0700 when missing. ``None`` only when it is missing and not
     creating. Errors from making it propagate unchanged."""
     for _ in range(ATTEMPTS):
-        _wait_for_creator(gateway, cur, name, uid)
+        _wait_for_creator(gateway, cur, name, uid, settle, create=create)
         try:
             nxt = _open_final(cur, name, uid) if final else cur.open_dir(name, follow=True)
         except (PermissionError, UnsafeStateError):
             # The creator may have made the level just after the wait above looked: wait for it
             # again and try once more; a level that is really unusable fails the same way.
-            _wait_for_creator(gateway, cur, name, uid)
+            _wait_for_creator(gateway, cur, name, uid, settle, create=create)
             nxt = _open_final(cur, name, uid) if final else cur.open_dir(name, follow=True)
         if nxt is not None:
-            _wait_for_creator_of(gateway, nxt, uid)
+            if create:
+                _wait_for_creator_of(gateway, nxt, uid, settle)
             return nxt
         if not create:
             return None
@@ -286,18 +307,23 @@ def _open_state_dir(gateway: Gateway, *, create: bool) -> StateDir | None:
         raise ConfigError("home")
     cur = root
     uid = gateway.uid()
+    settle = _Settle()
     opened = False
     try:
         for name in STATE_PARTS[:-1]:
             try:
-                nxt = _descend(gateway, cur, name, final=False, create=create, uid=uid)
+                nxt = _descend(
+                    gateway, cur, name, final=False, create=create, uid=uid, settle=settle
+                )
             except NotADirectoryError as exc:
                 raise UnsafeStateError("parent") from exc
             if nxt is None:
                 return None
             cur.close()
             cur = nxt
-        nxt = _descend(gateway, cur, STATE_PARTS[-1], final=True, create=create, uid=uid)
+        nxt = _descend(
+            gateway, cur, STATE_PARTS[-1], final=True, create=create, uid=uid, settle=settle
+        )
         if nxt is None:
             return None
         cur.close()

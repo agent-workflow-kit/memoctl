@@ -5,6 +5,9 @@ Private home throughout (the password entry is replaced in the child, see
 Every child is a ``Popen`` handle started and reaped here; a child still running at the end is
 stopped through its own handle only. Process counts stay small (at most 12) and nothing loops.
 
+Marked ``process`` (real child processes). The store-wide rate limit
+(``adds_per_window_total``) is covered here too, by the same invariant as the per-repo one.
+
 Already covered elsewhere (not repeated here): two same-body adds and two supersedes of one
 target (``test_cmd_add_supersede.py``), two racers for the last slot
 (``test_cmd_add_limits.py``), twelve-process log appends and rotation, a stuck log lock holder
@@ -34,6 +37,8 @@ from tests.child_env import child_path
 REPO = "example.com/team/app"
 WRAPPER = Path(__file__).with_name("add_child_wrapper.py")
 RESULT_TIMEOUT = 120
+
+pytestmark = pytest.mark.process
 
 
 @pytest.fixture
@@ -170,13 +175,15 @@ def test_eight_first_time_processes_create_the_state_directory_under_any_umask(
 ) -> None:
     """The hostile umasks leave a just-made level without its owner bits until the creator sets
     0700; a rival must wait for that, not fail with a raw ``PermissionError`` or an
-    ``unsafe_state`` refusal."""
+    ``unsafe_state`` refusal. Every creator sleeps 40 ms between ``mkdir`` and ``chmod``
+    (``ADDTEST_CHMOD_DELAY_MS``), so the window is wide and a rival sees it reliably. The
+    deterministic proof of the wait is in ``test_statedir.py``; this is the process-level check."""
     sync = sync_dir(home)
     with Procs() as procs:
         for _ in range(8):
             procs.start(
                 home=home, ADDTEST_SYNC=str(sync), ADDTEST_STATEDIR_ONLY="1",
-                ADDTEST_UMASK=format(umask, "o"),
+                ADDTEST_UMASK=format(umask, "o"), ADDTEST_CHMOD_DELAY_MS="40",
             )  # fmt: skip
         procs.release(sync)
         results = procs.results()
@@ -347,9 +354,42 @@ def test_a_store_at_exactly_total_refuses_every_racer_and_changes_nothing(home: 
     assert_intact(home)
 
 
-def test_racers_overshoot_the_rate_limit_by_at_most_the_writer_count(home: Path) -> None:
-    # The limit can be exceeded only when the writers' clock reads straddle a second (rows dated
-    # after a writer's own now are not counted: interface.md, Residual risks, Clock).
+def assert_rate_rows_respect(
+    home: Path, limit: int, *, per_repo: bool, window: int = 600, writers: int = 8
+) -> int:
+    """The real invariant, from the ``rate`` rows in commit order (rowid): a row was admitted
+    only if fewer than ``limit`` earlier rows (of its repo when ``per_repo``) lay in the window
+    ending at its own ``at`` (rows dated after it are not counted, as ``count_rate`` does). With
+    every ``at`` equal nothing can straddle a second, so exactly ``limit`` rows exist; otherwise
+    (the documented straddle, Residual risks, Clock) between ``limit`` and ``limit + writers``.
+    Returns the number of rows."""
+    rows = db(home, "SELECT repo, at FROM rate ORDER BY rowid")
+    for k, (repo, at) in enumerate(rows):
+        counted = [
+            1
+            for other_repo, other_at in rows[:k]
+            if (not per_repo or other_repo == repo) and at - window < other_at <= at
+        ]
+        assert len(counted) < limit, f"row {k} was admitted with {len(counted)} counted before it"
+    if len({at for _, at in rows}) == 1:
+        assert len(rows) == limit
+    else:
+        assert limit <= len(rows) <= limit + writers
+    return len(rows)
+
+
+def check_rate_results(results: list[tuple[int, bytes, bytes]], limit: int, scope: str) -> int:
+    ok = sum(1 for code, _, _ in results if code == 0)
+    errors = refusals(results)
+    assert len(errors) == len(results) - ok
+    for error in errors:
+        assert (error["reason"], error["retryable"]) == ("rate_limited", True)
+        assert error["details"]["retry_after_s"] >= 1
+        assert (error["details"]["limit"], error["details"]["scope"]) == (limit, scope)
+    return ok
+
+
+def test_racers_never_exceed_the_per_repo_rate_limit(home: Path) -> None:
     write_config(home, "limits:\n  adds_per_window: 3\n  live_per_repo: 50\n  total: 50\n")
     sync = sync_dir(home)
     with Procs() as procs:
@@ -357,15 +397,29 @@ def test_racers_overshoot_the_rate_limit_by_at_most_the_writer_count(home: Path)
             procs.start(*add_args(), home=home, body=f"r {i}\n", ADDTEST_SYNC=str(sync))
         procs.release(sync)
         results = procs.results()
-    ok = sum(1 for code, _, _ in results if code == 0)
-    assert 3 <= ok <= 3 + 8
-    errors = refusals(results)
-    assert len(errors) == 8 - ok
-    for error in errors:
-        assert (error["reason"], error["retryable"]) == ("rate_limited", True)
-        assert error["details"]["retry_after_s"] >= 1 and error["details"]["limit"] == 3
+    ok = check_rate_results(results, 3, "repo")
+    assert assert_rate_rows_respect(home, 3, per_repo=True) == ok
     assert db(home, "SELECT count(*) FROM notes") == [(ok,)]
-    assert db(home, "SELECT count(*) FROM rate") == [(ok,)]
+
+
+def test_racers_never_exceed_the_store_wide_rate_limit(home: Path) -> None:
+    write_config(
+        home,
+        "limits:\n  adds_per_window: 3\n  adds_per_window_total: 3\n"
+        "  live_per_repo: 50\n  total: 50\n",
+    )
+    sync = sync_dir(home)
+    with Procs() as procs:
+        for i in range(8):  # each in its own repo, so only the store-wide rate can refuse
+            procs.start(
+                *add_args(repo=f"example.com/team/r{i}"), home=home, body=f"r {i}\n",
+                ADDTEST_SYNC=str(sync),
+            )  # fmt: skip
+        procs.release(sync)
+        results = procs.results()
+    ok = check_rate_results(results, 3, "store")
+    assert assert_rate_rows_respect(home, 3, per_repo=False) == ok
+    assert db(home, "SELECT count(*) FROM notes") == [(ok,)]
 
 
 # -- a writer holding the lock, and a writer killed ------------------------------------------------
@@ -434,6 +488,8 @@ def test_a_superseding_add_killed_after_the_commit_is_retried_to_the_same_id(hom
 
 
 def test_adds_racing_a_log_rotation_keep_every_record(home: Path) -> None:
+    """A smoke test: the writers may or may not overlap at the rotation. The deterministic proof
+    is the barrier test below."""
     seed(home)
     log = state(home) / LOG_NAME
     first = log.read_bytes()
@@ -454,3 +510,30 @@ def test_adds_racing_a_log_rotation_keep_every_record(home: Path) -> None:
     assert ids == list(range(1, 10))  # every record once, in the log or its one rotation
     assert stat.S_IMODE(log.stat().st_mode) == 0o600
     assert db(home, "SELECT count(*) FROM notes") == [(9,)]
+
+
+def test_two_writers_that_both_decided_to_rotate_lose_no_record(home: Path) -> None:
+    """Both writers see the log at the cap and decide to rotate; ``ADDTEST_ROTATE_BARRIER`` holds
+    each until the other has decided too, before either takes the lock. The first rotates; the
+    second must find the log small again under the lock (the size re-check) and not rename the
+    fresh log over the one rotation, which would lose the seed record and the first writer's."""
+    seed(home)
+    log = state(home) / LOG_NAME
+    first = log.read_bytes()
+    with log.open("wb") as f:
+        f.write(first)
+        f.truncate(ROTATE_BYTES)
+    log.chmod(0o600)
+    barrier = home.parent / "rotate"
+    barrier.mkdir()
+    with Procs() as procs:
+        for i in range(2):
+            procs.start(
+                *add_args(), home=home, body=f"note {i}\n",
+                ADDTEST_ROTATE_BARRIER=str(barrier), ADDTEST_ROTATE_COUNT="2",
+            )  # fmt: skip
+        results = procs.results()
+    assert [(code, err) for code, _, err in results] == [(0, b"")] * 2
+    assert len(os.listdir(barrier)) == 2  # both reached the rotation decision
+    assert (state(home) / ROTATED_NAME).stat().st_size >= ROTATE_BYTES
+    assert sorted(r["note_id"] for r in log_lines(home)) == [1, 2, 3]
