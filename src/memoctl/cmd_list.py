@@ -28,7 +28,7 @@ _LIMIT = re.compile(r"[1-9][0-9]{0,2}")
 HIDDEN_LINE = "{} superseded or expired notes hidden; use --all\n"
 
 
-def _grammar(field: str) -> Callable[[str], str]:
+def grammar_arg(field: str) -> Callable[[str], str]:
     def convert(text: str) -> str:
         if not matches(field, text):
             raise GrammarError(field)
@@ -37,16 +37,16 @@ def _grammar(field: str) -> Callable[[str], str]:
     return convert
 
 
-def _limit(text: str) -> int:
+def limit_arg(text: str) -> int:
     if _LIMIT.fullmatch(text) is None or int(text) > MAX_LIMIT:
         raise GrammarError("limit")
     return int(text)
 
 
 def configure(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--repo", type=_grammar("repo"), default=None, help="only this repo id")
-    parser.add_argument("--topic", type=_grammar("topic"), default=None, help="only this topic")
-    parser.add_argument("--kind", type=_grammar("kind"), default=None, help="only this kind")
+    parser.add_argument("--repo", type=grammar_arg("repo"), default=None, help="only this repo id")
+    parser.add_argument("--topic", type=grammar_arg("topic"), default=None, help="only this topic")
+    parser.add_argument("--kind", type=grammar_arg("kind"), default=None, help="only this kind")
     parser.add_argument(
         "--label",
         type=parse_label,
@@ -56,7 +56,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--all", action="store_true", help="include superseded and expired notes")
     parser.add_argument(
-        "--limit", type=_limit, default=DEFAULT_LIMIT, help="at most this many notes (1 to 500)"
+        "--limit", type=limit_arg, default=DEFAULT_LIMIT, help="at most this many notes (1 to 500)"
     )
 
 
@@ -81,17 +81,23 @@ def run(args: argparse.Namespace, gateway: Gateway) -> int:
         with store:
             result = scan(store, filters, now)
     deadline.current().disarm()
-    document = result.document()
+    print_result(args, gateway, result)
+    return 0
+
+
+def print_result(args: argparse.Namespace, gateway: Gateway, result: ListResult) -> None:
+    """The output of ``list`` and ``search``: one compact JSON line, or the rendered lines.
+    ``--quiet`` drops the status lines on stderr, never the data."""
     if args.json:
+        document = result.document()
         gateway.write_out(json.dumps(document, ensure_ascii=True, separators=(",", ":")) + "\n")
         if result.hidden > 0 and not args.quiet:
             gateway.write_err(HIDDEN_LINE.format(result.hidden))
-        return 0
+        return
     rendered = format_list(result.notes, result.total, len(result.notes), result.hidden)
     if args.quiet:
         rendered = Rendered(rendered.out, "", rendered.warnings)
     emit(gateway, rendered)
-    return 0
 
 
 COMMAND = Command("list", "list notes, newest first", run, configure)

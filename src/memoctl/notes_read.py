@@ -16,7 +16,7 @@ Every SQL fragment here is a literal; every value is a bound parameter.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from typing import Any, LiteralString
 
@@ -203,16 +203,25 @@ def _finish(
     return replace(row, labels=tuple(labels))
 
 
-def scan(store: Store, filters: Filters, now: int) -> ListResult:
+def scan(
+    store: Store,
+    filters: Filters,
+    now: int,
+    accept: Callable[[NoteRow], bool] | None = None,
+) -> ListResult:
     """The ``list`` result: ``total`` counts the matching notes that pass the status filter,
     ``hidden`` those that match every other filter and are superseded or expired (0 with
-    ``--all``), and at most ``filters.limit`` summaries, newest first, are kept."""
+    ``--all``), and at most ``filters.limit`` summaries, newest first, are kept. ``accept`` (the
+    ``search`` text match) is one more filter, applied to each checked row before the status
+    filter, so ``hidden`` counts only notes it accepts."""
     wanted = filters.labels
     notes: list[dict[str, Any]] = []
     total = hidden = 0
     with store.read():
         for row in _checked_notes(store, filters):
             if row is None or (wanted and not wanted <= set(row.labels)):
+                continue
+            if accept is not None and not accept(row):
                 continue
             status = note_status(row, now)
             if status != LIVE and not filters.include_all:

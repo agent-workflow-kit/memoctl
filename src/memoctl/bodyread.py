@@ -27,6 +27,15 @@ _MESSAGES = {
     "unreadable": "the body source cannot be read",
 }
 
+# The same reasons for the search text (field ``text``), so it is never called a body.
+_TEXT_MESSAGES = {
+    "too_long": "the search text is over the size limit",
+    "symlink": "the search text file is a symbolic link",
+    "not_regular": "the search text source is not a regular file",
+    "terminal": "standard input is a terminal",
+    "unreadable": "the search text source cannot be read",
+}
+
 
 class BodyError(Exception):
     """The body source was refused. ``reason`` is one of ``REASONS``."""
@@ -36,9 +45,10 @@ class BodyError(Exception):
     def __init__(self, reason: str, limit: int, field: str = "body") -> None:
         if reason not in _MESSAGES:
             raise ValueError(f"unknown body error reason {reason!r}")
-        super().__init__(_MESSAGES[reason])
+        message = _TEXT_MESSAGES[reason] if field == "text" else _MESSAGES[reason]
+        super().__init__(message)
         self.reason = reason
-        self.message = _MESSAGES[reason]
+        self.message = message
         self.limit = limit
         self.field = field
 

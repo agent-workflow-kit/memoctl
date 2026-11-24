@@ -49,6 +49,7 @@ __all__ = [
     "BodyTextError",
     "check_text",
     "classify",
+    "has_long_combining_run",
     "validate_body",
 ]
 
@@ -186,6 +187,15 @@ def _check_combining(text: str, field: str) -> None:
                     raise BodyTextError("combining", field=field, line=line)
             else:
                 run = 0
+
+
+def has_long_combining_run(text: str) -> bool:
+    """Whether ``text`` holds a run over :data:`MAX_COMBINING_RUN` marks (item 4), linear."""
+    try:
+        _check_combining(text, "text")
+    except BodyTextError:
+        return True
+    return False
 
 
 def check_text(data: bytes, *, field: str = "text") -> str:
